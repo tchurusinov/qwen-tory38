@@ -93,8 +93,9 @@ bench scenario, not a feature). (5) No fine-tuning / training.
 (6) No replacement of the senior-git-1.0 or existing Hermes workflows —
 the skill sits alongside them.
 
-**Existing-stack contract (S6.4).** :30001 (`qwen38-sglang` container,
-systemd-managed, image `qwen38-dflash2:v1.2.3`) is the main-agent engine.
+**Existing-stack contract (locked; install-time rules in S6.4).** :30001
+(`qwen38-sglang` container, systemd-managed, image `qwen38-dflash2:v1.2.3`)
+is the main-agent engine.
 This project: reads its endpoint from `harness.yaml` (default
 `http://localhost:30001`), never restarts/rebuilds it, and treats a
 dead :30001 as external failure (harness exit 82), not its own.
@@ -333,8 +334,9 @@ log `WARN_VRAM_SHORTFALL`, proceed with N'. If N' == 0: main-only mode
 
 ### 2.4 N=0 / main-only mode (locked)
 
-**Entry: the S2.3 budget check only.** When the S2.3 formula yields
-N' = 0 at the PQ2_0 budget, install retries once with the PTQ1_0
+**Entry: the S2.3 budget check, after this section's PTQ1_0 retry.**
+When the S2.3 formula yields N' = 0 at the PQ2_0 budget, install
+retries once with the PTQ1_0
 fallback (S1.1, ~18% smaller): recompute S1.4 with its footprint
 (5.95 GB weights + the unchanged 3.7 GB KV at the same ctx/slots →
 9.65 GB footprint; +5% margin → ~10.2 GB budget) and
@@ -463,7 +465,7 @@ Exit codes (locked, complete set):
 |---|---|---|
 | 0 | success / queued | proceed; poll `status` or `collect` with deadline |
 | 2 | malformed args / bad config | fix the call (human-readable detail on stderr) |
-| 3 | port conflict (instance-level) | check `status`; usually self-heals after restart |
+| 3 | port conflict (instance-level) | check `status`; if the instance is still `bdown`, wait one health cycle (30 s) and re-spawn (S4.5); the manager clears the collision on the instance restart (S1.3) |
 | 4 | engine-level failure (OOM/download/hash) | check `status`; if instance `bfailed` → requeue on another or run on main |
 | 5 | ctx too long for the request | split task or reduce context |
 | 8 | deadline expired, task still running | `cancel` + re-spawn smaller, or run on main |
@@ -481,7 +483,9 @@ it.
 
 Per-command exit mapping (the table above + these; closed set unchanged):
 - `spawn`: 0 = accepted/queued (the task's later terminal state is
-  observed by `collect`); 2 = malformed args; 3/4/5/80/82/84 = stack
+  observed by `collect`); 2 = malformed args; 3 = the routing candidate
+  is in `ERR_PORT_IN_USE` at submission time (the manager is mid-clear;
+  check `status`, wait 30 s, re-spawn — S4.5); 4/5/80/82/84 = stack
   conditions at submission time; **8 = the task is still in the queue
   when `queue_wait_max_s` expires** (S3.3: the task never got a slot, so
   it is not the task's own deadline).
@@ -536,7 +540,9 @@ state" locked).
 `bonsai2-bench` is a thin wrapper over the S5 runner: it reads
 `bench.yaml`, picks the scenario, runs it against the live stack, writes
 `/run/bonsai2/bench/<timestamp>_<scenario>.json` + prints the one-line
-summary on stdout. `--quick` = S5.5's 3-scenario smoke. GPU-exclusivity:
+summary on stdout. Exit code = the runner's (S5.4): 0 even on
+scenario-level failure (the verdict is data, S5.2), 2 = bench config
+invalid. `--quick` = S5.5's 3-scenario smoke. GPU-exclusivity:
 the runner takes the `BONSAI2_BENCH_LOCK` flock so a bench never runs
 while another bench is active; it may run alongside normal subagent
 traffic (bench traffic is marked `user: "bench"` in instance logs and
@@ -583,8 +589,10 @@ main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
 2. Mid-task engine kill (kill -9 on a live instance) → task recovered
    via retry or requeue; main agent's only observed commands are from S3.2.
 3. All 12 exit codes of the S3.2 closed set exercised by the hermetic
-   suite; no code outside the closed set ever emitted (the suite asserts
-   the closed set; a stray exit 1 or any other code fails it).
+   suite — the S3.7 mock-engine surface (spawn/steer/cancel/collect/
+   status) covers every code; `bonsai2-bench` exercises the 0/2 subset
+   per S5.4; no code outside the closed set ever emitted (the suite
+   asserts the closed set; a stray exit 1 or any other code fails it).
 4. N=0 mode: every subagent command → exit 80 with the S2.4 JSON.
 
 ---
@@ -597,8 +605,8 @@ A skill named `bonsai2-harness` (Hermes skill dir, loaded on demand):
 - **When to use:** any session where the main agent (this box's qwen3.8
   via :30001, or any agent pointed at `harness.yaml`) may offload work.
 - **Commands:** exactly S3.2 (the skill never invents commands).
-- **Doctrine:** S4.2–S4.5 below; every claim cites a S5 bench row id
-  (e.g. `[B-07]`) — a doctrine number without a bench citation is a
+- **Doctrine:** S4.2–S4.5 below; every claim cites a S5.2 scenario row id
+  (e.g. `[M7]`) — a doctrine number without a bench citation is a
   review defect.
 
 ### 4.2 Work-allocation table (v1 doctrine — recalibrated by S5, locked
@@ -607,11 +615,11 @@ as the starting point per C-02/C-04)
 | task shape | allocation | why (bench-cited at activation) |
 |---|---|---|
 | Multi-step plan / architecture / cross-file refactor coherence | **main** | long-horizon + long-context + tool-chain coherence; subagent lacks the horizon |
-| Single-file code-gen chunk (new function / test file / boilerplate) | **subagent** | bounded, self-contained, verify-by-compile [B-01] |
-| Per-file / per-section analysis (review notes, doc summaries, data transforms) | **fan-out N** | independent units, embarrassingly parallel; N = min(files, instances×slots) [B-03] |
+| Single-file code-gen chunk (new function / test file / boilerplate) | **subagent** | bounded, self-contained, verify-by-compile [M1] |
+| Per-file / per-section analysis (review notes, doc summaries, data transforms) | **fan-out N** | independent units, embarrassingly parallel; N = min(files, instances×slots) [M3] |
 | Diff review of a PR-sized diff | **subagent draft → main verifies** | mirrors senior-git-1.0 reviewer/builder split; draft is a self-report (S4.2 rule) |
-| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | 262K ctx on main is free (already loaded); a subagent at the 8k ctx default loses the tail — M5 measures the 64k-ctx subagent cost, which is why the default allocation stays on main [B-05] |
-| Test execution / lint / build-check | **subagent** | mechanical, parallelizable, output is a report not a decision [B-02] |
+| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | 262K ctx on main is free (already loaded); a subagent at the 8k ctx default loses the tail — M5 measures the 64k-ctx subagent cost, which is why the default allocation stays on main [M5] |
+| Test execution / lint / build-check | **subagent** | mechanical, parallelizable, output is a report not a decision [M2] |
 | Draft writing (docs, summaries, commit messages at scale) | **subagent** | quality bar is lower-verification; main edits the draft |
 | Anything requiring live tool feedback loops (iterative debugging, interactive exploration) | **main** | feedback latency; subagent is fire-and-collect, no mid-task steering value here |
 | Verification of a subagent's claimed success (file exists? test passed? diff applies?) | **main, always** | self-report rule (4.2); never trust on the word |
@@ -687,8 +695,9 @@ quality becomes apparent from task success")
 ### 4.6 Testing
 
 - **Doctrine-vs-reality audit:** run the S5 matrix; for each S4.2 row,
-  assert the bench row it cites actually supports the allocation (the
-  audit is a script: `bench.yaml` rows ↔ S4.2 table, citation check +
+  assert the S5.2 scenario row it cites (the `[M#]` id) actually supports
+  the allocation (the audit is a script: `bench.yaml` scenario rows ↔
+  S4.2 table, citation check +
   win/lose recompute → a `doctrine-audit.json`; a failing audit blocks
   the skill PR).
 - **Fresh-session test:** a new main-agent session (fresh pi/Hermes
@@ -698,7 +707,8 @@ quality becomes apparent from task success")
 
 ### 4.7 Acceptance (runnable)
 
-1. Doctrine audit passes: every S4.2 row cites an existing S5 row; the
+1. Doctrine audit passes: every S4.2 row cites an existing S5.2 scenario
+   (an M-id that is in `bench.yaml`); the
    win/lose recompute matches the table (or the table is updated in the
    same PR).
 2. Fresh-session standard workload: complete, all results verified per
@@ -865,7 +875,7 @@ supported matrix)
 | NVIDIA driver ≥ 580 | 580.126.09 ✓ | `nvidia-smi` parses, version ≥ 580 |
 | nvidia-container-toolkit | ✓ (main stack uses it) | presence check only (build stage) |
 | docker (build stage only) | 27.5.1 ✓ | `docker version` |
-| unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB). Below 96 GiB is outside the supported matrix: N is still computed by S1.4/S2.3 (a ~96 GiB box with the 46.9 GB main stack computes N = 3 at PQ2_0); only below ~70 GiB does N come out 0 → main-only mode (S2.4) |
+| unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB). **Warn, not fail:** at/above 96 GiB the install proceeds normally; below 96 GiB it logs `WARN_MEMORY_BELOW_MATRIX` and still computes N via S1.4/S2.3 (a ~96 GiB box with the 46.9 GB main stack computes N = 3 at PQ2_0); only below ~70 GiB does N come out 0 → main-only mode (S2.4), still exit 0 |
 | python 3.12 (bench runner) | 3.12.3 ✓ | `python3 --version` ≥ 3.10 |
 | free disk ≥ 20 GB | ~100 GB ✓ | `df /opt` ≥ 20 GB — a floor, not an expectation: a clean install writes ~8 GB (model + binary + configs), the build stage peaks higher; ~100 GB free is normal on a fresh GB10 |
 
@@ -875,8 +885,10 @@ supported matrix)
 sudo ./install.sh          # idempotent; see S6.4
 ```
 
-Steps: (1) prereq checks (S6.2 table, any fail → named ERR, exit ≠ 0,
-nothing installed). (2) build/extract binary to `/opt/bonsai2/bin` (skip
+Steps: (1) prereq checks (S6.2 table; a **hard-fail** row → named ERR,
+exit ≠ 0, nothing installed. Rows marked "warn" in S6.2 — currently the
+unified-memory row — proceed with a logged warning and are not a
+failure). (2) build/extract binary to `/opt/bonsai2/bin` (skip
 if present + version matches the pin — idempotency). (3) download model
 (S1.1, skip if SHA matches). (4) detect main-stack footprint live
 (`docker stats qwen38-sglang`; probe fails → main stack dead, fall back
@@ -941,13 +953,18 @@ aarch64 build)
 
 - **Clean-box test:** this box, scratch namespace (`/opt/bonsai2-<ts>`):
   full S6.3 flow, then the S2.8 + S3.8 acceptances end-to-end, then
-  reinstall-over (S6.4 idempotency: second run touches nothing, reports
-  "unchanged").
+  reinstall-over. This exercises S6.4's no-change branch specifically:
+  the second run on the same box with no drift must report "unchanged"
+  (zero restarts, zero downloads, no YAML rewrite). The drift branch
+  (S6.4 step 4: N changed or footprint drifted > 5 GB → regenerate YAMLs)
+  is the separate S6.7 drift test below.
 - **Drift test:** main-stack footprint +10 GB between two installs →
   N recomputes down, report says why.
-- **Prereq-fail tests:** each S6.2 row faked-failed (fake uname, fake
-  driver) → the named ERR, exit ≠ 0, nothing in `/opt/bonsai2` created
-  (atomic: check-all before touch-any).
+- **Prereq-fail tests:** each S6.2 **hard-fail** row faked-failed (fake
+  uname, fake driver, ...) → the named ERR, exit ≠ 0, nothing in
+  `/opt/bonsai2` created (atomic: check-all before touch-any). The one
+  warn row (unified memory) faked-low → `WARN_MEMORY_BELOW_MATRIX`,
+  exit 0, install continues (N recomputed per S1.4/S2.3).
 
 ### 6.8 Acceptance (runnable)
 
@@ -955,8 +972,9 @@ aarch64 build)
    checks pass, N auto-computed and correct per S1.4.
 2. Re-run → "unchanged" (zero restarts, zero downloads).
 3. Rollback to the previous state file → stack healthy at the previous N.
-4. All S6.2 prereq-fail cases emit their named ERR with exit ≠ 0 and a
-   clean filesystem.
+4. All S6.2 hard-fail prereq cases emit their named ERR with exit ≠ 0
+   and a clean filesystem; the warn row (unified memory) emits
+   `WARN_MEMORY_BELOW_MATRIX` and continues (exit 0).
 
 ---
 
