@@ -69,6 +69,15 @@ bench results (S5), not from vibes.
 example: `floor(62.7 / 11.5) = 5` instances, ~54.5 GB loaded (5 × 10.91),
 ~8 GB headroom. N=0 is a valid result (main-only mode; see S2.4).
 
+**Unit convention (locked):** the 121.6 total is `/proc/meminfo`
+(GiB); the main-stack ~46.9 and the 12.0 reserved are measured against
+the same unified pool and subtracted in the same effective units, giving
+the working budget `121.6 − 46.9 − 12.0 ≈ 62.7`. The residual GiB/GB
+difference between `/proc/meminfo` and the tool-reported footprints is
+inside the per-instance 5% margin (S1.4), so it does not change N on
+this box; on other boxes the install recomputes from live `nvidia-smi`/
+`/proc/meminfo` rather than this table.
+
 **Component inventory.** S1 bonsai2 serving engine (pinned fork, one
 process per instance). S2 lifecycle (systemd, health, budget, failover).
 S3 harness control scripts (the main-agent API). S4 harness skill
@@ -352,7 +361,7 @@ exit 4 — zero instances but not main-only mode.
   `bonsai2-sglang.service` (Wants=, not Requires=, so a dead main stack
   doesn't block bonsai — they're independent engines). Target: all healthy
   ≤ 180 s after `multi-user.target` (measured at install; T recorded in
-  `harness.yaml`).
+  `serving.yaml`).
 - VRAM drift (main stack grows over time): manager re-checks every 5 min;
   if an instance's `MemoryHigh` cgroup is thrashing (>30 s over
   high), it scales that instance's ctx down: the manager rewrites that
@@ -471,9 +480,11 @@ asserts exactly this set, so a stray exit 1 (or any other code) fails
 it.
 
 Per-command exit mapping (the table above + these; closed set unchanged):
-- `spawn`: 0 = queued (the task's later terminal state is observed by
-  `collect`); 2 = malformed args; 3/4/5/80/82/84 = stack conditions at
-  submission time.
+- `spawn`: 0 = accepted/queued (the task's later terminal state is
+  observed by `collect`); 2 = malformed args; 3/4/5/80/82/84 = stack
+  conditions at submission time; **8 = the task is still in the queue
+  when `queue_wait_max_s` expires** (S3.3: the task never got a slot, so
+  it is not the task's own deadline).
 - `steer` / `cancel`: 0 = operation accepted (`steer` on a non-terminal
   task; `cancel` on a running/queued task, signal sent, or an
   already-terminal no-op); 2 = TASK_ID unknown. `steer --wait SECS`:
@@ -481,6 +492,13 @@ Per-command exit mapping (the table above + these; closed set unchanged):
 - `collect`: 20/21/22 = the task's terminal state (done / failed /
   timeout); 0 = task non-terminal, current-state JSON returned (caller
   polls); 2 = TASK_ID unknown.
+
+Exit 8 vs 22 (both "deadline-related", different owners): **8** is a
+*manager-side wait budget* — the queue wait at `spawn` (S3.3) or the
+`steer --wait` window — where the task is still running or still queued.
+**22** is the *task's own* `--deadline` (S3.4) expiring mid-run, so the
+manager aborts it. A task that never started (queue) → 8; a task that
+started but ran past its deadline → 22.
 - `status` / `list-instances` / `health`: 0; 82/84 when the probed
   stack condition is bad.
 - `bench`: 0/2 per S5.4.
@@ -504,10 +522,14 @@ state" locked).
   lifetime. Steering does not move slots. Cancel frees the slot.
 - Deadline (per task, `--deadline`): manager enforces; on expiry the
   instance gets an abort, task → `timeout` (exit 22), slot freed.
-- Idempotency: `spawn` with the same `--out FILE` content-hash + same
-  prompt-hash within 24 h is a no-op returning the existing task_id
-  (dedup key in `/run/bonsai2/dedup/`). No double slot charge, no
-  re-download (S3.5).
+- Idempotency: `spawn` whose **dedup key** matches a live task within 24 h
+  is a no-op returning the existing task_id. The dedup key is the prompt
+  hash (of the `-p` file content or the `-i` inline text) plus the
+  `--tools`, `--ctx`, and `--priority` flags — everything that determines
+  what the task will do. `--out FILE` is **not** part of the key (it only
+  selects where the result file is written), so dedup is well-defined with
+  or without `--out`. Keys live in `/run/bonsai2/dedup/` with a 24 h TTL
+  (`dedup_ttl_h`). No double slot charge, no re-download (S3.5).
 
 ### 3.5 Bench runner wiring (S3.5)
 
@@ -532,7 +554,8 @@ queue_wait_max_s: 60
 instance_healthy_timeout_s: 30
 task_default_deadline_s: 600
 main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
-boot_target_s: 180
+# boot_target_s lives in serving.yaml (S2.6), not here: it is a
+# boot-lifecycle measurement owned by install/manager
 ```
 
 ### 3.7 Testing (hermetic-first)
@@ -625,13 +648,15 @@ quality becomes apparent from task success")
 
 - Per-task dispatch cost estimate (main-side, for the win/lose call):
   `dispatch_cost = prefill_tokens / t/s_prefill + output_tokens /
-  t/s_decode + verification_cost_main_s`, with v1 constants from the
+  t/s_decode + verification_cost_main_s` (verification is inside
+  dispatch_cost, not added twice), with v1 constants from the
   community GB10 bench: `t/s_decode ≈ 29`, `t/s_prefill ≈ 4800`
   (rebenched at S5 on this exact box; numbers here are the a-priori
   floor, not the final values).
-- **Win rule:** dispatch iff `dispatch_cost + verification_cost_main_s
-  < est_main_time_s(task)` AND the task matches a S4.2 row that is
-  bench-confirmed. Two consecutive bench-confirmed losses on a task
+- **Win rule:** dispatch iff `dispatch_cost < est_main_time_s(task)`
+  (est_main_time_s = the time the same task would take on main,
+  including main's own verification of the outcome) AND the task
+  matches a S4.2 row that is bench-confirmed. Two consecutive bench-confirmed losses on a task
   shape flip that row to main until re-benched (the doctrine is
   self-correcting, not opinion-locked).
 - **Instance cost:** an idle instance costs nothing (no license, no
@@ -715,11 +740,17 @@ date) recorded per run. The runner captures the snapshot via stdlib
 `docker stats --no-stream --format '{{.Name}} {{.MemUsage}}'` (main
 stack container, read-only, per S6.4), and a `MemTotal`/`MemAvailable`
 read of `/proc/meminfo`; results are stored as strings in the run
-row. Bench run JSONs rotate with the same 7-day window as the results
-(S3.1): the runner prunes `/run/bonsai2/bench/*.json` older than 7 days
-on each start, and additionally caps the bench dir at 1 GB (keep
-newest, delete oldest), so the global #5 disk budget (2 GB) covers
-them. Results dir: `/run/bonsai2/bench/` + committed
+row. Scenario ctx (the `ctx` column) is a runner-enforced token
+budget, not a server setting: the runner keeps each scenario's input
++ output within the column's tokens (prompt shaping + a completion
+cap), records actual tokens used in the row, and the engine serves at
+its boot ctx (S1.3 `--ctx-size`); a scenario that wants the full
+budget is a bench v2 item. Bench run JSONs rotate with the same 7-day
+window as the results (S3.1): the runner prunes
+`/run/bonsai2/bench/*.json` older than 7 days on each start, and
+additionally caps the bench dir at 1 GB (keep newest, delete oldest),
+so the global #5 disk budget (2 GB) covers them. Results dir:
+`/run/bonsai2/bench/` + committed
 summary `bench-results/<date>_<commit>.md` (the doctrine's citation
 source).
 
