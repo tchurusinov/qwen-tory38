@@ -1,0 +1,41 @@
+bonsai 2 27b based on the qwen38 just dropped:
+https://www.youtube.com/watch?v=975ILFNTKfk   - bonsai2 
+https://www.youtube.com/watch?v=jZ9Mdit5TdI   - qwen38 (this will be imortant when comparing capabilities)
+https://www.youtube.com/watch?v=1Fl94dPn2mU   - example of how to use and produce specs before any code has ever been written - sth we will have to do for this to implement successfully
+https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf
+https://huggingface.co/prism-ml
+
+
+sglang qwen nvfp4 loads at 70/120 gbsvram
+this means we have plenty, atleast 40gbs vram for bonsai subagents to make main qwen agents more productive
+
+i want sglangqwen (as is curr main config) + bonsai 2 server somehow (preliminary research needed on how to run server , from what i seen its similar to the sglang qwen, also in the urls i gave u its in gguf but preliminary analysis on what is the fastest and most effective way to run it on the blackwell gb10 - as in qwen38-27b is nvfp4 - in the case of bonsai what it is, is it gguf is it sth else, also what is the fastest engine to run it through , for qwen38nvfp4 sglang gives faster t/s than vllm, so this also matters)
+all tied down as a inference engine + skill the main agent uses to run and use subagents 
+
+there have been older attempts at this btu was with lmstudio ggufs + hermes delegation hermes skill, but this did not result in sth usable
+
+will have to decide how to load and serve it, how many diff instances to load and at what concurrency to run each instance (cuz sglang qwen runs very satisfactorily at even concurrency 2 through 4 loaded once in the sglang way, which is pretty cool)
+
+tech stack is the robustest possible :
+
+maybe sth like the bash scripts of the sglang repo and git skill for code review 
+
+and not 
+
+hermees skill that uses internal delegation, precision control of concurrency and managing diff loaded instances was hellisly impossible
+, 
+
+sth universal and scalable and can be installed on primarily dgx boxes with the gb10 and 120gbs vram with one command and have:
+- main agent optimised to run in fastest way the dense 27b qwen38
+- subagent/subagents dense 27b bonsai2 s - will determine however many can we load alongside main agent + accounting for contextes of both that grow with work
+- univeral harness skill for the main agent ot know how to use the subagents in the most effective way , accounting for the difference in intelligence in the main and subagent - MAIN IS DEFINITELY SMARTER , charted out so main agent gets the most done in his session - will habe to also do preliminary research on that - different subagent strategies overall and on the specified resources / similar systems  
+
+so maybe whole project would package a reusable and specialised for the gb10: 
+- a robust and reliable inference engine for the agent stack (sglang qwen we already have, usign nvfp4 ,  we also need for bonsai2 - need to understand for the gb10 what is the most optimised and fastest way to run this extremely new model and quant , and then have it as a server that loads at startup for however many instances we have the remaining vram - therefore have the ability to load more than one - will tune later to take up most optimal space ) - this will load models at startup independently of skill 
+- a universal skill that within a harness lets the main agent use his own session + subagent instances and session through modifiable bash scripts (as is in the senior-git-10 - there are those repo-specific+universal scripts that allow the main agent to spawn a code reviewer based on the diff and requirements so sth like that but for delegation - extensive bash scripts with flags and conditions allowing the main agent to use and shepherd the subagents in all the different ways - across instances and across concurrencies) - this skill to be albe to use up teh newly unlocked resources in the most optimal manner possible
+- some benching/testing framework to determine the most efficient / fastest / swarmiest / most t/s ways the main agnet can use the subagents - have all possible scenarios of usage identified and tested 
+- package it up all in a container or sth for dgx boxes specific container taht can be run on any gb10 system, firstly we will start with 1 and then will adapt to treat 1 as a batch of however many, but first to get it working for 1  ; also on this note i am happy to somehow reference and point to the sglang project as the main agent inference, since its working very well and gets consistently updated , idk how, like pin to a specific release or have it be pointed to uptodate, i really dont know here + the rest in terms of bonsaiinference and skill we will have to build ourselves
+
+**idea and inspiration for this is to end up with a robust and reliable main agent + subagents stack that is optimised and uses in the most efficient way the resources of a box with gb10 chip with those 2 models as main and subagent**
+not only cuz it will be extremely helpful to me to have the main agent use effectively subagents , btu i also think all the other people that have this box would benefit
+ 
