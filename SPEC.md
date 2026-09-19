@@ -286,9 +286,17 @@ a main-stack fix might need.
 - `bonsai2-llama-server@%i.service` (transient, started by the manager):
   `ExecStart=` the S1.3 command with `--port {port_base+i}`;
   `Restart=on-failure`, `RestartSec=5`, `StartLimitBurst=3` (then
-  `bfailed`), `CPUQuota=64%` (8 slots × 8 cores, per-instance share on a
-  20-core box — overridable), no `MemoryMax` (unified memory; cgroup v2
-  `MemoryHigh` = per_instance_budget_gb).
+  `bfailed`), `CPUQuota=64%` (a ceiling ≈ 12.8 of this 20-core box's
+  cores — a bound on one instance's worst-case hog, not a reserved
+  allocation; the N instances share the 20 cores by demand alongside
+  the main stack, overridable), no `MemoryMax` (unified memory; cgroup v2
+  `MemoryHigh` = per_instance_budget_gb). On this box's unified memory
+  (S0), the instance's weights + KV live in the same LPDDR5X pool as
+  the host: the unified-memory driver charges the instance's GPU
+  allocations to its cgroup, so `MemoryHigh` bounds the instance's total
+  unified-memory footprint. The S2.5 drift detector watches sustained
+  over-`MemoryHigh` pressure as a budget guard (an "over its share"
+  signal), not as an exact VRAM meter.
 - **No docker for bonsai in v1** (C-05 locked: "i prefer this way, and
   its more efficient, and less of a risk to have it outside of docker"):
   the image builds the binary (S1.2), the install extracts binary+model
@@ -341,10 +349,18 @@ exit 4 — zero instances but not main-only mode.
   `harness.yaml`).
 - VRAM drift (main stack grows over time): manager re-checks every 5 min;
   if an instance's `MemoryHigh` cgroup is thrashing (>30 s over
-  high), it scales that instance's ctx via reload (SIGUSR1 → S1.3
-  command with `--ctx-size` halved, recorded in health.json as
-  `ctx_reduced: true`). No instance is killed for drift — only context
-  shrinks. (Context-grow direction: never; v1 is conservative.)
+  high), it scales that instance's ctx down: the manager rewrites that
+  instance's `--ctx-size` to half (rounded down to a multiple of 8192,
+  floor 8192) and restarts that one process in place via its transient
+  unit (`systemctl restart bonsai2-llama-server@i`). This is a
+  *process*-level restart, not systemd re-plumbing: same unit name,
+  same port, same model file, and `systemctl restart` resets the unit's
+  start-limit counter so the drift handling itself cannot trip
+  `bfailed`. Recorded in health.json as `ctx_reduced: true` + the new
+  `ctx` value, and counted in that instance's restart budget (global #5).
+  No instance is ever *retired* for drift (no pool removal, no N
+  change) — only context shrinks. (Context-grow direction: never; v1 is
+  conservative.)
 
 ### 2.6 Configuration — `serving.yaml` (written by install.sh)
 
@@ -371,7 +387,8 @@ boot_target_s: 180              # measured, not guessed; updated by install test
 - N=0 test: override main footprint to 110 GB → install → assert
   main-only mode, harness exit 80s, exit 0 from install.
 - Drift test: cgroup-tune main container higher → assert ctx-reduce
-  event in health.json, no instance restarts.
+  event in health.json with the halved `ctx`, the instance healthy
+  again < 15 s, zero restarts on any *other* instance, N unchanged.
 
 ### 2.8 Acceptance (runnable)
 
@@ -380,7 +397,9 @@ boot_target_s: 180              # measured, not guessed; updated by install test
    harness surfaces the event in `status`.
 3. N=0 mode works end-to-end (install exit 0, harness 80s, main-only
    reported).
-4. 5-minute drift simulation → ctx-reduce, zero restarts.
+4. 5-minute drift simulation → ctx-reduce event, instance healthy at
+   the halved ctx within 15 s, zero restarts on other instances, N
+   unchanged.
 
 ---
 
@@ -672,7 +691,10 @@ date) recorded per run. The runner captures the snapshot via stdlib
 `docker stats --no-stream --format '{{.Name}} {{.MemUsage}}'` (main
 stack container, read-only, per S6.4), and a `MemTotal`/`MemAvailable`
 read of `/proc/meminfo`; results are stored as strings in the run
-row. Results dir: `/run/bonsai2/bench/` + committed
+row. Bench run JSONs rotate with the same 7-day window as the results
+(S3.1): the runner prunes `/run/bonsai2/bench/*.json` older than 7 days
+on each start, so the S-global #5 disk budget (2 GB) covers them.
+Results dir: `/run/bonsai2/bench/` + committed
 summary `bench-results/<date>_<commit>.md` (the doctrine's citation
 source).
 
@@ -690,9 +712,11 @@ source).
 
 ### 5.4 Runner (locked)
 
-`bench/run.py` (Python 3, stdlib + `requests` only — no heavy deps,
-aarch64-safe; the S5.2 box-state snapshot needs only stdlib `subprocess`
-plus the already-required `nvidia-smi` and `docker` CLIs, S6.2):
+`bench/run.py` (Python 3: the dependency surface is exactly stdlib +
+`requests` — `requests` is the sole non-stdlib dep and is on the S6.6
+pin list; no heavy deps, aarch64-safe; the S5.2 box-state snapshot needs
+only stdlib `subprocess` plus the already-required `nvidia-smi` and
+`docker` CLIs, S6.2):
 scenario loader (bench.yaml), endpoint resolver
 (subagent ports from `subagent-engine.yaml`, main from `harness.yaml`),
 task executor (streaming chat completions, token timing from stream
@@ -897,7 +921,8 @@ aarch64 build)
 4. One-command install on a fresh GB10 box: S6.8 all four.
 5. 72 h soak: all N instances up (restart count per instance ≤ 2), no
    main-stack t/s regression beyond the 5% guardrail, `/run/bonsai2`
-   disk < 2 GB (results rotation: keep 7 days, S3.1 results_dir).
+   disk < 2 GB (results rotation: keep 7 days, S3.1 results_dir; bench
+   run JSONs: 7 days, S5.2).
 
 ## Out of scope (locked, from S0 non-goals)
 
