@@ -179,9 +179,14 @@ class, CUDA arch 121a). Per-instance budget in install: `11.5 GB`
 
 **Boot-time OOM policy:** before spawning instance i, the lifecycle
 (S2.3) checks `nvidia-smi`/cgroup free ≥ `instance_footprint_GB + 1.0 GB`
-margin. If not: stop at i−1, log `WARN_VRAM_SHORTFALL {i, free, need}`,
-exit code 0 (partial load is a valid state). Full OOM (even instance 0)
-= `ERR_VRAM_OOM`, exit 4, main continues alone (S2.4).
+margin. If the check fails at i > 0: stop at i−1, log
+`WARN_VRAM_SHORTFALL {i, free, need}`, proceed with the partial load,
+exit 0 (a valid state). If it fails at i = 0 **while the S2.3 budget had
+granted N' ≥ 1**: `ERR_VRAM_OOM`, manager exit 4, zero instances, main
+continues alone — VRAM was lost *after* the budget ran (a surprise, not
+the planned main-only mode). When S2.3 itself yields N' = 0, S2.4 takes
+over (PTQ1_0 retry, then main-only): exit 0, no `ERR_VRAM_OOM`, unless
+a live margin OOM defeats the fallback instance.
 
 ### 1.5 Error / edge cases (locked)
 
@@ -299,20 +304,28 @@ a main-stack fix might need.
 
 At manager start: `free_gb = total − main_stack_used_gb − os_reserved_gb`
 (where `main_stack_used_gb` is read live from `docker stats --no-stream
-qwen38-sglang` when that container exists, else `harness.yaml`
-`main_stack_footprint_gb` default 46.9). Then N' = min(N,
+qwen38-sglang` when that container exists, else the S2.6
+`main_stack.footprint_gb` default 46.9). Then N' = min(N,
 floor(free_gb / per_instance_budget_gb)). If N' < N: log
 `WARN_VRAM_SHORTFALL`, proceed with N'. If N' == 0: main-only mode (S2.4).
 
 ### 2.4 N=0 / main-only mode (locked)
 
-When N' == 0: the manager stays up, health.json reports
-`{"instances": 0, "mode": "main-only"}`, harness scripts operate with all
-subagent commands returning exit 80 (S3.4) with a JSON
-`{"reason": "no_subagent_instances"}`. Install still succeeds
-(`install.sh` exits 0, prints the mode). Rationale: the box is usable;
-the install is not a failure just because the main stack is fat that
-day.
+**Entry: the S2.3 budget check only.** When the S2.3 formula yields
+N' = 0 at the PQ2_0 budget, install retries once with the PTQ1_0
+fallback (S1.1, ~18% smaller): recompute S1.4 with its footprint
+(5.95 GB weights, same KV → 9.65 GB + 5% margin = 10.2 GB budget) and
+record the quant in use in `subagent-engine.yaml`. Still 0 (including
+the S6.2 below-96 GB forced N = 0) → main-only. In main-only mode the
+manager stays up, health.json reports `{"instances": 0, "mode":
+"main-only"}`, harness scripts operate with all subagent commands
+returning exit 80 (S3.4) with a JSON `{"reason":
+"no_subagent_instances"}`. Install still succeeds (`install.sh` exits
+0, prints the mode). Rationale: the box is usable; the install is not
+a failure just because the main stack is fat that day. A live margin
+OOM that defeats an instance the budget granted (N' ≥ 1 at S2.3,
+including a fallback-granted one) is the S1.4 `ERR_VRAM_OOM` path,
+exit 4 — zero instances but not main-only mode.
 
 ### 2.5 Failure policy (locked)
 
@@ -426,6 +439,11 @@ Exit codes (locked, complete set):
 | 82 | main endpoint unhealthy | check main stack (external); don't spawn subagent work that needs main |
 | 84 | manager itself down | run `systemctl status bonsai2-sglang`; retry in 10 s ×3, then escalate |
 
+Closed set: {0, 2, 3, 4, 5, 8, 20, 21, 22, 80, 82, 84} — 12 codes. Any
+other exit code from a S3.2 script is a harness bug; the S3.8 #3 suite
+asserts exactly this set, so a stray exit 1 (or any other code) fails
+it.
+
 ### 3.3 Instance routing (locked — C-03 "i am not sure, which ever one
 will be more efficient... you choose")
 
@@ -500,8 +518,9 @@ boot_target_s: 180
    3× spawn (parallel) → 3× collect (exit 20 each) → verify results.
 2. Mid-task engine kill (kill -9 on a live instance) → task recovered
    via retry or requeue; main agent's only observed commands are from S3.2.
-3. All 13 exit codes exercised by the hermetic suite; no undocumented
-   code ever emitted (suite asserts the closed set).
+3. All 12 exit codes of the S3.2 closed set exercised by the hermetic
+   suite; no code outside the closed set ever emitted (the suite asserts
+   the closed set; a stray exit 1 or any other code fails it).
 4. N=0 mode: every subagent command → exit 80 with the S2.4 JSON.
 
 ---
@@ -644,11 +663,16 @@ the success-rate gap at equal or better cost.
 | M5 | long-context doc read (60K tokens) | 1 | 1 | 64k | 5 QA questions, each binary-scored by a golden file (auto) |
 | M6 | main-only control of M1–M5 | — | 1 | — | same rubrics; the control (idea.txt capability comparison) |
 | M7 | saturation: all instances, all slots | N | 8×N | 8k | t/s at the ceiling + zero 5xx (auto) |
-| M8 | contention: main at working load + subagents at working load | N | 4×N | 8k | main t/s guardrail: within `main_tps_guardrail_pct` of M6 (auto) |
+| M8 | contention: main at working load + subagents at working load | N | 4×N | 8k | main t/s guardrail: within `main_tps_guardrail_pct` of M6 (auto). The runner records the verdict per scenario row as `pass`/`fail` (e.g. `{"M8": "pass"}`); a guardrail breach flips the row to `fail` while the run still exits 0 (S5.4) |
 
 Reproducible: `bench.yaml` pins model revision + engine commit + box
 state snapshot (driver, nvidia-smi, docker stats, /proc/meminfo,
-date) recorded per run. Results dir: `/run/bonsai2/bench/` + committed
+date) recorded per run. The runner captures the snapshot via stdlib
+`subprocess` (no extra dep): `nvidia-smi --query-gpu=driver_version,memory.used --format=csv,noheader`,
+`docker stats --no-stream --format '{{.Name}} {{.MemUsage}}'` (main
+stack container, read-only, per S6.4), and a `MemTotal`/`MemAvailable`
+read of `/proc/meminfo`; results are stored as strings in the run
+row. Results dir: `/run/bonsai2/bench/` + committed
 summary `bench-results/<date>_<commit>.md` (the doctrine's citation
 source).
 
@@ -667,13 +691,17 @@ source).
 ### 5.4 Runner (locked)
 
 `bench/run.py` (Python 3, stdlib + `requests` only — no heavy deps,
-aarch64-safe): scenario loader (bench.yaml), endpoint resolver
+aarch64-safe; the S5.2 box-state snapshot needs only stdlib `subprocess`
+plus the already-required `nvidia-smi` and `docker` CLIs, S6.2):
+scenario loader (bench.yaml), endpoint resolver
 (subagent ports from `subagent-engine.yaml`, main from `harness.yaml`),
 task executor (streaming chat completions, token timing from stream
-timestamps), scorer (per-rubric plugins in `bench/score/`), reporter
-(JSON row + markdown summary). Flock per S3.5. Exit 0 even on
-scenario-level failures (the failure is data); exit 2 = bench config
-invalid.
+timestamps), box-state snapshot capture (S5.2, stdlib `subprocess` +
+`/proc/meminfo` reads), scorer (per-rubric plugins in `bench/score/`),
+reporter (JSON row + markdown summary). Flock per S3.5. Exit 0 even on
+scenario-level failures (the failure is data: each scenario row carries
+a `pass`/`fail` verdict, including the M8 guardrail, S5.2); exit 2 =
+bench config invalid.
 
 ### 5.5 Re-bench policy (locked — feeds S6.5 upgrade procedure)
 
@@ -722,7 +750,9 @@ main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
    carries the box-state snapshot.
 2. Every S4.2 doctrine row cites an M-row from that run (audit clean).
 3. M8 main-guardrail passes (≤ 5% main-t/s regression at full subagent
-   load) — or the S0 table's N is reduced and re-asserted.
+   load; asserted from the M8 row's `pass`/`fail` verdict in the
+   committed bench JSON, S5.2) — or the S0 table's N is reduced and
+   re-asserted.
 4. Dogfood M7 row parses; mock-run M1+M2 passes hermetic.
 
 ---
@@ -753,7 +783,7 @@ supported matrix)
 | NVIDIA driver ≥ 580 | 580.126.09 ✓ | `nvidia-smi` parses, version ≥ 580 |
 | nvidia-container-toolkit | ✓ (main stack uses it) | presence check only (build stage) |
 | docker (build stage only) | 27.5.1 ✓ | `docker version` |
-| unified memory ≥ 96 GB | 121.6 GiB ✓ | `/proc/meminfo MemTotal` ≥ 96 GB (below: `ERR_VRAM_OOM` main-only, S2.4) |
+| unified memory ≥ 96 GB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 96 GB (below: forced N = 0 → main-only mode, S2.4) |
 | python 3.12 (bench runner) | 3.12.3 ✓ | `python3 --version` ≥ 3.10 |
 | free disk ≥ 20 GB | ~100 GB ✓ | `df /opt` ≥ 20 GB |
 
@@ -767,12 +797,16 @@ Steps: (1) prereq checks (S6.2 table, any fail → named ERR, exit ≠ 0,
 nothing installed). (2) build/extract binary to `/opt/bonsai2/bin` (skip
 if present + version matches the pin — idempotency). (3) download model
 (S1.1, skip if SHA matches). (4) detect main-stack footprint live
-(`docker stats qwen38-sglang`, else default 46.9) → compute N via S1.4 →
-write the four YAMLs. (5) install units (S2.2), start manager. (6) health
-checks (S2.7 probes, 180 s budget). (7) print the stack-ready report
-(JSON + human table: N instances, ports, t/s guardrail, config paths,
-the command surface summary). Exit 0 on full or main-only (S2.4) success;
-exit 4 on VRAM OOM; exit 3 on arch/port; exit 2 on config.
+(`docker stats qwen38-sglang`; probe fails → main stack dead, fall back
+to the 46.9 GB default, log `WARN_MAIN_STACK_DEAD`, install continues
+per S6.4's main-only fallback) → compute N via S1.4 → write the four
+YAMLs. (5) install units (S2.2), start manager. (6) health checks
+(S2.7 probes, 180 s budget) — in main-only mode (S2.4) these cover the
+main endpoint only. (7) print the stack-ready report (JSON + human
+table: N instances, ports, t/s guardrail, config paths, the command
+surface summary). Exit 0 on full or main-only (S2.4) success; exit 4 on
+live-margin OOM (S1.4: the budget granted N' ≥ 1 but instance 0 could
+not boot); exit 3 on arch/port; exit 2 on config.
 
 ### 6.4 Idempotency + main-stack contract (locked)
 
