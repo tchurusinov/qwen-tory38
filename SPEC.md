@@ -57,10 +57,10 @@ bench results (S5), not from vibes.
 | component | footprint | source |
 |---|---|---|
 | qwen3.8-27b NVFP4 weights | ~27.9 GB | SGLang `weights_gb` at startup log |
-| sglang KV pool (262144 ctx cap) | ~13.5 GB | SGLang `total_gpu_memory_gb=48.7` − weights |
-| flash draft (qwen3.8-0.8B-NVFP4-dflash) | ~1.5 GB | image config |
-| qwen38-sglang container overhead | ~3.5 GB | image `--memory` 10 GB − 48.7 GB device use, observed |
-| **main stack total** | **~46.9 GB** | `docker stats qwen38-sglang` |
+| sglang KV pool (262144 ctx cap) | ~13.5 GB | SGLang KV pool allocation at startup log (K+V across dtypes) |
+| flash draft (qwen3.8-0.8B-NVFP4-dflash) | ~1.5 GB | image config (draft model) |
+| qwen38-sglang container overhead | ~4.0 GB | derived residual so the rows sum to the observed total (46.9 − 27.9 − 13.5 − 1.5) |
+| **main stack total** | **~46.9 GB** | `docker stats qwen38-sglang` (authoritative for the budget) |
 | per bonsai2 instance (PQ2_0, 262K ctx, 8 slots) | ~11.0–11.5 GB | 7.21 GB weights + 3.7–4.2 GB KV (community GB10 bench, same arch) |
 | OS + system reserved | 12.0 GB | install-time policy, overridable |
 | **install-time budget for bonsai** | **~62.7 GB** | 121.6 − 46.9 − 12.0 |
@@ -189,16 +189,25 @@ class, CUDA arch 121a). Per-instance budget in install: `11.5 GB`
 (10.91 + 5% margin). `N = floor(budget_for_bonsai / 11.5)`, clamped to
 [0, 8] (8 = 64 slots total, the demo's tested ceiling for one model).
 
-**Boot-time OOM policy:** before spawning instance i, the lifecycle
-(S2.3) checks `nvidia-smi`/cgroup free ≥ `instance_footprint_GB + 1.0 GB`
-margin. If the check fails at i > 0: stop at i−1, log
-`WARN_VRAM_SHORTFALL {i, free, need}`, proceed with the partial load,
-exit 0 (a valid state). If it fails at i = 0 **while the S2.3 budget had
-granted N' ≥ 1**: `ERR_VRAM_OOM`, manager exit 4, zero instances, main
-continues alone — VRAM was lost *after* the budget ran (a surprise, not
-the planned main-only mode). When S2.3 itself yields N' = 0, S2.4 takes
-over (PTQ1_0 retry, then main-only): exit 0, no `ERR_VRAM_OOM`, unless
-a live margin OOM defeats the fallback instance.
+**Boot-time OOM policy (two-tier check, actor = the instance manager):**
+S2.3's budget (`floor(free_gb / per_instance_budget_gb)`) is a *planning*
+tier that decides N' before anything boots. On top of it, before the
+manager actually spawns instance i, it runs a *stricter allocation* tier:
+`nvidia-smi`/cgroup free ≥ `instance_footprint_GB + 1.0 GB` (the true
+footprint + a 1.0 GB spike margin, not the 11.5 GB planning budget).
+- If the allocation tier fails at i > 0: stop at i−1, log
+  `WARN_VRAM_SHORTFALL {i, free, need}`, proceed with the partial load,
+  exit 0 (a valid state).
+- If it fails at i = 0 **while S2.3's planning tier had granted N' ≥ 1**:
+  the manager (not the process) exits 4 (`ERR_VRAM_OOM`), zero instances,
+  main continues alone. This is the "granted at plan time, short at
+  allocation time" case: VRAM was lost *after* the budget ran (a
+  surprise, not the planned main-only mode). S2.3's "proceed with N'"
+  stands for the planning tier; the allocation tier is the only one that
+  can turn a granted N' ≥ 1 into an install-level exit 4.
+- When S2.3's planning tier itself yields N' = 0, the manager hands off to
+  S2.4 (PTQ1_0 retry, then main-only): exit 0, no `ERR_VRAM_OOM`, unless
+  the allocation tier defeats the fallback instance.
 
 ### 1.5 Error / edge cases (locked)
 
@@ -206,10 +215,10 @@ a live margin OOM defeats the fallback instance.
 |---|---|---|
 | artifact missing/corrupt (hash mismatch, partial download) | retry download ×3 (10 s backoff); then fail boot of that instance only | `ERR_HASH_MISMATCH` / `ERR_DOWNLOAD`, exit 4 (process), systemd `Restart=on-failure` max 3 → `bfailed` |
 | port in use at instance boot | instance skipped, others proceed | `ERR_PORT_IN_USE`, exit 3 |
-| instance OOM at load | two observers, two *exclusive* paths, in priority order: (1) the S1.4 margin check is the pre-allocation gate and catches it first → the process exits 4 itself before the KV allocation; (2) only if the check passed and free memory moved in the gap (concurrent allocation) does the kernel OOM-kill mid-load instead — systemd sees SIGKILL (no process exit code), `Restart=on-failure` ×3 → `bfailed`, harness routes around it | `ERR_VRAM_OOM`, exit 4 (path 1, manager-observed) / unit-failure (path 2, systemd-observed) |
+| instance OOM at load | two observers, two *exclusive* paths, in priority order: (1) the S1.4 allocation tier (pre-allocation gate, run by the manager) catches it first → the manager exits 4 before the instance's KV allocation; (2) only if the tier passed and free memory moved in the gap (concurrent allocation) does the kernel OOM-kill mid-load instead — systemd sees SIGKILL (no process exit code), `Restart=on-failure` ×3 → `bfailed`, harness routes around it | `ERR_VRAM_OOM`, exit 4 (path 1, manager) / unit-failure (path 2, systemd) |
 | engine crash mid-request | systemd `Restart=on-failure` (5 s delay); harness sees connection error → task `engine_retried` (one retry, next instance); second failure → task `failed` | `ERR_ENGINE_DOWN` |
 | request > ctx-size | engine HTTP 400; harness surfaces `ERR_CTX_TOO_LONG` to main | exit 5 |
-| instance unhealthy > 30 s | harness reports `degraded` status; instance marked `bdown` for routing | — |
+| instance unhealthy > 30 s (S2.2 probe: `instance_healthy_timeout_s`) | harness reports `degraded`, the instance is marked `bdown` for routing; the emitted status field is the named condition `ERR_INSTANCE_UNHEALTHY` (no exit code — this is a routing/health state, not a command result) | `ERR_INSTANCE_UNHEALTHY` (status, `bdown`) |
 
 ### 1.6 Configuration — `subagent-engine.yaml`
 
@@ -256,7 +265,7 @@ api_key: bonsai2-local
   matches S1.4 formula ±10%. Sustained: 8 concurrent completions
   (max_num_seqs=8) for 120 s → assert t/s ≥ 0.9 × community-baseline
   (29.16) and zero 5xx. VRAM ceiling: load instances until the S1.4
-  margin check fails → assert the last failure is `ERR_VRAM_OOM`, not a
+  allocation tier fails → assert the last failure is `ERR_VRAM_OOM`, not a
   segfault, and prior instances stay healthy.
 - **Edge:** port collision (start a dummy listener on 30101 → boot →
   expect instance 0 `ERR_PORT_IN_USE`, instance 1 up).
@@ -284,7 +293,7 @@ Main sglang first (pre-existing, `qwen38-sglang` + `qwen38-keepalive`
 systemd units — untouched by this project). Bonsai instances after: a
 single `bonsai2-sglang.service` unit spawns the instance manager, which
 spawns N `bonsai2-llama-server@i` transient units (systemd template
-unit), in order, gated by the S1.4 margin check. Rationale: if the main
+unit), in order, gated by the S1.4 allocation tier. Rationale: if the main
 stack fails at boot, we don't want N bonsai instances eating 57 GB that
 a main-stack fix might need.
 
@@ -570,7 +579,14 @@ main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
   canned `/v1/models` + `/v1/chat/completions` (streaming + non-streaming,
   200/400/429/500 variants). Full script surface runs against it:
   every exit code above is produced by a named test case (table-driven,
-  one case per code, asserting the exact JSON + code).
+  one case per code, asserting the exact JSON + code). The subagent mock
+  does not itself serve the main endpoint, so the two main-stack codes
+  get their own cases: **82** = `spawn`/`status` against a dead/stopped
+  main-endpoint fixture (the harness's `main_endpoint_healthy_probe`
+  fails → `main_healthy: false`, exit 82); **84** = the same commands
+  with the health.json/manager socket absent (`/run/bonsai2` missing) →
+  exit 84. Codes 3/4/5/8/20/21/22/80 are produced by the subagent
+  mock + the manager stub; 2 by a bad-args case.
 - Slot contention: mock with 2 instances × 2 slots; spawn 5 tasks →
   assert 4 running + 1 queued → complete one → assert the queued one
   starts and no slot count exceeds 2 per instance (asserted via a mock
