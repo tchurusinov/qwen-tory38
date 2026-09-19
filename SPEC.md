@@ -228,6 +228,11 @@ tier that decides N' before anything boots. On top of it, before the
 manager actually spawns instance i, it runs a *stricter allocation* tier:
 `nvidia-smi`/cgroup free ≥ `instance_footprint_GB + 1.0 GB` (the true
 footprint + a 1.0 GB spike margin, not the 11.5 GB planning budget).
+The free-memory read is bounded: 5 s timeout per probe, one retry; on
+a second timeout the tier treats free as 0 for that spawn (the i > 0
+partial-load rule applies; the value is re-read on the S2.5 5-min
+recheck and on any reload) — a wedged probe must never deadlock the
+manager.
 - If the allocation tier fails at i > 0: stop at i−1, log
   `WARN_VRAM_SHORTFALL {i, free, need}`, proceed with the partial load,
   exit 0 (a valid state).
@@ -404,7 +409,19 @@ outcome). harness scripts operate with all subagent commands
 returning exit 80 (S3.4) with a JSON `{"reason": ...}` echoing the
 health.json reason. Install still succeeds (`install.sh` exits
 0, prints the mode). Rationale: the box is usable; the install is not
-a failure just because the main stack is fat that day. A live margin
+a failure just because the main stack is fat that day.
+
+**Fallback boot path (locked — S1.4 cross-ref):** the PTQ1_0 retry can
+yield a *granted* fallback instance whose allocation tier still fails
+at the default `--ctx-size 262144` (S1.3; KV is the dominant term in a
+thin pool). In that case the manager retries that one instance with the
+ctx halved (multiple of 8192, floor 8192 — the same reduction as the
+S2.5 drift rule) and re-runs the allocation tier on the reduced
+footprint; only if that also fails does the S1.4 `ERR_VRAM_OOM` exit 4
+apply. The reduced ctx is recorded in `subagent-engine.yaml`
+(`instances.ctx_size` for that quant) so restarts stay consistent.
+
+**Live-margin OOM (locked):** a live margin
 OOM that defeats an instance the budget granted (N' ≥ 1 at S2.3,
 including a fallback-granted one) is the S1.4 `ERR_VRAM_OOM` path,
 exit 4 — zero instances but not main-only mode.
@@ -434,7 +451,14 @@ exit 4 — zero instances but not main-only mode.
   `ctx` value, and counted in that instance's restart budget (global #5).
   No instance is ever *retired* for drift (no pool removal, no N
   change) — only context shrinks. (Context-grow direction: never; v1 is
-  conservative.) The drift watch acts on instances that are *running*;
+  conservative.) **Mid-session effect:** a task whose `--ctx` exceeds
+  the instance's post-reduction ctx hits `ERR_CTX_TOO_LONG` (exit 5,
+  S1.5) when its request lands after the reduction; S4.5's 5-path is
+  the recovery flow (split/trim, re-spawn — least-loaded routing may
+  place the re-spawn on a different, non-reduced instance). The drift
+  event is surfaced in `status` (the instance's `ctx_reduced: true` +
+  reduced `ctx`) so the main agent can see it before choosing task ctx.
+  The drift watch acts on instances that are *running*;
   it never re-spawns instances the user explicitly unloaded
   (`bunloaded`, S3.2) — an explicit `bonsai2-unload` beats the drift
   watch; reload is only a command (`bonsai2-reload`), a manager restart,
