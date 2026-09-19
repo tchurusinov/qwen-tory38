@@ -63,11 +63,11 @@ bench results (S5), not from vibes.
 | **main stack total** | **~46.9 GB** | `docker stats qwen38-sglang` |
 | per bonsai2 instance (PQ2_0, 262K ctx, 8 slots) | ~11.0–11.5 GB | 7.21 GB weights + 3.7–4.2 GB KV (community GB10 bench, same arch) |
 | OS + system reserved | 12.0 GB | install-time policy, overridable |
-| **install-time budget for bonsai** | **~58.7 GB** | 121.6 − 46.9 − 12.0 |
+| **install-time budget for bonsai** | **~62.7 GB** | 121.6 − 46.9 − 12.0 |
 
 `N = floor(budget_for_bonsai / per_instance_footprint)` with the worked
-example: `floor(58.7 / 11.5) = 5` instances, ~52.5 GB loaded, ~6 GB
-headroom. N=0 is a valid result (main-only mode; see S2.4).
+example: `floor(62.7 / 11.5) = 5` instances, ~54.5 GB loaded (5 × 10.91),
+~8 GB headroom. N=0 is a valid result (main-only mode; see S2.4).
 
 **Component inventory.** S1 bonsai2 serving engine (pinned fork, one
 process per instance). S2 lifecycle (systemd, health, budget, failover).
@@ -194,7 +194,7 @@ a live margin OOM defeats the fallback instance.
 |---|---|---|
 | artifact missing/corrupt (hash mismatch, partial download) | retry download ×3 (10 s backoff); then fail boot of that instance only | `ERR_HASH_MISMATCH` / `ERR_DOWNLOAD`, exit 4 (process), systemd `Restart=on-failure` max 3 → `bfailed` |
 | port in use at instance boot | instance skipped, others proceed | `ERR_PORT_IN_USE`, exit 3 |
-| instance OOM at load | systemd kills; boot loop capped at 3 restarts; instance marked `bfailed`, harness routes around it | `ERR_VRAM_OOM`, exit 4 |
+| instance OOM at load | two observers, two paths: the S1.4 margin check catches it first → the process exits 4 itself before the KV allocation; if the kernel OOM-kills it mid-load instead, systemd sees SIGKILL (no process exit code), `Restart=on-failure` ×3 → `bfailed`, harness routes around it | `ERR_VRAM_OOM`, exit 4 (manager-observed) / unit-failure (systemd-observed) |
 | engine crash mid-request | systemd `Restart=on-failure` (5 s delay); harness sees connection error → task `engine_retried` (one retry, next instance); second failure → task `failed` | `ERR_ENGINE_DOWN` |
 | request > ctx-size | engine HTTP 400; harness surfaces `ERR_CTX_TOO_LONG` to main | exit 5 |
 | instance unhealthy > 30 s | harness reports `degraded` status; instance marked `bdown` for routing | — |
@@ -313,18 +313,22 @@ a main-stack fix might need.
 At manager start: `free_gb = total − main_stack_used_gb − os_reserved_gb`
 (where `main_stack_used_gb` is read live from `docker stats --no-stream
 qwen38-sglang` when that container exists, else the S2.6
-`main_stack.footprint_gb` default 46.9). Then N' = min(N,
-floor(free_gb / per_instance_budget_gb)). If N' < N: log
-`WARN_VRAM_SHORTFALL`, proceed with N'. If N' == 0: main-only mode (S2.4).
+`main_stack.footprint_gb` default 46.9). Then N' = max(0, min(N,
+floor(free_gb / per_instance_budget_gb))) — the `max(0, …)` clamps a
+negative result (free_gb ≤ 0: main stack + reserved already consume the
+pool) to main-only instead of a negative instance count. If 0 < N' < N:
+log `WARN_VRAM_SHORTFALL`, proceed with N'. If N' == 0: main-only mode
+(S2.4).
 
 ### 2.4 N=0 / main-only mode (locked)
 
 **Entry: the S2.3 budget check only.** When the S2.3 formula yields
 N' = 0 at the PQ2_0 budget, install retries once with the PTQ1_0
 fallback (S1.1, ~18% smaller): recompute S1.4 with its footprint
-(5.95 GB weights, same KV → 9.65 GB + 5% margin = 10.2 GB budget) and
+(5.95 GB weights + the unchanged 3.7 GB KV at the same ctx/slots →
+9.65 GB footprint; +5% margin → ~10.2 GB budget) and
 record the quant in use in `subagent-engine.yaml`. Still 0 (including
-the S6.2 below-96 GB forced N = 0) → main-only. In main-only mode the
+the S6.2 below-96 GiB forced N = 0) → main-only. In main-only mode the
 manager stays up, health.json reports `{"instances": 0, "mode":
 "main-only"}`, harness scripts operate with all subagent commands
 returning exit 80 (S3.4) with a JSON `{"reason":
@@ -384,8 +388,9 @@ boot_target_s: 180              # measured, not guessed; updated by install test
   transitions `healthy→degraded→healthy`, harness `status` reflects it.
 - Reboot test (this box, scratch namespace): `reboot` → both stacks
   healthy ≤ `boot_target_s`; T measured and written back to serving.yaml.
-- N=0 test: override main footprint to 110 GB → install → assert
-  main-only mode, harness exit 80s, exit 0 from install.
+- N=0 test: override main footprint to 110 GB → free_gb < 0, so this
+  case exercises the S2.3 `max(0, …)` clamp → install → assert main-only
+  mode, harness exit 80s, exit 0 from install.
 - Drift test: cgroup-tune main container higher → assert ctx-reduce
   event in health.json with the halved `ctx`, the instance healthy
   again < 15 s, zero restarts on any *other* instance, N unchanged.
@@ -565,7 +570,7 @@ as the starting point per C-02/C-04)
 | Single-file code-gen chunk (new function / test file / boilerplate) | **subagent** | bounded, self-contained, verify-by-compile [B-01] |
 | Per-file / per-section analysis (review notes, doc summaries, data transforms) | **fan-out N** | independent units, embarrassingly parallel; N = min(files, instances×slots) [B-03] |
 | Diff review of a PR-sized diff | **subagent draft → main verifies** | mirrors senior-git-1.0 reviewer/builder split; draft is a self-report (S4.2 rule) |
-| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | 262K ctx on main is free (already loaded); a subagent at 8k ctx default loses the tail [B-05] |
+| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | 262K ctx on main is free (already loaded); a subagent at the 8k ctx default loses the tail — M5 measures the 64k-ctx subagent cost, which is why the default allocation stays on main [B-05] |
 | Test execution / lint / build-check | **subagent** | mechanical, parallelizable, output is a report not a decision [B-02] |
 | Draft writing (docs, summaries, commit messages at scale) | **subagent** | quality bar is lower-verification; main edits the draft |
 | Anything requiring live tool feedback loops (iterative debugging, interactive exploration) | **main** | feedback latency; subagent is fire-and-collect, no mid-task steering value here |
@@ -583,8 +588,10 @@ sessions in check, we have limited instances, one sglang engine")
 - **One engine is shared:** main-agent turns and subagent decodes queue
   on their own engines (main=sglang, sub=llama-server), so the economy
   is about **slots**, not tokens: keep ≤ 6 of 8 slots busy per instance
-  (2 free for deadline-sensitive spawns) — the `queue_wait_max_s` backstop
-  handles the rest.
+  (2 free for deadline-sensitive spawns). This is a doctrine cap on the
+  main agent's own spawn count, not a harness rule: S3.3's least-loaded
+  routing does not enforce it, so an over-subscribed round is handled by
+  the `queue_wait_max_s` backstop, not by a queue rejection.
 - **Batch spawns:** when fanning out, spawn all N in one turn (one tool
   block), then one `collect` loop — never spawn-collect-spawn-collect
   ping-pong (doubles main's turn count).
@@ -693,8 +700,9 @@ stack container, read-only, per S6.4), and a `MemTotal`/`MemAvailable`
 read of `/proc/meminfo`; results are stored as strings in the run
 row. Bench run JSONs rotate with the same 7-day window as the results
 (S3.1): the runner prunes `/run/bonsai2/bench/*.json` older than 7 days
-on each start, so the S-global #5 disk budget (2 GB) covers them.
-Results dir: `/run/bonsai2/bench/` + committed
+on each start, and additionally caps the bench dir at 1 GB (keep
+newest, delete oldest), so the global #5 disk budget (2 GB) covers
+them. Results dir: `/run/bonsai2/bench/` + committed
 summary `bench-results/<date>_<commit>.md` (the doctrine's citation
 source).
 
@@ -725,7 +733,9 @@ timestamps), box-state snapshot capture (S5.2, stdlib `subprocess` +
 reporter (JSON row + markdown summary). Flock per S3.5. Exit 0 even on
 scenario-level failures (the failure is data: each scenario row carries
 a `pass`/`fail` verdict, including the M8 guardrail, S5.2); exit 2 =
-bench config invalid.
+bench config invalid — the S3.2 code 2 (malformed args / bad config),
+in the closed set; `bonsai2-bench` is a S3.2 command and follows the
+same exit-code contract.
 
 ### 5.5 Re-bench policy (locked — feeds S6.5 upgrade procedure)
 
@@ -807,9 +817,9 @@ supported matrix)
 | NVIDIA driver ≥ 580 | 580.126.09 ✓ | `nvidia-smi` parses, version ≥ 580 |
 | nvidia-container-toolkit | ✓ (main stack uses it) | presence check only (build stage) |
 | docker (build stage only) | 27.5.1 ✓ | `docker version` |
-| unified memory ≥ 96 GB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 96 GB (below: forced N = 0 → main-only mode, S2.4) |
+| unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB) (below: forced N = 0 → main-only mode, S2.4) |
 | python 3.12 (bench runner) | 3.12.3 ✓ | `python3 --version` ≥ 3.10 |
-| free disk ≥ 20 GB | ~100 GB ✓ | `df /opt` ≥ 20 GB |
+| free disk ≥ 20 GB | ~100 GB ✓ | `df /opt` ≥ 20 GB — a floor, not an expectation: a clean install writes ~8 GB (model + binary + configs), the build stage peaks higher; ~100 GB free is normal on a fresh GB10 |
 
 ### 6.3 The one command (locked, ordered)
 
@@ -836,7 +846,9 @@ not boot); exit 3 on arch/port; exit 2 on config.
 
 - Re-run: binary/model skipped if pinned-and-verified; YAMLs
   regenerated only if detected state changed (N changed, main footprint
-  drifted > 5 GB) — else `--force-config` to regenerate; units
+  drifted > 5 GB — a policy constant, set below the per-instance budget
+  of 11.5 GB so a drift this size can already change N; the S6.7
+  +10 GB test exercises it) — else `--force-config` to regenerate; units
   re-installed without restart if unchanged (`systemctl daemon-reload`
   only on diff).
 - **Never touches the main stack:** no `docker` command against
