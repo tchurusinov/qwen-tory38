@@ -72,8 +72,8 @@ example: `floor(62.7 / 11.5) = 5` instances, ~54.5 GB loaded (5 × 10.91),
 **Component inventory.** S1 bonsai2 serving engine (pinned fork, one
 process per instance). S2 lifecycle (systemd, health, budget, failover).
 S3 harness control scripts (the main-agent API). S4 harness skill
-(doctrine). S5 bench framework. S6 packaging (image + compose +
-install.sh).
+(doctrine). S5 bench framework. S6 packaging (build image + install.sh;
+no compose file in v1, S6.1).
 
 **Non-goals (from idea.txt, locked).** (1) No LLM-orchestration of
 subagents — only bash scripts. (2) No new main-model work — the sglang
@@ -168,7 +168,9 @@ v1, re-pinned on re-bench (S5.5).
 ```
 instance_footprint_GB = weights_GB + kv_GB
 kv_GB = slots * ctx_size * per_slot_per_token_GB
-per_slot_per_token_GB = 0.0000159   # 262144 ctx x 8 slots = 3.7 GB, from community GB10 bench
+per_slot_per_token_GB = 0.00000176   # derived from the community GB10 bench
+                                      # anchor: 3.7 GB KV at 8 slots x 262144 ctx
+                                      # (8 x 262144 x 0.00000176 = 3.69 GB)
 ```
 
 Sanity: 7.21 + 3.7 = 10.91 GB ≈ measured 10.8 GB in the community GB10
@@ -194,7 +196,7 @@ a live margin OOM defeats the fallback instance.
 |---|---|---|
 | artifact missing/corrupt (hash mismatch, partial download) | retry download ×3 (10 s backoff); then fail boot of that instance only | `ERR_HASH_MISMATCH` / `ERR_DOWNLOAD`, exit 4 (process), systemd `Restart=on-failure` max 3 → `bfailed` |
 | port in use at instance boot | instance skipped, others proceed | `ERR_PORT_IN_USE`, exit 3 |
-| instance OOM at load | two observers, two paths: the S1.4 margin check catches it first → the process exits 4 itself before the KV allocation; if the kernel OOM-kills it mid-load instead, systemd sees SIGKILL (no process exit code), `Restart=on-failure` ×3 → `bfailed`, harness routes around it | `ERR_VRAM_OOM`, exit 4 (manager-observed) / unit-failure (systemd-observed) |
+| instance OOM at load | two observers, two *exclusive* paths, in priority order: (1) the S1.4 margin check is the pre-allocation gate and catches it first → the process exits 4 itself before the KV allocation; (2) only if the check passed and free memory moved in the gap (concurrent allocation) does the kernel OOM-kill mid-load instead — systemd sees SIGKILL (no process exit code), `Restart=on-failure` ×3 → `bfailed`, harness routes around it | `ERR_VRAM_OOM`, exit 4 (path 1, manager-observed) / unit-failure (path 2, systemd-observed) |
 | engine crash mid-request | systemd `Restart=on-failure` (5 s delay); harness sees connection error → task `engine_retried` (one retry, next instance); second failure → task `failed` | `ERR_ENGINE_DOWN` |
 | request > ctx-size | engine HTTP 400; harness surfaces `ERR_CTX_TOO_LONG` to main | exit 5 |
 | instance unhealthy > 30 s | harness reports `degraded` status; instance marked `bdown` for routing | — |
@@ -327,8 +329,8 @@ N' = 0 at the PQ2_0 budget, install retries once with the PTQ1_0
 fallback (S1.1, ~18% smaller): recompute S1.4 with its footprint
 (5.95 GB weights + the unchanged 3.7 GB KV at the same ctx/slots →
 9.65 GB footprint; +5% margin → ~10.2 GB budget) and
-record the quant in use in `subagent-engine.yaml`. Still 0 (including
-the S6.2 below-96 GiB forced N = 0) → main-only. In main-only mode the
+record the quant in use in `subagent-engine.yaml`. Still 0 → main-only.
+In main-only mode the
 manager stays up, health.json reports `{"instances": 0, "mode":
 "main-only"}`, harness scripts operate with all subagent commands
 returning exit 80 (S3.4) with a JSON `{"reason":
@@ -467,6 +469,21 @@ Closed set: {0, 2, 3, 4, 5, 8, 20, 21, 22, 80, 82, 84} — 12 codes. Any
 other exit code from a S3.2 script is a harness bug; the S3.8 #3 suite
 asserts exactly this set, so a stray exit 1 (or any other code) fails
 it.
+
+Per-command exit mapping (the table above + these; closed set unchanged):
+- `spawn`: 0 = queued (the task's later terminal state is observed by
+  `collect`); 2 = malformed args; 3/4/5/80/82/84 = stack conditions at
+  submission time.
+- `steer` / `cancel`: 0 = operation accepted (`steer` on a non-terminal
+  task; `cancel` on a running/queued task, signal sent, or an
+  already-terminal no-op); 2 = TASK_ID unknown. `steer --wait SECS`:
+  8 = no state change within SECS (task still running).
+- `collect`: 20/21/22 = the task's terminal state (done / failed /
+  timeout); 0 = task non-terminal, current-state JSON returned (caller
+  polls); 2 = TASK_ID unknown.
+- `status` / `list-instances` / `health`: 0; 82/84 when the probed
+  stack condition is bad.
+- `bench`: 0/2 per S5.4.
 
 ### 3.3 Instance routing (locked — C-03 "i am not sure, which ever one
 will be more efficient... you choose")
@@ -817,7 +834,7 @@ supported matrix)
 | NVIDIA driver ≥ 580 | 580.126.09 ✓ | `nvidia-smi` parses, version ≥ 580 |
 | nvidia-container-toolkit | ✓ (main stack uses it) | presence check only (build stage) |
 | docker (build stage only) | 27.5.1 ✓ | `docker version` |
-| unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB) (below: forced N = 0 → main-only mode, S2.4) |
+| unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB). Below 96 GiB is outside the supported matrix: N is still computed by S1.4/S2.3 (a ~96 GiB box with the 46.9 GB main stack computes N = 3 at PQ2_0); only below ~70 GiB does N come out 0 → main-only mode (S2.4) |
 | python 3.12 (bench runner) | 3.12.3 ✓ | `python3 --version` ≥ 3.10 |
 | free disk ≥ 20 GB | ~100 GB ✓ | `df /opt` ≥ 20 GB — a floor, not an expectation: a clean install writes ~8 GB (model + binary + configs), the build stage peaks higher; ~100 GB free is normal on a fresh GB10 |
 
@@ -836,11 +853,14 @@ to the 46.9 GB default, log `WARN_MAIN_STACK_DEAD`, install continues
 per S6.4's main-only fallback) → compute N via S1.4 → write the four
 YAMLs. (5) install units (S2.2), start manager. (6) health checks
 (S2.7 probes, 180 s budget) — in main-only mode (S2.4) these cover the
-main endpoint only. (7) print the stack-ready report (JSON + human
-table: N instances, ports, t/s guardrail, config paths, the command
-surface summary). Exit 0 on full or main-only (S2.4) success; exit 4 on
-live-margin OOM (S1.4: the budget granted N' ≥ 1 but instance 0 could
-not boot); exit 3 on arch/port; exit 2 on config.
+main endpoint only; in a partial load (S1.4 `WARN_VRAM_SHORTFALL` at
+i > 0) they cover the loaded instances. (7) print the stack-ready
+report (JSON + human table: N instances, ports, t/s guardrail, config
+paths, the command surface summary). Exit 0 on full or main-only (S2.4)
+success; exit 4 on live-margin OOM (S1.4: the budget granted N' ≥ 1 but
+instance 0 could not boot); exit 3 on arch mismatch (a port collision
+at install is not a failure: that instance is skipped per S1.5, others
+proceed); exit 2 on config.
 
 ### 6.4 Idempotency + main-stack contract (locked)
 
