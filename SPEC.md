@@ -52,31 +52,57 @@ unverified. The intelligence gap is a design input: main's job grows as
 verification overhead grows, and the doctrine (S4) is recalibrated from
 bench results (S5), not from vibes.
 
-**VRAM budget (this box, 2026-09-19 measurements — recompute at install):**
+**VRAM budget (this box, 2026-09-19/20 measurements — recompute at install):**
 
 | component | footprint | source |
 |---|---|---|
-| qwen3.8-27b NVFP4 weights | ~27.9 GB | SGLang `weights_gb` at startup log |
-| sglang KV pool (262144 ctx cap) | ~13.5 GB | SGLang KV pool allocation at startup log (K+V across dtypes) |
+| qwen3.8-27b NVFP4 weights | ~27.9 GB | SGLang startup log (`weights_gb`) |
+| sglang KV pool (262144 ctx, 360510 tokens, fp8 + bf16) | ~17.9 GB | SGLang log "KV Cache is allocated": 5.50 + 5.50 + 3.44 + 3.44 |
+| mamba SSM/conv state + intermediate cache pool | ~17.4 GB | SGLang log "Mamba Cache is allocated": 0.27 + 6.82 + 10.12 + 0.15 |
 | flash draft (qwen3.8-0.8B-NVFP4-dflash) | ~1.5 GB | image config (draft model) |
-| qwen38-sglang container overhead | ~4.0 GB | derived residual so the rows sum to the observed total (46.9 − 27.9 − 13.5 − 1.5) |
-| **main stack total** | **~46.9 GB** | `docker stats qwen38-sglang` (authoritative for the budget) |
+| CUDA ctx / runtime / cuda-graph overhead | ~11.7 GB | derived residual so rows sum to the observed total (76.4 − 27.9 − 17.9 − 17.4 − 1.5) |
+| **main stack total** | **~76.4 GB** | SGLang log at fresh load: 124.546 GB pool − 48.18 GB `available_gpu_mem` (authoritative for the budget) |
 | per bonsai2 instance (PQ2_0, 262K ctx, 8 slots) | ~11.0–11.5 GB | 7.21 GB weights + 3.7–4.2 GB KV (community GB10 bench, same arch) |
-| OS + system reserved | 12.0 GB | install-time policy, overridable |
-| **install-time budget for bonsai** | **~62.7 GB** | 121.6 − 46.9 − 12.0 |
+| OS + system reserved | 8.0 GB | install-time policy, overridable (host OS, the other resident containers ~2 GB, Xorg, page-cache floor) |
+| **install-time budget for bonsai** | **~37.2 GB** | 121.6 − 76.4 − 8.0 |
 
 `N = floor(budget_for_bonsai / per_instance_footprint)` with the worked
-example: `floor(62.7 / 11.5) = 5` instances, ~54.5 GB loaded (5 × 10.91),
-~8 GB headroom. N=0 is a valid result (main-only mode; see S2.4).
+example: `floor(37.2 / 11.5) = 3` instances, ~32.7 GB loaded (3 × 10.91),
+~4.5 GB headroom. N=0 is a valid result (main-only mode; see S2.4).
+Default N = 3 (safe start, user decision 2026-09-20); whether N is raised
+later is decided by evidence: M8 guardrail passes at full load (S5.9 #3)
++ headroom to spare (S6.5).
+
+**Fresh-load vs idle (locked):** the main stack runs SGLang with
+`sleep_on_idle=True`: at idle it releases weights/KV/draft to RAM, so
+`docker stats` may show the main container at 8–15 GB — a dashboard read
+of "83.6 / 121.6 GB used" is exactly that state (main asleep + host +
+the other containers), *not* the budgeting state. The budget is built
+from the fresh-load footprint, because bonsai must coexist with the main
+stack *awake*. Install records the fresh-load footprint from the SGLang
+startup log (S6.3 step 4); the S2.5 drift watch compares the live cgroup
+against that recorded value.
 
 **Unit convention (locked):** the 121.6 total is `/proc/meminfo`
-(GiB); the main-stack ~46.9 and the 12.0 reserved are measured against
-the same unified pool and subtracted in the same effective units, giving
-the working budget `121.6 − 46.9 − 12.0 ≈ 62.7`. The residual GiB/GB
-difference between `/proc/meminfo` and the tool-reported footprints is
-inside the per-instance 5% margin (S1.4), so it does not change N on
-this box; on other boxes the install recomputes from live `nvidia-smi`/
+(GiB); SGLang reports the same pool as 124.546 GB (MiB-based, the
+nvidia-smi-visible capacity). The main-stack ~76.4 is measured against
+the same unified pool at fresh load; the 8.0 reserved is a policy
+constant against the same pool. Working budget:
+`121.6 − 76.4 − 8.0 = 37.2`. The residual GiB/GB difference between
+`/proc/meminfo` and the tool-reported footprints is inside the
+per-instance 5% margin (S1.4), so it does not change N on this box;
+on other boxes the install recomputes from live `nvidia-smi`/
 `/proc/meminfo` rather than this table.
+
+**Subagent-pool floor + rollout (locked, from idea.txt):** idea.txt
+sets the floor "at least 40 gbs vram for bonsai subagents"; the
+measured fresh-load headroom here is 37.2 GB, so N = 3 loads ~32.7 GB —
+deliberately *below* the floor line, a safe start; N is raised only on
+evidence (see the line above). Rollout is phased: build and verify with
+**1 instance** (`install.sh --instances 1`, S6.3), then load up to N by
+re-running `install.sh` without the flag (or `--instances 3`) — N is
+recomputed via S1.4, the YAML rewrites, and the remaining instances
+boot through the S1.4 allocation tier (S6.3/S6.5).
 
 **Component inventory.** S1 bonsai2 serving engine (pinned fork, one
 process per instance). S2 lifecycle (systemd, health, budget, failover).
@@ -84,8 +110,13 @@ S3 harness control scripts (the main-agent API). S4 harness skill
 (doctrine). S5 bench framework. S6 packaging (build image + install.sh;
 no compose file in v1, S6.1).
 
-**Non-goals (from idea.txt, locked).** (1) No LLM-orchestration of
-subagents — only bash scripts. (2) No new main-model work — the sglang
+**Non-goals (from idea.txt, locked).** (1) No LLM-to-LLM orchestration
+of subagents — no LLM endpoint is ever used to schedule or coordinate
+subagents, and subagents never talk to each other; the main agent
+*does* orchestrate, exclusively through the deterministic S3.2 bash
+commands + the S4 doctrine skill (that is the design; what is banned is
+LLMs calling LLMs to coordinate). (2) No new main-model work — the
+sglang
 qwen stack is external infrastructure this project consumes, never
 modifies (S2.1, S6.4). (3) No vision serving (mmproj skipped; text-only
 agents). (4) No multi-box fan-out in v1 (1 GB10 box; multi-box is a
@@ -187,7 +218,9 @@ Sanity: 7.21 + 3.7 = 10.91 GB ≈ measured 10.8 GB in the community GB10
 bench (bench reports 29.16 t/s decode @ ~4800 t/s prefill, same box
 class, CUDA arch 121a). Per-instance budget in install: `11.5 GB`
 (10.91 + 5% margin). `N = floor(budget_for_bonsai / 11.5)`, clamped to
-[0, 8] (8 = 64 slots total, the demo's tested ceiling for one model).
+[0, 8] (8 = 64 slots total, the demo's tested ceiling for one model);
+S0's default on this box is N = 3 (worked example:
+`floor(37.2 / 11.5) = 3`).
 
 **Boot-time OOM policy (two-tier check, actor = the instance manager):**
 S2.3's budget (`floor(free_gb / per_instance_budget_gb)`) is a *planning*
@@ -236,7 +269,7 @@ model:
   sha256: <computed-at-install>
   fallback_file: bonsai-2-27b-gguf-PTQ1_0.gguf   # used when N==0-quant-fallback (S2.4)
 instances:
-  count: 5
+  count: 3                  # S0 default on this box (worked example: floor(37.2/11.5) = 3)
   port_base: 30101
   ctx_size: 262144
   max_num_seqs: 8
@@ -275,7 +308,7 @@ api_key: bonsai2-local
 1. `install.sh` produces a `subagent-engine.yaml` with a valid SHA256 and
    pinned commit; `llama-server --version` output contains the fork's
    ternary banner.
-2. N instances (N per S0 table = 5 on this box) all healthy within
+2. N instances (N per S0 table = 3 on this box) all healthy within
    120 s of boot; `/v1/models` on each port returns the alias.
 3. Concurrent load test passes (t/s ≥ 26.2, zero 5xx, VRAM delta ±10%).
 4. Kill of one instance → auto-restart < 15 s; others unaffected.
@@ -294,7 +327,7 @@ systemd units — untouched by this project). Bonsai instances after: a
 single `bonsai2-sglang.service` unit spawns the instance manager, which
 spawns N `bonsai2-llama-server@i` transient units (systemd template
 unit), in order, gated by the S1.4 allocation tier. Rationale: if the main
-stack fails at boot, we don't want N bonsai instances eating 57 GB that
+stack fails at boot, we don't want N bonsai instances eating ~33 GB that
 a main-stack fix might need.
 
 ### 2.2 Units (locked)
@@ -332,14 +365,25 @@ a main-stack fix might need.
 ### 2.3 Boot-time budget check (locked)
 
 At manager start: `free_gb = total − main_stack_used_gb − os_reserved_gb`
-(where `main_stack_used_gb` is read live from `docker stats --no-stream
-qwen38-sglang` when that container exists, else the S2.6
-`main_stack.footprint_gb` default 46.9). Then N' = max(0, min(N,
+(where `main_stack_used_gb` is the main container's cgroup
+`memory.current`, read live when the container exists — sleep-accurate,
+so it reflects the main stack's *current* pool usage rather than the
+76.4 GB fresh-load default (the value install recorded, S6.3 step 4) —
+else the S2.6
+`main_stack.footprint_gb` default 76.4). Then N' = max(0, min(N,
 floor(free_gb / per_instance_budget_gb))) — the `max(0, …)` clamps a
 negative result (free_gb ≤ 0: main stack + reserved already consume the
 pool) to main-only instead of a negative instance count. If 0 < N' < N:
 log `WARN_VRAM_SHORTFALL`, proceed with N'. If N' == 0: main-only mode
 (S2.4).
+
+**Budgeting vs current (locked):** the S0 table sizes the *default* N
+from the fresh-load footprint (76.4 GB) so the pool fits with main
+awake. At run time the S1.4 allocation tier is the gate per instance,
+so a main stack that happens to be asleep (lower `memory.current`)
+simply passes the tier faster — it never *reduces* the default N below
+S0's value on this box; N only recomputes at install time (S6.3 step 4)
+and on drift (S2.5/S6.4).
 
 ### 2.4 N=0 / main-only mode (locked)
 
@@ -352,9 +396,13 @@ fallback (S1.1, ~18% smaller): recompute S1.4 with its footprint
 record the quant in use in `subagent-engine.yaml`. Still 0 → main-only.
 In main-only mode the
 manager stays up, health.json reports `{"instances": 0, "mode":
-"main-only"}`, harness scripts operate with all subagent commands
-returning exit 80 (S3.4) with a JSON `{"reason":
-"no_subagent_instances"}`. Install still succeeds (`install.sh` exits
+"main-only", "reason": "budget_zero"}` — `reason` names the cause:
+`"budget_zero"` (the S2.3 formula came out 0, possibly after the PTQ1_0
+retry) or `"user_unloaded"` (all instances explicitly unloaded via
+`bonsai2-unload`, S3.2 — a mode the user asked for, not a budget
+outcome). harness scripts operate with all subagent commands
+returning exit 80 (S3.4) with a JSON `{"reason": ...}` echoing the
+health.json reason. Install still succeeds (`install.sh` exits
 0, prints the mode). Rationale: the box is usable; the install is not
 a failure just because the main stack is fat that day. A live margin
 OOM that defeats an instance the budget granted (N' ≥ 1 at S2.3,
@@ -386,7 +434,11 @@ exit 4 — zero instances but not main-only mode.
   `ctx` value, and counted in that instance's restart budget (global #5).
   No instance is ever *retired* for drift (no pool removal, no N
   change) — only context shrinks. (Context-grow direction: never; v1 is
-  conservative.)
+  conservative.) The drift watch acts on instances that are *running*;
+  it never re-spawns instances the user explicitly unloaded
+  (`bunloaded`, S3.2) — an explicit `bonsai2-unload` beats the drift
+  watch; reload is only a command (`bonsai2-reload`), a manager restart,
+  or a re-run of install.
 
 ### 2.6 Configuration — `serving.yaml` (written by install.sh)
 
@@ -394,8 +446,8 @@ exit 4 — zero instances but not main-only mode.
 main_stack:
   container: qwen38-sglang
   endpoint: http://localhost:30001
-  footprint_gb: 46.9            # live-read preferred; this is the fallback
-os_reserved_gb: 12.0
+  footprint_gb: 76.4            # fresh-load footprint (SGLang log); live cgroup read preferred (S2.3)
+os_reserved_gb: 8.0
 manager:
   binary: /opt/bonsai2/bin/bonsai2-manager
   health_dir: /run/bonsai2
@@ -410,12 +462,17 @@ boot_target_s: 180              # measured, not guessed; updated by install test
   transitions `healthy→degraded→healthy`, harness `status` reflects it.
 - Reboot test (this box, scratch namespace): `reboot` → both stacks
   healthy ≤ `boot_target_s`; T measured and written back to serving.yaml.
-- N=0 test: override main footprint to 110 GB → free_gb < 0, so this
+- N=0 test: override main footprint to 120 GB → free_gb < 0, so this
   case exercises the S2.3 `max(0, …)` clamp → install → assert main-only
   mode, harness exit 80s, exit 0 from install.
 - Drift test: cgroup-tune main container higher → assert ctx-reduce
   event in health.json with the halved `ctx`, the instance healthy
   again < 15 s, zero restarts on any *other* instance, N unchanged.
+- Unload/reload test: `bonsai2-unload --all` → assert VRAM release
+  (instance cgroups gone), `status` shows `bunloaded` +
+  `main_only_reason: "user_unloaded"`, spawn → exit 80; the S2.5 5-min
+  recheck does NOT re-spawn; `bonsai2-reload --all` → healthy again
+  within `boot_target_s`.
 
 ### 2.8 Acceptance (runnable)
 
@@ -427,6 +484,9 @@ boot_target_s: 180              # measured, not guessed; updated by install test
 4. 5-minute drift simulation → ctx-reduce event, instance healthy at
    the halved ctx within 15 s, zero restarts on other instances, N
    unchanged.
+5. Unload/reload cycle (S2.7 test): `unload --all` → main-only with
+   `main_only_reason: "user_unloaded"`, no auto-reload on the drift
+   cycle; `reload --all` → N healthy within `boot_target_s`.
 
 ---
 
@@ -444,10 +504,16 @@ text** (diagnostic only; never parsed). Schemas:
  "error": null | "ERR_ENGINE_DOWN", "detail": "human text, optional"}
 // status
 {"stack": "healthy|degraded|main-only", "instances": [
-   {"i": 0, "port": 30101, "state": "healthy|degraded|bdown|bfailed",
+   {"i": 0, "port": 30101, "state": "healthy|degraded|bdown|bfailed|bunloaded",
     "ctx": 262144, "ctx_reduced": false, "slots_in_use": 3, "slots_total": 8}],
- "main_endpoint": "http://localhost:30001", "main_healthy": true}
+ "main_endpoint": "http://localhost:30001", "main_healthy": true,
+ "main_only_reason": "budget_zero"   // present when instances: 0 (S2.4)
+}
 ```
+
+Note: `bunloaded` = the user explicitly unloaded that instance
+(`bonsai2-unload`); it is not a failure state, routing skips it, and the
+drift watch does not re-spawn it (S2.5).
 
 ### 3.2 Command surface (locked — the full API; every flag specced)
 
@@ -465,8 +531,35 @@ bonsai2-status                                   # JSON (3.1)
 bonsai2-list-instances                           # human table; exit 0
 bonsai2-collect  <TASK_ID>                       # -> JSON; reads result file, returns task JSON + {"answer": ..., "reasoning": ..., "usage": {...}}
 bonsai2-bench    [--scenario NAME] [--quick]      # invokes S5 runner (S3.5)
+bonsai2-unload   [--all | --instances i[,i,...]]  # manager SIGTERMs the
+                                                  # targeted instance units (instant VRAM release);
+                                                  # no-op on already-unloaded; JSON {"unloaded": [i...]}
+bonsai2-reload   [--all | --instances i[,i,...]]  # re-spawn through the S1.4 allocation
+                                                  # tier + health re-probe; JSON {"reloaded": [i...], "state": ...}
 bonsai2-health                                   # raw /run/bonsai2/health.json, pretty
 ```
+
+`bonsai2-unload` / `bonsai2-reload` (pool control):
+- Unload: the manager SIGTERMs the targeted `bonsai2-llama-server@i`
+  units (graceful drain, SIGKILL after 5 s, same as `cancel`'s signal
+  path), releases the VRAM immediately, and marks the instance
+  `bunloaded` in health.json. Routing (S3.3) skips `bunloaded`
+  instances; with zero running instances the stack enters main-only
+  mode with `main_only_reason: "user_unloaded"` (S2.4), so spawn/collect
+  return exit 80 while the pool is explicitly off. Idempotent: unload of
+  an already-unloaded (or `bdown`/`bfailed`) instance is a no-op for
+  that index. `--all` = every non-running index in `instances.count`.
+- Reload: re-spawns the targeted indexes through the normal path — S1.4
+  allocation tier, S2.2 unit start, S2.2 health probe (healthy ≤
+  `boot_target_s`). If the allocation tier fails at a target index,
+  that index stays `bunloaded`, the others proceed, and the JSON carries
+  `"state": "partial"` + a `WARN_VRAM_SHORTFALL` detail (exit 0; an
+  unload/reload that partially succeeds is still a valid state — the
+  S1.4 i > 0 partial-load rule, not the i = 0 exit-4 case).
+- Both are manager-mediated (like every pool operation); a dead manager
+  → exit 84. Neither touches running tasks on other instances;
+  in-flight tasks on a target at unload finish their SIGTERM drain (the
+  5 s SIGKILL backstop applies, as in `cancel`).
 
 Exit codes (locked, complete set):
 
@@ -505,6 +598,10 @@ Per-command exit mapping (the table above + these; closed set unchanged):
 - `collect`: 20/21/22 = the task's terminal state (done / failed /
   timeout); 0 = task non-terminal, current-state JSON returned (caller
   polls); 2 = TASK_ID unknown.
+- `unload` / `reload`: 0 = operation done (including the no-op case and
+  a partial reload, which reports `"state": "partial"`); 2 = malformed
+  args (unknown instance index, both selectors given); 84 = manager
+  down (the pool is manager-mediated; S4.5's 84 path applies).
 
 Exit 8 vs 22 (both "deadline-related", different owners): **8** is a
 *manager-side wait budget* — the queue wait at `spawn` (S3.3) or the
@@ -597,6 +694,13 @@ main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
 - Idempotency: double-spawn same content-hash → same task_id, one slot.
 - Routing: fake `status` payloads with uneven load → assert least-loaded
   pick + priority preemption.
+- Pool control: mock manager stub tracks instance state; `unload --all`
+  → every index `bunloaded`, `status` reports `main_only_reason:
+  "user_unloaded"`, `spawn` → exit 80; unload again → no-op exit 0;
+  `reload --all` → healthy; partial case: force the S1.4 allocation
+  tier to fail at index 1 → `reload` JSON `"state": "partial"`, exit 0,
+  index 1 still `bunloaded`. Bad args (unknown index; both `--all` and
+  `--instances`) → exit 2. Dead manager → exit 84.
 
 ### 3.8 Acceptance (runnable)
 
@@ -610,6 +714,10 @@ main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
    per S5.4; no code outside the closed set ever emitted (the suite
    asserts the closed set; a stray exit 1 or any other code fails it).
 4. N=0 mode: every subagent command → exit 80 with the S2.4 JSON.
+5. Unload/reload: `unload --all` → exit 80 pool with the S2.4
+   `user_unloaded` JSON; `reload --all` → all N healthy; the mock pool
+   cases from S3.7 (no-op, partial, bad-args, dead-manager) all assert
+   the exact JSON + code.
 
 ---
 
@@ -617,7 +725,9 @@ main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
 
 ### 4.1 Shape (locked)
 
-A skill named `bonsai2-harness` (Hermes skill dir, loaded on demand):
+A skill named `bonsai2-harness` (standard SKILL.md text skill —
+frontmatter + body — installable into Hermes, pi, or any agent runtime
+that loads text skills and can run bash; loaded on demand):
 - **When to use:** any session where the main agent (this box's qwen3.8
   via :30001, or any agent pointed at `harness.yaml`) may offload work.
 - **Commands:** exactly S3.2 (the skill never invents commands).
@@ -716,7 +826,8 @@ quality becomes apparent from task success")
   S4.2 table, citation check +
   win/lose recompute → a `doctrine-audit.json`; a failing audit blocks
   the skill PR).
-- **Fresh-session test:** a new main-agent session (fresh pi/Hermes
+- **Fresh-session test:** a new main-agent session in any agent runtime
+  that loads the S4.1 skill (pi, Hermes, or equivalent — fresh
   session, only the skill + S3.2 scripts available, mock engine) must
   complete the standard workload set (S5.6) with zero undocumented
   commands — asserted by the session transcript's command log.
@@ -878,8 +989,12 @@ main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
   check), writes the four config files (S1.6/S2.6/S3.6/S5.7) from
   detected box state, installs the S2.2 units, starts the manager, runs
   the S2.7 health checks, prints the stack-ready report.
-- No compose file in v1 (nothing runs in docker besides the pre-existing
-  main stack, which install.sh never touches).
+- No compose file in v1 and no docker-*running* bonsai (nothing runs in
+  docker besides the pre-existing
+  main stack, which install.sh never touches). The `Dockerfile.build`
+  image is a build-time tool only: it compiles the pinned fork
+  (S1.2), then the binary is extracted to `/opt/bonsai2/` and systemd
+  runs it.
 
 ### 6.2 Prerequisites (verified on this box, R-09 — locked as the
 supported matrix)
@@ -891,7 +1006,7 @@ supported matrix)
 | NVIDIA driver ≥ 580 | 580.126.09 ✓ | `nvidia-smi` parses, version ≥ 580 |
 | nvidia-container-toolkit | ✓ (main stack uses it) | presence check only (build stage) |
 | docker (build stage only) | 27.5.1 ✓ | `docker version` |
-| unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB). **Warn, not fail:** at/above 96 GiB the install proceeds normally; below 96 GiB it logs `WARN_MEMORY_BELOW_MATRIX` and still computes N via S1.4/S2.3 (a ~96 GiB box with the 46.9 GB main stack computes N = 3 at PQ2_0); only below ~70 GiB does N come out 0 → main-only mode (S2.4), still exit 0 |
+| unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB). **Warn, not fail:** at/above 96 GiB the install proceeds normally; below 96 GiB it logs `WARN_MEMORY_BELOW_MATRIX` and still computes N via S1.4/S2.3 (a ~96 GiB box with the 76.4 GB main stack computes N = 1; below ~95.9 GiB N comes out 0 → main-only mode (S2.4)), still exit 0 |
 | python 3.12 (bench runner) | 3.12.3 ✓ | `python3 --version` ≥ 3.10 |
 | free disk ≥ 20 GB | ~100 GB ✓ | `df /opt` ≥ 20 GB — a floor, not an expectation: a clean install writes ~8 GB (model + binary + configs), the build stage peaks higher; ~100 GB free is normal on a fresh GB10 |
 
@@ -906,10 +1021,19 @@ exit ≠ 0, nothing installed. Rows marked "warn" in S6.2 — currently the
 unified-memory row — proceed with a logged warning and are not a
 failure). (2) build/extract binary to `/opt/bonsai2/bin` (skip
 if present + version matches the pin — idempotency). (3) download model
-(S1.1, skip if SHA matches). (4) detect main-stack footprint live
-(`docker stats qwen38-sglang`; probe fails → main stack dead, fall back
-to the 46.9 GB default, log `WARN_MAIN_STACK_DEAD`, install continues
-per S6.4's main-only fallback) → compute N via S1.4 → write the four
+(S1.1, skip if SHA matches). (4) detect the main-stack fresh-load
+footprint: read the main container's SGLang startup log
+(`docker logs qwen38-sglang`, `available_gpu_mem` + pool size lines,
+read-only) and compute pool − available; if the log is unavailable,
+fall back to the main container's cgroup `memory.current` while the
+main stack is awake; if the main stack is dead, fall back to the
+S2.6 default 76.4 GB, log `WARN_MAIN_STACK_DEAD`, install continues
+per S6.4's main-only fallback. Record the detected value in
+`serving.yaml` as `main_stack.footprint_gb` (the drift-watch baseline,
+S6.4). `--instances N` overrides `instances.count` for this install
+(the S0 phased-rollout flag: `--instances 1` to build/verify, then
+re-run without it, or `--instances 3`, to load to default N). Compute
+N via S1.4 → write the four
 YAMLs. (5) install units (S2.2), start manager. (6) health checks
 (S2.7 probes, 180 s budget) — in main-only mode (S2.4) these cover the
 main endpoint only; in a partial load (S1.4 `WARN_VRAM_SHORTFALL` at
@@ -924,16 +1048,17 @@ proceed); exit 2 on config.
 ### 6.4 Idempotency + main-stack contract (locked)
 
 - Re-run: binary/model skipped if pinned-and-verified; YAMLs
-  regenerated only if detected state changed (N changed, main footprint
+  regenerated only if detected state changed (N changed, main fresh-load
+  footprint (the recorded `main_stack.footprint_gb`, S6.3 step 4)
   drifted > 5 GB — a policy constant, set below the per-instance budget
   of 11.5 GB so a drift this size can already change N; the S6.7
   +10 GB test exercises it) — else `--force-config` to regenerate; units
   re-installed without restart if unchanged (`systemctl daemon-reload`
   only on diff).
 - **Never touches the main stack:** no `docker` command against
-  `qwen38-sglang` except `stats` (read-only) and `inspect` (read-only).
-  The main stack dies? install continues (main-only fallback), and the
-  report says so.
+  `qwen38-sglang` except `logs` / `stats` / `inspect` / cgroup reads
+  (all read-only). The main stack dies? install continues (main-only
+  fallback), and the report says so.
 
 ### 6.5 Upgrade procedure (locked — C-06: "whenever a new version of
 the main agent or subagent model engine is released")
@@ -950,6 +1075,13 @@ the main agent or subagent model engine is released")
 - **Subagent model (revision/quant):** same PR flow; full bench (S5.5)
   when the quant or revision changes; the doctrine audit (S4.6) re-runs
   in the same PR.
+- **Raising N (pool expansion, S0 default N = 3 is a safe start):**
+  after a full M1–M8 bench pass with M8 guardrail green (S5.9 #3) and
+  headroom to spare, re-run `install.sh --instances N'` (S6.3 step 4)
+  with N' recomputed from the live S1.4 budget; the new instances boot
+  through the S1.4 allocation tier as usual. A PR that raises N must
+  carry the fresh M8 row (no guardrail regression) or it is blocked,
+  exactly like an engine-pin bump.
 - **Rollback:** `install.sh --rollback <previous-state-file>` (state
   files: `/opt/bonsai2/etc/state-<timestamp>.yaml`, one per install,
   last 5 kept) — restores configs + restarts the manager; binary/model
@@ -1023,6 +1155,11 @@ aarch64 build)
 
 ## Out of scope (locked, from S0 non-goals)
 
-LLM-orchestration, main-stack changes, vision (mmproj), multi-box v1,
-fine-tuning, LLM-judge bench mode, instance kill-for-drift, docker-run
-bonsai, stateful subagents.
+LLM-to-LLM orchestration of subagents (the main agent orchestrates via
+S3.2 bash + the S4 skill — that is the design; LLMs calling LLMs to
+coordinate is what's out), main-stack changes, vision (mmproj),
+multi-box v1,
+fine-tuning, LLM-judge bench mode, instance kill-for-drift,
+docker-run
+bonsai (the Dockerfile.build image is build-time only, S6.1), stateful
+subagents.

@@ -1,0 +1,105 @@
+<mxfile host="app.diagrams.net" agent="hermes-agent">
+  <diagram id="diagram" name="page">
+    <mxGraphModel dx="1400" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1440" pageHeight="1640" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+<mxCell id="n2" value="dgx-spark-qwen38 serving stack - end to end (live state 2026-09-19)" style="text;html=1;align=left;fontStyle=1;fontColor=#083763;fontSize=20;" vertex="1" parent="1"><mxGeometry x="40" y="12" width="1300" height="30" as="geometry"/></mxCell>
+<mxCell id="n3" value="One GB10 box. Agent traffic: client -&gt; keepalive proxy :30001 -&gt; SGLang engine :30000. Control: browser -&gt; Spark Cockpit :30090 -&gt; sudo exact-argv -&gt; systemd. Lane order below = request path." style="text;html=1;align=left;fontColor=#555555;fontSize=11;" vertex="1" parent="1"><mxGeometry x="40" y="36" width="1360" height="30" as="geometry"/></mxCell>
+<mxCell id="n4" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#083763;" vertex="1" parent="1"><mxGeometry x="40" y="70" width="1360" height="140" as="geometry"/></mxCell>
+<mxCell id="n5" value="1. Clients (agent CLIs must use the proxy port 30001, not the engine port)" style="text;html=1;align=left;fontStyle=1;fontColor=#083763;fontSize=14;" vertex="1" parent="1"><mxGeometry x="60" y="80" width="1320" height="30" as="geometry"/></mxCell>
+<mxCell id="n6" value="Agent CLIs - opencode (oc), Claude Code, Hermes
+provider config -&gt; :30001 (opencode.json)
+chat template patched for agentic clients, limits from oc-limits.sh" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcebf8;strokeColor=#083763;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="112" width="380" height="84" as="geometry"/></mxCell>
+<mxCell id="n7" value="Any OpenAI / Anthropic client (SDKs, Open WebUI, curl)
+OpenAI :30000/v1/chat/completions - Anthropic :30000/v1/messages
+Bearer ~/.config/qwen38/api-key (Authorization header only)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcebf8;strokeColor=#083763;fontSize=11;" vertex="1" parent="1"><mxGeometry x="460" y="112" width="380" height="84" as="geometry"/></mxCell>
+<mxCell id="n8" value="Browser (laptop / phone, tailnet or loopback)
+Spark Cockpit UI + Agent tab (framed opencode web)
+login = the api-key; CSRF token on every mutating POST" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcebf8;strokeColor=#083763;fontSize=11;" vertex="1" parent="1"><mxGeometry x="860" y="112" width="520" height="84" as="geometry"/></mxCell>
+<mxCell id="n9" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#333333;" vertex="1" parent="1"><mxGeometry x="40" y="240" width="1360" height="140" as="geometry"/></mxCell>
+<mxCell id="n10" value="2. Keepalive proxy - the only component that reads bytes it does not control" style="text;html=1;align=left;fontStyle=1;fontColor=#7a3d00;fontSize=14;" vertex="1" parent="1"><mxGeometry x="60" y="250" width="1320" height="30" as="geometry"/></mxCell>
+<mxCell id="n11" value="keepalive-proxy.py - systemd qwen38-keepalive (enabled, running) - listens :30001, upstream 127.0.0.1:30000
+SSE keepalive at event boundaries (KEEPALIVE_S=10, MAX_SILENCE_S=3600)  |  zombie abort ordering: x-override-rid, abort BEFORE close, else drain
+oversize guard: counts via /tokenize, prices images from headers  |  corruption tripwire  |  one log line per request (bytes, first/last event, outcome)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fde8cd;strokeColor=#7a3d00;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="282" width="1320" height="84" as="geometry"/></mxCell>
+<mxCell id="n12" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#004d00;" vertex="1" parent="1"><mxGeometry x="40" y="410" width="1360" height="300" as="geometry"/></mxCell>
+<mxCell id="n13" value="3. SGLang engine :30000 - docker container, --gpus all, host net, --memory 100g. Exactly one lane enabled at a time." style="text;html=1;align=left;fontStyle=1;fontColor=#004d00;fontSize=14;" vertex="1" parent="1"><mxGeometry x="60" y="420" width="1320" height="30" as="geometry"/></mxCell>
+<mxCell id="n14" value="27B lane - qwen38-sglang.service   [ENABLED, running now]
+edp1096 abliterated Qwen3.8-27B NVFP4 (pin rev 21565d3) + DFlash2 speculative draft, depth 16 (lossless: target verifies every draft)
+262K ctx | --mem-fraction-static 0.50 | autotuner disabled | --sleep-on-idle | 71.4 tok/s greedy median class" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9f0d3;strokeColor=#004d00;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="452" width="860" height="88" as="geometry"/></mxCell>
+<mxCell id="n15" value="flash lane - qwen38-flash.service   [installed, currently disabled]
+Qwen3.8-Flash-Next 176B hybrid MoE NVFP4 + NEXTN/MTP draft | 262K window on ONE box
+47.7 GiB PLE N-gram table served from sparse file on NVMe (rewritten each boot, ~10 min) | targets: flash / flash-uncensored / flash-nvda" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9f0d3;strokeColor=#004d00;dashed=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="552" width="860" height="88" as="geometry"/></mxCell>
+<mxCell id="n16" value="Checkpoint storage (pinned twice: image digest + HF revision, same --revision passed to the server)
+~/.cache/huggingface  -  weights
+~/flashnext-ple - sparse PLE table (flash lane only)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#333333;fontSize=11;" vertex="1" parent="1"><mxGeometry x="940" y="452" width="440" height="88" as="geometry"/></mxCell>
+<mxCell id="n17" value="GB10 unified-memory guard (the trap that bricks this box)
+SGLang accounting misses 25-40 GB of transient allocations
+--memory 100g bounds host RSS only; the fraction is the real guard:
+0.50 native / 0.76 for the 1M preset" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f6d9d9;strokeColor=#990000;fontSize=11;" vertex="1" parent="1"><mxGeometry x="940" y="552" width="440" height="88" as="geometry"/></mxCell>
+<mxCell id="n18" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#990000;" vertex="1" parent="1"><mxGeometry x="40" y="740" width="1360" height="300" as="geometry"/></mxCell>
+<mxCell id="n19" value="4. Control plane - Spark Cockpit (the box is meant to be driven from this page)" style="text;html=1;align=left;fontStyle=1;fontColor=#990000;fontSize=14;" vertex="1" parent="1"><mxGeometry x="60" y="750" width="1320" height="30" as="geometry"/></mxCell>
+<mxCell id="n20" value="Spark Cockpit - dashboard/cockpit.py - :30090 - qwen38-dashboard.service (enabled, running)
+single Python process, stdlib only: ThreadingHTTPServer, SSE /api/stream, canvas sparklines
+state from a REAL generation canary, not /health (a wedged SGLang answers /health fine): ready / loading / wedged / stopped
+8 tabs: Overview, Agent, Engines, Requests, Machine, Models, Logs, Setup" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcebf8;strokeColor=#083763;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="782" width="700" height="108" as="geometry"/></mxCell>
+<mxCell id="n21" value="Action surface - everything privileged is exact-argv, audited, confirm-gated
+sudoers /etc/sudoers.d/qwen38-cockpit: NOPASSWD, no wildcards, fixed argv lines only
+from the browser: unit start / stop / restart / enable-disable (one serving unit at a time, enforced)
+lane switch (stages switch-model.sh, takes effect at restart) | flush prefix cache | abort all | smoke probe
+COCKPIT_AUTOHEAL=0: restart of a wedged engine is opt-in" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f6d9d9;strokeColor=#990000;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="906" width="700" height="120" as="geometry"/></mxCell>
+<mxCell id="n22" value="Agent relay - dashboard/agent_relay.py - :30091
+browser boundary for the Agent tab: frames opencode&#x27;s own web UI behind the cockpit session
+run a session on the box from a laptop or phone, no terminal needed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcebf8;strokeColor=#083763;fontSize=11;" vertex="1" parent="1"><mxGeometry x="780" y="782" width="560" height="108" as="geometry"/></mxCell>
+<mxCell id="n23" value="opencode-web.service - opencode serve 127.0.0.1:4096 (enabled, running)
+loopback-only; the relay is the only browser-facing path to it
+default model follows every lane switch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#333333;fontSize=11;" vertex="1" parent="1"><mxGeometry x="780" y="906" width="560" height="120" as="geometry"/></mxCell>
+<mxCell id="n24" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#083763;" vertex="1" parent="1"><mxGeometry x="40" y="1070" width="1360" height="170" as="geometry"/></mxCell>
+<mxCell id="n25" value="5. systemd - live at startup: every unit is enabled; Restart=always; the engine&#x27;s long boot does not hold the others" style="text;html=1;align=left;fontStyle=1;fontColor=#083763;fontSize=14;" vertex="1" parent="1"><mxGeometry x="60" y="1080" width="1320" height="30" as="geometry"/></mxCell>
+<mxCell id="n26" value="multi-user.target units (all in /etc/systemd/system, rendered by install.sh from the repo&#x27;s pins)
+qwen38-sglang (ENABLED, running - boot ~5-7 min, cached kernels)  |  qwen38-flash (installed, disabled - boot ~10-15 min, PLE rewrite)
+qwen38-keepalive (enabled, running)  |  qwen38-dashboard (enabled, running, Restart=always RestartSec=3)  |  opencode-web (enabled, running)
+hardening: ProtectSystem=full + ReadWritePaths on the cockpit unit; cockpit has NO dependency on the engine on purpose -
+it starts at boot even if the engine is down, because reporting that IS its job. Cockpit shows the engine &#x27;loading&#x27; until its canaries pass." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcebf8;strokeColor=#083763;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="1112" width="1280" height="116" as="geometry"/></mxCell>
+<mxCell id="n27" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#333333;" vertex="1" parent="1"><mxGeometry x="40" y="1270" width="1360" height="220" as="geometry"/></mxCell>
+<mxCell id="n28" value="6. Repo and state - what renders the units, and where everything the stack writes lives" style="text;html=1;align=left;fontStyle=1;fontColor=#333333;fontSize=14;" vertex="1" parent="1"><mxGeometry x="60" y="1280" width="1320" height="30" as="geometry"/></mxCell>
+<mxCell id="n29" value="Repo /home/blckwll/prod/dgx-spark-qwen38 (pinned v1.13)
+install.sh - converging installer: renders units/configs/templates from pins (never edits); idempotent; step 10/10 = cockpit; ends on the cockpit URL
+switch-model.sh - surgical: rewrites ONLY the --model-path line, flips boot enablement, stages the switch; never restarts a service itself
+bench.sh / bench-matrix.sh / tools-check.py / conc-check.py / bench-agent.py - the instruments
+ci-local.sh - the invariants (target-list spellings agree, pin blocks greppable, sudoers allowlist complete, limits chain, stdlib only)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#333333;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="1312" width="620" height="160" as="geometry"/></mxCell>
+<mxCell id="n30" value="State dir ~/.config/qwen38 (the stack&#x27;s single config home)
+api-key (0600; Bearer for the engine AND the cockpit login)
+patched chat templates | deployed keepalive-proxy.py | opencode.json + oc launcher (lifts the 32K output cap)
+cockpit-secret (0600) | cockpit-events.jsonl | cockpit-history.json | wedge-*.txt forensic dumps | unit *.bak-preupdate
+cockpit&#x27;s recipes.py derives &#x27;what this lane should run&#x27; from the repo&#x27;s own text - that is the drift panel" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#333333;fontSize=11;" vertex="1" parent="1"><mxGeometry x="720" y="1312" width="660" height="160" as="geometry"/></mxCell>
+<mxCell id="n31" value="LIVE STATE 2026-09-19 - all four active units running (qwen38-sglang up 10 h).
+Serving lane: 27B UNCENSORED (edp1096 abliterated NVFP4, pin rev 21565d3, 262K ctx, mem-fraction 0.50, DFlash2 D16).
+Flash lane installed but disabled. A switch changes which unit is enabled at boot; the :30000 API surface and the :30001 proxy stay put.
+Engine and cockpit are independent units: the cockpit comes up at startup with or without the engine - same contract as the inference server, plus Restart=always." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#333333;fontSize=11;" vertex="1" parent="1"><mxGeometry x="40" y="1510" width="1360" height="96" as="geometry"/></mxCell>
+<mxCell id="n32" value="agent traffic :30001" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="250" y="196" as="sourcePoint"/><mxPoint x="300" y="282" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n33" value="agent traffic :30001 (direct :30000 fine for plain OpenAI/Anthropic clients)" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="650" y="196" as="sourcePoint"/><mxPoint x="700" y="282" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n34" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#083763;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1120" y="196" as="sourcePoint"/><Array as="points"><mxPoint x="45" y="196"/><mxPoint x="45" y="830"/></Array><mxPoint x="60" y="830" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n35" value=":30090 - login = api-key" style="text;html=1;align=left;fontColor=#083763;fontSize=10;" vertex="1" parent="1"><mxGeometry x="150" y="198" width="320" height="30" as="geometry"/></mxCell>
+<mxCell id="n36" value="forwards SSE to :30000" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="400" y="366" as="sourcePoint"/><mxPoint x="400" y="452" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n37" value="feed: one line per proxied request -&gt; cockpit Requests tab + zombie guard" style="text;html=1;align=left;fontColor=#7a3d00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="950" y="742" width="440" height="30" as="geometry"/></mxCell>
+<mxCell id="n38" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#7a3d00;dashed=1;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="950" y="776" as="sourcePoint"/><mxPoint x="700" y="782" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n39" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#004d00;dashed=1;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="60" y="840" as="sourcePoint"/><Array as="points"><mxPoint x="55" y="840"/><mxPoint x="55" y="496"/></Array><mxPoint x="60" y="496" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n40" value="canary: a real generation probe - a wedged engine still answers /health" style="text;html=1;align=left;fontColor=#004d00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="64" y="652" width="320" height="30" as="geometry"/></mxCell>
+<mxCell id="n41" value=":30091 -&gt; :4096" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1060" y="890" as="sourcePoint"/><mxPoint x="1060" y="906" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n42" value="sudo exact argv" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="410" y="1026" as="sourcePoint"/><mxPoint x="410" y="1112" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n43" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#083763;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="770" y="1112" as="sourcePoint"/><Array as="points"><mxPoint x="770" y="760"/><mxPoint x="930" y="760"/></Array><mxPoint x="930" y="366" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n44" value="boots keepalive proxy (enabled)" style="text;html=1;align=left;fontColor=#083763;fontSize=10;" vertex="1" parent="1"><mxGeometry x="785" y="766" width="250" height="30" as="geometry"/></mxCell>
+<mxCell id="n45" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#083763;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1340" y="1160" as="sourcePoint"/><Array as="points"><mxPoint x="1410" y="1160"/><mxPoint x="1410" y="700"/><mxPoint x="920" y="700"/></Array><mxPoint x="920" y="710" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n46" value="boots the enabled lane: 27B ~5-7 min, flash ~10-15 min" style="text;html=1;align=left;fontColor=#083763;fontSize=10;" vertex="1" parent="1"><mxGeometry x="1000" y="684" width="320" height="30" as="geometry"/></mxCell>
+<mxCell id="n47" value="starts opencode-web (enabled)" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1160" y="1112" as="sourcePoint"/><mxPoint x="1160" y="1026" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n48" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="380" y="1312" as="sourcePoint"/><mxPoint x="380" y="1242" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n49" value="install.sh renders the units; switch-model.sh flips enablement" style="text;html=1;align=left;fontColor=#333333;fontSize=10;" vertex="1" parent="1"><mxGeometry x="300" y="1244" width="400" height="30" as="geometry"/></mxCell>
+<mxCell id="n50" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="700" y="1392" as="sourcePoint"/><mxPoint x="720" y="1392" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n51" value="installer artifacts land here" style="text;html=1;align=left;fontColor=#333333;fontSize=10;" vertex="1" parent="1"><mxGeometry x="740" y="1294" width="300" height="30" as="geometry"/></mxCell>
+<mxCell id="n52" value="" style="edgeStyle=orthogonal;rounded=1;html=1;strokeWidth=1.5;strokeColor=#555555;dashed=1;endArrow=block;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1380" y="1312" as="sourcePoint"/><Array as="points"><mxPoint x="1425" y="1312"/><mxPoint x="1425" y="966"/></Array><mxPoint x="1340" y="966" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n53" value="state: cockpit-secret / events / history; recipes derived from repo text" style="text;html=1;align=left;fontColor=#333333;fontSize=10;" vertex="1" parent="1"><mxGeometry x="1000" y="1050" width="360" height="30" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
