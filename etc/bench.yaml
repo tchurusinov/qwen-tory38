@@ -1,0 +1,14 @@
+# bench.yaml — TEMPLATE (SPEC S5.7).
+#
+# install.sh renders the real file to /opt/bonsai2/etc/bench.yaml.
+# bench/run.py (Phase 4) is the runner; bonsai2-bench (S3.2) is the thin
+# wrapper. Results: /run/bonsai2/bench/<ts>_<scenario>.json (7-day
+# rotation + 1 GB cap, S5.2); committed summary: bench-results/.
+
+scenarios: [M1, M2, M3, M4, M5, M6, M7, M8]   # S5.2 matrix
+quick: [M1, M2, M7]                           # S5.5 quick bench
+repetitions: 3
+regression_tps_pct: 10                        # S5.5: > 10% t/s regression blocks a pin-bump PR
+results_dir: /run/bonsai2/bench
+goldens_dir: bench/goldens                    # repo-relative at test time; /opt/bonsai2/share/bench/goldens at install
+main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct

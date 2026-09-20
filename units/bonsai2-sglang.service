@@ -1,0 +1,27 @@
+# bonsai2-sglang.service — instance MANAGER unit (SPEC S2.2).
+#
+# PLACEHOLDER: the authoritative file is rendered/installed by install.sh
+# (MAP 2.4) from this template. Shape is locked by S2.2: Type=notify via
+# the manager's sd_notify; Wants= (not Requires=) on the main stack so a
+# dead main stack does not block the bonsai pool (S2.1).
+#
+# The manager: reads /opt/bonsai2/etc/{subagent-engine,serving}.yaml,
+# runs the S1.4 boot check, spawns granted instances via
+# `systemctl start bonsai2-server@i`, watches them (S2.2 health probe,
+# S2.5 drift), and emits /run/bonsai2/health.json (S3.1 schema).
+
+[Unit]
+Description=bonsai2 subagent pool manager
+Wants=qwen38-sglang.service
+After=network.target qwen38-sglang.service docker.service
+
+[Service]
+Type=notify
+ExecStart=/opt/bonsai2/bin/bonsai2-manager
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

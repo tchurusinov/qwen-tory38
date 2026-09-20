@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — tripwire, not the gate.
+#
+# Runs on STAGED changes only:
+#   1. bash -n on staged .sh; shellcheck (if installed — soft until it is)
+#   2. ruff format --check + ruff check on staged .py (if installed — soft)
+#   3. secret scan of the staged diff (same heuristic as scripts/gate.sh)
+#   4. trailing whitespace / CRLF / staged files > 50 MB
+#   5. full ./scripts/gate.sh
+#
+# git commit --no-verify stays allowed with a one-line reason in the PR
+# body (AGENTS.md "Code quality"). The G2 gate (gate.sh) is still the
+# formal check; this hook is the early warning.
+
+set -uo pipefail
+
+FAIL=0
+
+# Collect staged files (added/copied/modified; ignore deletions)
+STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
+
+if [ -n "$STAGED" ]; then
+  # 1) bash -n + shellcheck on staged .sh
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    if ! bash -n "$f" 2>/tmp/precommit-bashn.txt; then
+      echo "pre-commit FAIL: bash -n $f" >&2
+      cat /tmp/precommit-bashn.txt >&2
+      FAIL=1
+    fi
+    if command -v shellcheck >/dev/null 2>&1; then
+      if ! shellcheck "$f" >/tmp/precommit-shellcheck.txt 2>&1; then
+        echo "pre-commit WARN: shellcheck $f (soft until baseline set):" >&2
+        sed 's/^/    /' /tmp/precommit-shellcheck.txt >&2
+      fi
+    fi
+  done < <(echo "$STAGED" | grep -E '\.sh$' || true)
+
+  # 2) ruff on staged .py (soft until installed)
+  if command -v ruff >/dev/null 2>&1; then
+    PYFILES="$(echo "$STAGED" | grep -E '\.py$' || true)"
+    if [ -n "$PYFILES" ]; then
+      if ! ruff format --check $PYFILES >/tmp/precommit-rufffmt.txt 2>&1; then
+        echo "pre-commit WARN: ruff format $PYFILES (soft until baseline set):" >&2
+        sed 's/^/    /' /tmp/precommit-rufffmt.txt >&2
+      fi
+      if ! ruff check $PYFILES >/tmp/precommit-ruff.txt 2>&1; then
+        echo "pre-commit WARN: ruff check $PYFILES (soft until baseline set):" >&2
+        sed 's/^/    /' /tmp/precommit-ruff.txt >&2
+      fi
+    fi
+  fi
+
+  # 3) secret scan of the staged diff (same logic as gate.sh)
+  if git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
+     | grep -Eiq '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}'; then
+    echo "pre-commit FAIL: possible secret literal in staged diff:" >&2
+    git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
+      | grep -Ei '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}' \
+      | sed 's/^/    /' >&2
+    FAIL=1
+  fi
+
+  # 4) trailing whitespace / CRLF / no staged file > 50 MB
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    case "$f" in
+      *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;; # binary
+    esac
+    if grep -qE ' +$' "$f"; then
+      echo "pre-commit FAIL: trailing whitespace in $f" >&2
+      grep -nE ' +$' "$f" | head -5 | sed 's/^/    /' >&2
+      FAIL=1
+    fi
+    if grep -q $'\r' "$f"; then
+      echo "pre-commit FAIL: CRLF line endings in $f" >&2
+      FAIL=1
+    fi
+    size="$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)"
+    if [ -n "$size" ] && [ "$size" -gt 52428800 ]; then
+      echo "pre-commit FAIL: $f is $((size / 1048576)) MB (> 50 MB staged-file cap)" >&2
+      FAIL=1
+    fi
+  done < <(echo "$STAGED")
+fi
+
+# 5) full local gate (its own exit code is authoritative for the diff)
+if ! ./scripts/gate.sh; then
+  echo "pre-commit: gate.sh failed (details above)" >&2
+  FAIL=1
+fi
+
+if [ $FAIL -ne 0 ]; then
+  echo "pre-commit: BLOCKED (fix and re-stage, or --no-verify with a one-line PR-body reason)" >&2
+  exit 1
+fi
+echo "pre-commit: ok"

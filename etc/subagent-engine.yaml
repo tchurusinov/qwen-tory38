@@ -1,0 +1,50 @@
+# subagent-engine.yaml — TEMPLATE (SPEC S1.6).
+#
+# Source of truth for the subagent pool: engine pin, image pin, model,
+# instance sizing, sampling, alias, api key.
+#
+# install.sh renders the real file to /opt/bonsai2/etc/subagent-engine.yaml
+# (S6.3): it fills every <placeholder> from detected box state + the S1.1
+# download (computed SHA256) + the S1.6 image pin (docker content digest).
+# The four runtime YAMLs (this + serving + harness + bench) are written by
+# install.sh, never hand-edited (S1.6, S2.6, S3.6, S5.7).
+#
+# This template must stay parseable YAML (scripts/gate.sh checks it).
+
+engine:
+  binary: /opt/bonsai2/bin/llama-server   # as baked into the image below
+  pin:
+    repo: https://github.com/PrismML-Eng/llama.cpp
+    commit: "<pinned-sha-at-install>"   # engine_pin (S1.2); bumped only via a PR + S5 quick bench
+
+image:
+  pin:
+    tag: "bonsai2-server:<tag-at-install>"   # image_pin (S1.6, S6.1)
+    sha256: "<docker-content-digest-at-install>"
+
+model:
+  repo: prism-ml/Ternary-Bonsai-2-27B-gguf
+  revision: main
+  file: bonsai-2-27b-gguf-PQ2_0.gguf
+  sha256: "<computed-at-install>"   # S1.1; mismatch = ERR_HASH_MISMATCH, exit 4
+  fallback_file: bonsai-2-27b-gguf-PTQ1_0.gguf   # used when N==0-quant-fallback (S2.4)
+
+instances:
+  count: 3                  # S0 default on this box (worked example: floor(37.2/11.5) = 3); N recomputed at install (S1.4)
+  port_base: 30101          # instance i -> port 30101+i (S1.3); per-instance override allowed
+  ctx_size: 262144          # S1.3 default; drift/drift-watch halves it to a multiple of 8192, floor 8192 (S2.5)
+  max_num_seqs: 8           # S1.3 --parallel; bounds 1-64
+  per_instance_budget_gb: 11.5   # S1.4: 10.91 GB footprint + 5% margin
+
+sampling:                          # locked from model card (S1.6)
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 1
+  min_p: 0.01
+  repeat_penalty: 1.0
+  repeat_last_n: 512
+  stop_token_ids: [248046, 248044]
+
+reasoning_format: deepseek_r1   # S1.3: content/reasoning split
+alias: qwen38-27b-subagent      # S1.3: all instances share the alias; harness routes by port
+api_key: bonsai2-local          # S1.3 --api-key (local-only, not a secret)
