@@ -40,7 +40,15 @@ class TestSuiteSmoke(unittest.TestCase):
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom):
+                if isinstance(node, ast.ImportFrom):
+                    # Relative imports (level > 0, e.g. `from . import x`)
+                    # resolve against the package, not the top level —
+                    # assert they never appear in hermetic test modules.
+                    self.assertEqual(node.level, 0,
+                                     f"tests/{f.name}: relative import "
+                                     f"(level {node.level}) in a hermetic "
+                                     f"test module — use an absolute "
+                                     f"import instead")
                     names = [] if node.module is None else [node.module]
                 else:
                     continue

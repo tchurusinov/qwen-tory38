@@ -12,6 +12,9 @@
 
 [Unit]
 Description=bonsai2 subagent pool manager
+# Wants= is non-fatal: a dead main stack must NOT block the bonsai pool
+# (S2.1 — they are independent engines; the manager handles the dead-main
+# case per S6.4 main-only fallback). Do not "improve" this to Requires=.
 Wants=qwen38-sglang.service
 After=network.target qwen38-sglang.service docker.service
 StartLimitIntervalSec=600

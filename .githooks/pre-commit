@@ -23,9 +23,11 @@
 set -uo pipefail
 
 FAIL=0
-# PID-unique temp files so concurrent git operations on one host (rebase +
-# commit) cannot interleave on shared /tmp names.
+# PID-unique temp files so concurrent git operations on one host
+# (rebase + commit) cannot interleave on shared /tmp names; cleaned up
+# on exit (G3c round 4 P1).
 TMP_PREFIX="/tmp/precommit-$$"
+trap 'rm -f "${TMP_PREFIX}"_*' EXIT
 
 # Collect staged files (added/copied/modified; ignore deletions)
 STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
@@ -38,6 +40,9 @@ if [ -n "$STAGED" ]; then
       echo "pre-commit FAIL: bash -n $f" >&2
       cat "${TMP_PREFIX}_bashn" >&2
       FAIL=1
+      # Syntax is already broken: skip the rest of this file's checks
+      # (shellcheck on a broken file just adds noise — G3c round 4 P2).
+      continue
     fi
     if command -v shellcheck >/dev/null 2>&1; then
       if ! shellcheck "$f" >"${TMP_PREFIX}_shellcheck" 2>&1; then
