@@ -108,35 +108,58 @@ class TestVerify(_Base):
 
 
 class TestDownloadOne(_Base):
-    def test_success_first_attempt(self):
+    """`download_one` is a single attempt (the retry budget lives in
+    `fetch_entry`, which retries on both transport errors and a completed-but-
+    mismatched download — S1.5). These cases pin that contract."""
+
+    def test_single_attempt_success(self):
         fake, state = _ok_stream_factory(b"abc")
         orig = fetch._stream
         fetch._stream = fake
         try:
-            ok, err = fetch.download_one(
-                "http://x",
-                str(self.dl_dir / "part"),
-                3,
-                retries=3,
-                backoff=0.0,
-                sleep=lambda s: None,
-            )
+            ok, err = fetch.download_one("http://x", str(self.dl_dir / "part"), 3)
         finally:
             fetch._stream = orig
         self.assertTrue(ok, err)
         self.assertIsNone(err)
         self.assertEqual(state["calls"], 1)
 
-    def test_retries_then_fails(self):
+    def test_single_attempt_transport_failure_no_retry(self):
         fake = _fail_stream_factory()
-        sleeps = []
         orig = fetch._stream
         fetch._stream = fake
         try:
-            ok, err = fetch.download_one(
-                "http://x",
-                str(self.dl_dir / "part"),
-                None,
+            ok, err = fetch.download_one("http://x", str(self.dl_dir / "part"), None)
+        finally:
+            fetch._stream = orig
+        self.assertFalse(ok)
+        self.assertEqual(err, fetch.ERR_DOWNLOAD)
+        # A single attempt: no internal backoff/retry here (that is
+        # fetch_entry's job).
+
+
+class TestFetchEntryRetry(_Base):
+    """The S1.5 retry budget lives in `fetch_entry`: retry x3 on BOTH a
+    transport error AND a completed-but-mismatched (corrupt) download."""
+
+    def test_transport_error_retries_x3_then_err_download(self):
+        cache = self.tmp / "cache"
+        calls = []
+
+        def _fail(_url, _part, _size, **_kw):
+            calls.append(1)
+            raise OSError("reset")
+
+        orig = fetch._stream
+        fetch._stream = _fail
+        sleeps = []
+        try:
+            ok, err = fetch.fetch_entry(
+                url="http://x/w.gguf",
+                disk_name="w.gguf",
+                expected_sha=None,
+                expected_size=None,
+                cache_dir=str(cache),
                 retries=3,
                 backoff=10.0,
                 sleep=lambda s: sleeps.append(s),
@@ -145,10 +168,37 @@ class TestDownloadOne(_Base):
             fetch._stream = orig
         self.assertFalse(ok)
         self.assertEqual(err, fetch.ERR_DOWNLOAD)
-        # 3 attempts, backoff logged between attempts (not after the last),
-        # at the S1.5 10 s interval.
-        self.assertEqual(len(sleeps), 2)
-        self.assertEqual(sleeps, [10.0, 10.0])
+        self.assertEqual(len(calls), 3)  # 3 download attempts
+        self.assertEqual(sleeps, [10.0, 10.0])  # backoff between, not after
+
+    def test_mismatched_download_retries_x3_then_err_hash_mismatch(self):
+        cache = self.tmp / "cache"
+        wrong = b"X" * 100
+
+        def _always_wrong(_url, part, _size, **_kw):
+            Path(part).write_bytes(wrong)
+            return len(wrong), 0
+
+        orig = fetch._stream
+        fetch._stream = _always_wrong
+        try:
+            ok, err = fetch.fetch_entry(
+                url="http://x/w.gguf",
+                disk_name="w.gguf",
+                expected_sha=_sha(b"correct-bytes"),
+                expected_size=len(wrong),
+                cache_dir=str(cache),
+                retries=3,
+                backoff=10.0,
+                sleep=lambda s: None,
+            )
+        finally:
+            fetch._stream = orig
+        self.assertFalse(ok)
+        self.assertEqual(err, fetch.ERR_HASH_MISMATCH)
+        # The full-size corrupt .part is cleared each attempt, so the retry
+        # re-downloads from scratch rather than "resuming" the corrupt file.
+        self.assertFalse((cache / "w.gguf.part").exists())
 
 
 class TestFetchEntry(_Base):

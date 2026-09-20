@@ -145,29 +145,23 @@ def download_one(
     dest_part: str,
     expected_size: int | None,
     *,
-    retries: int = 3,
-    backoff: float = 10.0,
     log=print,
     sleep=time.sleep,
 ) -> tuple[bool, str | None]:
-    """Fetch `url` -> `dest_part` with retry/backoff. Digest is the caller's.
+    """One download attempt: `url` -> `dest_part`. Digest is the caller's.
 
-    `log`/`sleep` are injectable so the hermetic tests drive the retry logic
-    without a real network or real sleeps. Returns (ok, err) with err in
-    {None, ERR_DOWNLOAD}.
+    Returns (ok, err) with err in {None, ERR_DOWNLOAD}. The RETRY budget is
+    owned by `fetch_entry`, which retries on BOTH a transport error AND a
+    completed-but-mismatched (corrupt) download — S1.5 "retry download x3
+    (10 s backoff); then fail ... ERR_HASH_MISMATCH". `log`/`sleep` are
+    injectable so hermetic tests drive the attempt without a real network.
     """
-    last_err = ERR_DOWNLOAD
-    for attempt in range(1, max(1, retries) + 1):
-        try:
-            _stream(url, dest_part, expected_size)
-            return True, None
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-            last_err = ERR_DOWNLOAD
-            log(f"    attempt {attempt}/{retries} failed: {exc!r}")
-            if attempt < retries and backoff > 0:
-                log(f"    backoff {backoff}s before retry")
-                sleep(backoff)
-    return False, last_err
+    try:
+        _stream(url, dest_part, expected_size)
+        return True, None
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        log(f"    download attempt failed: {exc!r}")
+        return False, ERR_DOWNLOAD
 
 
 def fetch_entry(
@@ -186,8 +180,10 @@ def fetch_entry(
     """Fetch + verify one quant into `cache_dir/disk_name`.
 
     Idempotent (S6.4): if the target already verifies and `force` is unset,
-    it is re-verified and skipped (zero downloads). Returns (ok, err) with
-    err in {None, ERR_HASH_MISMATCH, ERR_DOWNLOAD}. A stale/corrupt final
+    it is re-verified and skipped (zero downloads). The download is retried
+    up to `retries` times (S1.5 "retry x3 / 10 s backoff") on BOTH a transport
+    error AND a completed-but-mismatched (corrupt) download, then fails with
+    `err` in {None, ERR_HASH_MISMATCH, ERR_DOWNLOAD}. A stale/corrupt final
     file is reused as a resume base; a verified-but-forced file is re-fetched.
     """
     target = os.path.join(cache_dir, disk_name)
@@ -214,30 +210,47 @@ def fetch_entry(
             # download attempt.
             os.replace(target, part)  # corrupt/partial: resume from these bytes
 
-    dl_ok, dl_err = download_one(
-        url, part, expected_size, retries=retries, backoff=backoff, log=log, sleep=sleep
-    )
-    if not dl_ok:
-        return False, dl_err or ERR_DOWNLOAD  # keep .part for a future resume
-
-    ok, verr = verify(part, expected_sha, expected_size)
-    if ok:
-        os.replace(part, target)
-        log(f"    {disk_name}: verified sha256={sha256_file(target)[:12]}...")
-        return True, None
-
-    # Completed download but wrong content: keep the .part only if it is a
-    # plausible partial (smaller than the pin) for a future resume, else clear.
-    part_size = os.path.getsize(part) if os.path.exists(part) else 0
-    if expected_size is None or part_size < expected_size:
-        log(f"    {disk_name}: {verr} — keeping partial ({part_size}B) for resume")
-    else:
-        log(f"    {disk_name}: {verr} — clearing {part_size}B, re-download")
-        try:
-            os.remove(part)
-        except OSError:
-            pass
-    return False, verr or ERR_HASH_MISMATCH
+    last_err = ERR_DOWNLOAD
+    for attempt in range(1, max(1, retries) + 1):
+        dl_ok, dl_err = download_one(url, part, expected_size, log=log, sleep=sleep)
+        if not dl_ok:
+            last_err = dl_err or ERR_DOWNLOAD
+            # keep .part so a later attempt (or a later run) can resume
+            if attempt < retries and backoff > 0:
+                log(
+                    f"    {disk_name}: backoff {backoff}s, retrying ({attempt}/{retries})"
+                )
+                sleep(backoff)
+            continue
+        # Download completed: verify before trusting the bytes.
+        ok, verr = verify(part, expected_sha, expected_size)
+        if ok:
+            os.replace(part, target)
+            log(f"    {disk_name}: verified sha256={sha256_file(target)[:12]}...")
+            return True, None
+        last_err = verr or ERR_HASH_MISMATCH
+        # Wrong content after a completed download (S1.5 "corrupt artifact"):
+        # keep the .part only if it is a plausible partial (smaller than the
+        # pin) so the next attempt resumes it; otherwise clear it so the next
+        # attempt re-downloads from scratch (a full-size corrupt file would
+        # otherwise keep being "resumed" forever).
+        part_size = os.path.getsize(part) if os.path.exists(part) else 0
+        if expected_size is None or part_size < expected_size:
+            log(
+                f"    {disk_name}: {last_err} — keeping partial ({part_size}B) for resume"
+            )
+        else:
+            log(
+                f"    {disk_name}: {last_err} — clearing {part_size}B, re-download from scratch"
+            )
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+        if attempt < retries and backoff > 0:
+            log(f"    {disk_name}: backoff {backoff}s, retrying ({attempt}/{retries})")
+            sleep(backoff)
+    return False, last_err
 
 
 def load_model_config(config_path: str, want: str = "all") -> dict:
