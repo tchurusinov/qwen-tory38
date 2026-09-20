@@ -22,7 +22,7 @@ LOG="$LOGDIR/gpu-$TS.log"
 {
   echo "=== @gpu test run $TS ==="
   echo "--- nvidia-smi snapshot (pre) ---"
-  nvidia-smi --query-gpu=driver_version,memory.used,memory.total,utilization.gpu --format=csv
+  nvidia-smi --query-gpu=driver_version,memory.used,memory.total,utilization.gpu --format=csv || true
   nvidia-smi -q -d MEMORY | grep -E 'Used|Total' | head -4 || true
   echo "--- free -h ---"
   free -h | sed -n '1,2p'

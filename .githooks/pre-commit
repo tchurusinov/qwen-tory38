@@ -25,7 +25,7 @@ set -uo pipefail
 FAIL=0
 # PID-unique temp files so concurrent git operations on one host (rebase +
 # commit) cannot interleave on shared /tmp names.
-TMP_PREFIX="/tmp/precommit-$$.txt."
+TMP_PREFIX="/tmp/precommit-$$"
 
 # Collect staged files (added/copied/modified; ignore deletions)
 STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
@@ -34,15 +34,15 @@ if [ -n "$STAGED" ]; then
   # 1) bash -n (hard) + shellcheck (hard when installed) on staged .sh
   while IFS= read -r f; do
     [ -f "$f" ] || continue
-    if ! bash -n "$f" 2>"$TMP_PREFIX bashn"; then
+    if ! bash -n "$f" 2>"${TMP_PREFIX}_bashn"; then
       echo "pre-commit FAIL: bash -n $f" >&2
-      cat "$TMP_PREFIX bashn" >&2
+      cat "${TMP_PREFIX}_bashn" >&2
       FAIL=1
     fi
     if command -v shellcheck >/dev/null 2>&1; then
-      if ! shellcheck "$f" >"$TMP_PREFIX shellcheck" 2>&1; then
+      if ! shellcheck "$f" >"${TMP_PREFIX}_shellcheck" 2>&1; then
         echo "pre-commit FAIL: shellcheck $f (installed, so hard):" >&2
-        sed 's/^/    /' "$TMP_PREFIX shellcheck" >&2
+        sed 's/^/    /' "${TMP_PREFIX}_shellcheck" >&2
         FAIL=1
       fi
     fi
@@ -56,20 +56,25 @@ if [ -n "$STAGED" ]; then
       PYFILES+=("$f")
     done < <(echo "$STAGED" | grep -E '\.py$' || true)
     if [ "${#PYFILES[@]}" -gt 0 ]; then
-      if ! ruff format --check "${PYFILES[@]}" >"$TMP_PREFIX rufffmt" 2>&1; then
+      if ! ruff format --check "${PYFILES[@]}" >"${TMP_PREFIX}_rufffmt" 2>&1; then
         echo "pre-commit FAIL: ruff format --check (installed, so hard):" >&2
-        sed 's/^/    /' "$TMP_PREFIX rufffmt" >&2
+        sed 's/^/    /' "${TMP_PREFIX}_rufffmt" >&2
         FAIL=1
       fi
-      if ! ruff check "${PYFILES[@]}" >"$TMP_PREFIX ruff" 2>&1; then
+      if ! ruff check "${PYFILES[@]}" >"${TMP_PREFIX}_ruff" 2>&1; then
         echo "pre-commit FAIL: ruff check (installed, so hard):" >&2
-        sed 's/^/    /' "$TMP_PREFIX ruff" >&2
+        sed 's/^/    /' "${TMP_PREFIX}_ruff" >&2
         FAIL=1
       fi
     fi
   fi
 
-  # 3) secret scan of the staged diff (same logic as gate.sh)
+  # 3) secret scan of the staged diff (same logic as gate.sh). Heuristic, not
+#    a scanner: a 16+ char literal after a key= / key: pair is flagged.
+#    Placeholders like "<pinned-sha-at-install>" do NOT match (the value
+#    inside the quotes must be bare [A-Za-z0-9]{16,}); ${...} and multi-word
+#    values likewise. Known FP class: real-but-local identifiers — the
+#    --no-verify escape hatch is the documented path for those.
   if git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
      | grep -Eiq '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}'; then
     echo "pre-commit FAIL: possible secret literal in staged diff:" >&2
@@ -87,7 +92,7 @@ if [ -n "$STAGED" ]; then
     case "$f" in
       *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;;
     esac
-    if head -c 8192 "$f" | LC_ALL=C grep -q $'\0'; then
+    if head -c 65536 "$f" | LC_ALL=C grep -q $'\0'; then
       continue
     fi
     if grep -qE ' +$' "$f"; then

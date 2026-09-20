@@ -2,7 +2,12 @@
 #
 # PLACEHOLDER: install.sh (MAP 2.4) renders one concrete unit per
 # granted instance i from this template (systemd template syntax:
-# instance i runs as bonsai2-server@i). The docker run flags are
+# instance i runs as bonsai2-server@i). NOT a runnable unit as-is:
+# systemd refuses to start it without ExecStart (verified:
+# `systemd-analyze verify` reports "no ExecStart= … Refusing"), so
+# the only way this file reaches a system is via install.sh, which
+# fills ExecStart and installs it under the name bonsai2-server@i.
+# The docker run flags are
 # VERBATIM the main-stack shape (user decision 2026-09-20) with values
 # filled from /opt/bonsai2/etc/subagent-engine.yaml:
 #
