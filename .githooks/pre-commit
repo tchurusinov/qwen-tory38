@@ -87,8 +87,10 @@ if [ -n "$STAGED" ]; then
     [ -f "$f" ] || continue
     # 50 MB staged-file cap: applies to ALL staged files, including
     # binaries (a 5 GB .gguf staged by a later phase must not sneak
-    # past silently — G3c round 6 P1).
-    size="$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)"
+    # past silently — G3c round 6 P1). Measured on the STAGED BLOB, not
+    # the working tree, so an unstaged shrink cannot mask the limit
+    # (G3c round 8 P2).
+    size="$(git cat-file -s ":0:$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)"
     if [ -n "$size" ] && [ "$size" -gt 52428800 ]; then
       echo "pre-commit FAIL: $f is $((size / 1048576)) MB (> 50 MB staged-file cap)" >&2
       FAIL=1
