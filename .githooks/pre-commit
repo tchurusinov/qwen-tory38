@@ -38,14 +38,17 @@ if [ -n "$STAGED" ]; then
 
   # 2) ruff on staged .py (soft until installed)
   if command -v ruff >/dev/null 2>&1; then
-    PYFILES="$(echo "$STAGED" | grep -E '\.py$' || true)"
-    if [ -n "$PYFILES" ]; then
-      if ! ruff format --check $PYFILES >/tmp/precommit-rufffmt.txt 2>&1; then
-        echo "pre-commit WARN: ruff format $PYFILES (soft until baseline set):" >&2
+    PYFILES=()
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      PYFILES+=("$f")
+    done < <(echo "$STAGED" | grep -E '\.py$' || true)
+    if [ "${#PYFILES[@]}" -gt 0 ]; then
+      if ! ruff format --check "${PYFILES[@]}" >/tmp/precommit-rufffmt.txt 2>&1; then
+        echo "pre-commit WARN: ruff format (soft until baseline set):" >&2
         sed 's/^/    /' /tmp/precommit-rufffmt.txt >&2
       fi
-      if ! ruff check $PYFILES >/tmp/precommit-ruff.txt 2>&1; then
-        echo "pre-commit WARN: ruff check $PYFILES (soft until baseline set):" >&2
+      if ! ruff check "${PYFILES[@]}" >/tmp/precommit-ruff.txt 2>&1; then
         sed 's/^/    /' /tmp/precommit-ruff.txt >&2
       fi
     fi
