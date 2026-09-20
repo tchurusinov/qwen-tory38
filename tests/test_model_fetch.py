@@ -390,6 +390,60 @@ class TestStreamRealPath(_Base):
         self.assertEqual(got, 50)
         self.assertEqual((self.dl_dir / "p").read_bytes(), data)
 
+    def test_over_size_partial_restarts_from_zero_not_appends(self):
+        # A `.part` LARGER than the pinned size (a stray over-long partial)
+        # must be re-fetched from byte 0: start resets to 0, NO Range header is
+        # sent, and the file is opened 'wb' (truncated) so the fresh bytes
+        # REPLACE the over-size bytes instead of being appended after them.
+        # This pins the edge that G3c round 5 P1@186 got wrong (the code does
+        # NOT append; it truncates).
+        import urllib.request
+
+        total = 100
+        fresh = b"S" * total
+        stale = b"J" * 150  # over-size: 150 > 100
+        (self.dl_dir / "p").write_bytes(stale)
+        captured = {}
+
+        class R:
+            status = 200
+
+            def __init__(self):
+                self._done = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def read(self, n):
+                if self._done:
+                    return b""
+                self._done = True
+                return fresh
+
+        def fake_urlopen(req, timeout=None):
+            captured["range"] = req.headers.get("Range")
+            return R()
+
+        orig = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            got, resumed_from = fetch._stream("http://x", str(self.dl_dir / "p"), total)
+        finally:
+            urllib.request.urlopen = orig
+        # start reset to 0 -> no Range header, fresh download from byte 0.
+        self.assertIsNone(captured.get("range"))
+        self.assertEqual(got, total)
+        self.assertEqual(resumed_from, 0)
+        # 'wb' truncated the over-size partial: final content is exactly the
+        # fresh bytes, not the stale 150B + fresh 100B appended.
+        self.assertEqual((self.dl_dir / "p").read_bytes(), fresh)
+
     def test_complete_partial_short_circuits_no_fetch(self):
         # A `.part` that already holds exactly the pinned byte count (e.g. a
         # crash after download, before promotion) must NOT trigger a Range
