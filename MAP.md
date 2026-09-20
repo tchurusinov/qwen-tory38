@@ -442,6 +442,43 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-20 — Phase 0 review loop closed: round-14 lint-alignment + session log (items 0.1–0.4, G3b rounds 1–14)
+- agent/model: Hermes qwen3.8-27b (session: Phase 0, branch `phase0-scaffolding`)
+- phase(s): P0 (0.1–0.4 done; G3b independent-review loop closed at round 14)
+- items checked: 0.1, 0.2, 0.3, 0.4 (unchanged this session — all already
+  [x]; this session closed the review loop + aligned the lint contract)
+- machine state: no /opt/bonsai2, no bonsai2 units/images (Phase 0 is
+  repo-only). Pre-commit hook ENABLED in this clone (core.hooksPath=
+  .githooks). NEW contract alignment (G3c round 14 P1): `scripts/gate.sh`
+  now runs shellcheck HARD when installed (was WARN-only) and a NEW ruff
+  step (format --check + check, HARD when `ruff` or `uvx ruff` is
+  available) — the pre-commit tripwire and the formal G2 gate now run the
+  SAME lint contract. Tree made ruff-clean: `scripts/diagram_qwen38_stack.py`
+  + `tests/test_smoke.py` reformatted + 2 ruff issues fixed (import order,
+  unused `fill`→`_fill`) + the diagram script chmod +x (EXE001). ruff is
+  uv-managed on this box (not on the bare PATH), so the gate/hook detect
+  it via `uvx ruff`. Gate PASS, hermetic suite OK (2 tests), hook green.
+- next: Phase 1, item 1.1 — pin the fork commit (PrismML-Eng/llama.cpp
+  `prism` branch; check tip SHA + the fork-vendoring decision: submodule
+  vs clone+pin; add `third_party/llama.cpp` per the 0.1 layout). Note the
+  gate baseline is now "ruff available → hard, shellcheck not installed →
+  soft-skip": a fresh session must not read the old "shellcheck soft" note
+  as still authoritative.
+- blockers/intricacies: (1) round-14 P1 was a real contract gap: the
+  tripwire checked `.py` at all and treated shellcheck as hard-when-
+  installed, while the formal gate treated shellcheck as WARN-only and had
+  no ruff step — fixed by aligning gate.sh UP to the documented contract
+  (not the hook down), so the tripwire cannot block what the gate allows.
+  (2) ruff availability axis: `command -v ruff` is false on this box (uv
+  manages it), so both gate.sh and the hook now fall back to `uvx ruff`;
+  if a future session installs ruff on the bare PATH, the `ruff` branch
+  wins and uvx is not used. (3) `scripts/diagram_qwen38_stack.py` lives
+  OUTSIDE tests/, so its ruff reformat did NOT trip the stdlib-import
+  AST check — that scanner walks tests/ only (the hermetic suite root),
+  while the gate's ruff step covers every tracked .py.
+- spec deltas: none (round-14 findings were tripwire/gate contract, not
+  SPEC content; no SPEC.md change).
+
 ### 2026-09-20 — Phase 0 scaffolding: layout, test runner, toolchain, pre-commit (items 0.1–0.4)
 - agent/model: Hermes qwen3.8-27b (session: Phase 0, branch `phase0-scaffolding`)
 - phase(s): P0 (0.1–0.4 done; Phase 0 exit criteria met)

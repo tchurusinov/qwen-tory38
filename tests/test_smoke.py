@@ -36,11 +36,9 @@ class TestSuiteSmoke(unittest.TestCase):
         # it also covers future hermetic helpers (e.g. tests/fixtures/,
         # which lands at MAP P3) — G3c round 9 P2.
         files = sorted(
-            p for p in root.rglob("*.py")
-            if p.is_file() and "gpu" not in p.parts
+            p for p in root.rglob("*.py") if p.is_file() and "gpu" not in p.parts
         )
-        self.assertGreaterEqual(len(files), 1,
-                                "hermetic suite has no test modules")
+        self.assertGreaterEqual(len(files), 1, "hermetic suite has no test modules")
         allowed = set(sys.stdlib_module_names)
         for f in files:
             tree = ast.parse(f.read_text(), filename=str(f))
@@ -65,10 +63,13 @@ class TestSuiteSmoke(unittest.TestCase):
                     continue
                 for n in names:
                     top = n.split(".")[0]
-                    self.assertIn(top, allowed,
-                                  f"tests/{f.name}: import of non-stdlib "
-                                  f"module {top!r} (hermetic suite = "
-                                  f"stdlib only, S6.6)")
+                    self.assertIn(
+                        top,
+                        allowed,
+                        f"tests/{f.name}: import of non-stdlib "
+                        f"module {top!r} (hermetic suite = "
+                        f"stdlib only, S6.6)",
+                    )
 
 
 if __name__ == "__main__":

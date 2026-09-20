@@ -93,21 +93,32 @@ if [ -n "$STAGED" ]; then
     fi
   done < <(echo "$STAGED" | grep -E '\.sh$' || true)
 
-  # 2) ruff format --check + ruff check (hard when installed) on staged .py
+  # 2) ruff format --check + ruff check (hard when ruff is available) on
+  #    staged .py. Availability = `ruff` on the bare PATH or `uvx ruff`
+  #    (uv present) — same detection as the gate step (G3c round 14 P1:
+  #    the tripwire and the formal gate must run the same lint contract;
+  #    on this box ruff is uv-managed, not on the bare PATH, so uvx is
+  #    the axis that makes it "installed").
+  RUFF_CMD=""
   if command -v ruff >/dev/null 2>&1; then
+    RUFF_CMD="ruff"
+  elif command -v uvx >/dev/null 2>&1; then
+    RUFF_CMD="uvx ruff"
+  fi
+  if [ -n "$RUFF_CMD" ]; then
     PYFILES=()
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       PYFILES+=("$f")
     done < <(echo "$STAGED" | grep -E '\.py$' || true)
     if [ "${#PYFILES[@]}" -gt 0 ]; then
-      if ! ruff format --check "${PYFILES[@]}" >"${TMP_PREFIX}_rufffmt" 2>&1; then
-        echo "pre-commit FAIL: ruff format --check (installed, so hard):" >&2
+      if ! $RUFF_CMD format --check "${PYFILES[@]}" >"${TMP_PREFIX}_rufffmt" 2>&1; then
+        echo "pre-commit FAIL: ruff format --check (available, so hard):" >&2
         sed 's/^/    /' "${TMP_PREFIX}_rufffmt" >&2
         FAIL=1
       fi
-      if ! ruff check "${PYFILES[@]}" >"${TMP_PREFIX}_ruff" 2>&1; then
-        echo "pre-commit FAIL: ruff check (installed, so hard):" >&2
+      if ! $RUFF_CMD check "${PYFILES[@]}" >"${TMP_PREFIX}_ruff" 2>&1; then
+        echo "pre-commit FAIL: ruff check (available, so hard):" >&2
         sed 's/^/    /' "${TMP_PREFIX}_ruff" >&2
         FAIL=1
       fi

@@ -9,9 +9,16 @@
 # Adapted from senior-git-1.0 templates/gate.sh for this repo (bash serving
 # scripts + skill + bench harness; no Python test suite yet):
 #   1) bash -n every tracked .sh file
-#   2) shellcheck every tracked .sh file (when available — WARN-only until
-#      shellcheck is installed, so it never silently blocks)
-#   3) secret scan on the PR diff (gitleaks substitute)
+#   2) shellcheck every tracked .sh file — HARD when installed, skipped
+#      when absent (gate baseline: "not installed"; the pre-commit tripwire
+#      and the gate now agree on severity — G3c round 14 P1)
+#   3) ruff format --check + ruff check every tracked .py — HARD when
+#      ruff is available (PATH `ruff`, or `uvx ruff` via uv when ruff is
+#      not on the bare PATH), skipped when neither is present
+#      (G3c round 14 P1: the hook checked .py at all; the gate now does
+#      too, so the tripwire and the formal gate run the same lint contract)
+#   4) secret scan on the PR diff (gitleaks substitute)
+#   5) yaml parse every tracked .yaml/.yml
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -30,7 +37,10 @@ for f in "${SHFILES[@]}"; do
   fi
 done
 
-# 2) shellcheck (soft check — not yet installed on this box at baseline)
+# 2) shellcheck — HARD when installed (a failing lint is a gate failure,
+#    same as the pre-commit tripwire; skipped = not installed, which is
+#    the recorded baseline). G3c round 14 P1: this used to be WARN-only,
+#    so the tripwire could block what the formal gate would allow.
 if command -v shellcheck >/dev/null 2>&1; then
   echo "[gate] shellcheck tracked .sh files"
   for f in "${SHFILES[@]}"; do
@@ -38,14 +48,44 @@ if command -v shellcheck >/dev/null 2>&1; then
     if shellcheck "$f" > /tmp/gate-shellcheck.txt 2>&1; then
       echo "  ok    $f"
     else
-      echo "  WARN  $f (shellcheck):"; sed 's/^/    /' /tmp/gate-shellcheck.txt
+      echo "  FAIL  $f (shellcheck):"; sed 's/^/    /' /tmp/gate-shellcheck.txt; FAIL=1
     fi
   done
 else
   echo "[gate] shellcheck not installed — skipping (baseline: soft)"
 fi
 
-# 3) secret scan on the PR diff (heuristic — this machine's gitleaks fallback)
+# 3) ruff — HARD when available. Detection: `ruff` on the bare PATH, or
+#    `uvx ruff` (uv present) — on this box ruff is uv-managed and not on
+#    the bare PATH, so uvx is the availability axis. Neither present:
+#    skipped (baseline: soft). Same contract as the pre-commit tripwire
+#    (G3c round 14 P1).
+RUFF_CMD=""
+if command -v ruff >/dev/null 2>&1; then
+  RUFF_CMD="ruff"
+elif command -v uvx >/dev/null 2>&1; then
+  RUFF_CMD="uvx ruff"
+fi
+if [ -n "$RUFF_CMD" ]; then
+  mapfile -t PYFILES < <(git ls-files '*.py' 2>/dev/null)
+  if [ "${#PYFILES[@]}" -gt 0 ]; then
+    echo "[gate] ruff tracked .py files"
+    if $RUFF_CMD format --check "${PYFILES[@]}" > /tmp/gate-ruff-fmt.txt 2>&1; then
+      echo "  ok    ruff format --check"
+    else
+      echo "  FAIL  ruff format --check:"; sed 's/^/    /' /tmp/gate-ruff-fmt.txt; FAIL=1
+    fi
+    if $RUFF_CMD check "${PYFILES[@]}" > /tmp/gate-ruff.txt 2>&1; then
+      echo "  ok    ruff check"
+    else
+      echo "  FAIL  ruff check:"; sed 's/^/    /' /tmp/gate-ruff.txt; FAIL=1
+    fi
+  fi
+else
+  echo "[gate] ruff not available (no ruff, no uvx) — skipping (baseline: soft)"
+fi
+
+# 4) secret scan on the PR diff (heuristic — this machine's gitleaks fallback)
 echo "[gate] secret scan (diff)"
 DIFF="$(git diff "origin/$BASE...HEAD" 2>/dev/null || git diff HEAD~1 2>/dev/null || true)"
 if echo "$DIFF" | grep -nE '^\+' | grep -vE '^\+\+\+' \
@@ -56,7 +96,7 @@ if echo "$DIFF" | grep -nE '^\+' | grep -vE '^\+\+\+' \
   FAIL=1
 fi
 
-# 4) YAML sanity for tracked .yaml/.yml (config files land here over time)
+# 5) YAML sanity for tracked .yaml/.yml (config files land here over time)
 echo "[gate] yaml parse tracked .yaml/.yml"
 mapfile -t YAMLFILES < <(git ls-files '*.yaml' '*.yml' 2>/dev/null)
 for f in "${YAMLFILES[@]}"; do
