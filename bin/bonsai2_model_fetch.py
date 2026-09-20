@@ -182,9 +182,17 @@ def fetch_entry(
 
     os.makedirs(cache_dir, exist_ok=True)
     if os.path.exists(target):
-        if verify(target, expected_sha, expected_size)[0]:
-            os.remove(target)  # verified but --force: re-fetch from zero
+        if force:
+            # --force = "re-download even if cached + verified": drop the old
+            # target and re-fetch from zero. No re-verify needed — force
+            # already decided, so we do not pay a full-SHA pass on the
+            # (potentially 7 GB) target before removing it (G3c round 1 P1).
+            os.remove(target)
         else:
+            # Non-force: we reached here because the idempotent check above
+            # did NOT pass, so the target is known-unverified (a corrupt or
+            # partial file). Reuse its bytes as a resume base for the next
+            # download attempt.
             os.replace(target, part)  # corrupt/partial: resume from these bytes
 
     dl_ok, dl_err = download_one(
