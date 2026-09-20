@@ -15,7 +15,7 @@ engine:
   binary: /opt/bonsai2/bin/llama-server   # as baked into the image below
   pin:
     repo: https://github.com/PrismML-Eng/llama.cpp
-    commit: "<pinned-sha-at-install>"   # engine_pin (S1.2); bumped only via a PR + S5 quick bench
+    commit: "9a9394a895b96003ca842a6041cb28ac49a108f7"   # engine_pin (S1.2): PrismML-Eng/llama.cpp branch prism tip at MAP 1.1 (2026-09-20); source in-repo at third_party/llama.cpp (submodule); bumped only via a PR + S5 quick bench
 
 image:
   pin:

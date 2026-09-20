@@ -182,15 +182,16 @@ v1, re-pinned on re-bench (S5.5).
   (confirmed in the model README's compatibility note).
 - **Build:** source build for aarch64 GB10 (prebuilt CUDA binaries are
   x86_64-only — verified against the demo repo's `download_binaries.sh`).
-  Build flags (from `PrismML-Eng/Bonsai-demo/scripts/build_cuda_linux.sh`,
-  adapted): `cmake -B build -DGGML_CUDA=ON -DLLAMA_CURL=ON -DGGML_CUDA_F16=ON
-  -DCMAKE_BUILD_TYPE=Release -DLLAMA_ACCELERATE=OFF
-  -DCUDA_ARCH_NATIVE=OFF -DCUDA_ARCH_LIST="121a"` with the fork's
-  ternary kernel toggles `LLAMA_BONSAI_LLAMA_CPP=ON`,
-  `LLAMA_BONSAI_TERNARY_KERNELS_LLAMA_CPP=ON`,
-  `LLAMA_BONSAI_TERNARY_KERNELS_CUDA_LLAMA_CPP=ON`. CUDA arch `121a` =
-  Blackwell sm_121 (GB10). Requires driver ≥ 580 (box has 580.126.09 ✓),
-  CUDA ≥ 12.8 (build container provides 13.0 ✓).
+  Build flags (per `PrismML-Eng/Bonsai-demo/scripts/build_cuda_linux.sh`
+  at pin `9a9394a8`, delta 2026-09-20): `cmake -B build -G Ninja
+  -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_CUDA_ARCHITECTURES="121a"` — the demo's generic multi-arch list
+  (`80;86;89;90;[100;]120a`) is replaced by this box's sm_121. The fork's
+  ternary kernels compile unconditionally into the build at this commit;
+  no `LLAMA_BONSAI_*` cmake toggles exist at `9a9394a8` (verified: zero
+  matches in any CMake file at the pin). CUDA arch `121a` = Blackwell
+  sm_121 (GB10). Requires driver ≥ 580 (box has 580.126.09 ✓), CUDA ≥ 12.8
+  (build container provides 13.0 ✓).
 - **Binary location:** `/opt/bonsai2/` on the host (installed from the
   pinned image, S2.2/S6.1); the same binary ships inside
   `bonsai2-server:v1` and the per-instance containers run from the

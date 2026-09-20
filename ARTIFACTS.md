@@ -13,7 +13,7 @@ E = external (pre-existing, consumed read-only).
 
 | artifact | location | pin | created by |
 |---|---|---|---|
-| llama.cpp fork source (prism branch) | `third_party/llama.cpp` (submodule, planned) | fork commit, recorded in `subagent-engine.yaml` `engine_pin` at install | MAP 1.1 (decision open: submodule vs vendored clone — AGENTS.md "Open") |
+| llama.cpp fork source (prism branch) | `third_party/llama.cpp` (submodule, added 2026-09-20) | fork commit `9a9394a8` (prism tip at MAP 1.1; 2026-09-18), recorded in `etc/subagent-engine.yaml` `engine_pin` (rendered to `/opt/bonsai2/etc/` by install.sh) | MAP 1.1 (vendoring decided: submodule — in-repo, project-wide, never system-wide) |
 | bench goldens | `bench/goldens/` | versioned in repo | MAP 4.4 |
 
 ## This box (pre-existing, external — consumed read-only)
