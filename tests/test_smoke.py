@@ -47,15 +47,19 @@ class TestSuiteSmoke(unittest.TestCase):
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
-                if isinstance(node, ast.ImportFrom):
-                    # Relative imports (level > 0, e.g. `from . import x`)
-                    # resolve against the package, not the top level —
-                    # assert they never appear in hermetic test modules.
-                    self.assertEqual(node.level, 0,
-                                     f"tests/{f.name}: relative import "
-                                     f"(level {node.level}) in a hermetic "
-                                     f"test module — use an absolute "
-                                     f"import instead")
+                elif isinstance(node, ast.ImportFrom):
+                    # Relative imports (level > 0, e.g.
+                    # `from .mock_engine import x`) resolve against the
+                    # local package, never a top-level module — they
+                    # cannot pull in a third-party dep, so the
+                    # stdlib-only check skips them. This is what lets
+                    # tests/fixtures/ (MAP P3) use conventional in-package
+                    # relative imports (G3c round 11 P1-3: the earlier
+                    # `level == 0` assert would have blocked that
+                    # structure). Only ABSOLUTE imports (level == 0) are
+                    # checked against stdlib.
+                    if node.level > 0:
+                        continue
                     names = [] if node.module is None else [node.module]
                 else:
                     continue

@@ -32,7 +32,18 @@ set -uo pipefail
 
 # Run the hook from the repo root no matter where git invoked it
 # (git commit -C, manual sh .githooks/pre-commit — G3c round 6 P2).
-cd "$(git rev-parse --show-toplevel)"
+# Guard the cd: without `set -e` a failed rev-parse (invoked outside a
+# repo / broken worktree) would leave us in the invoking CWD and every
+# subsequent `git diff`/`git cat-file` would run from the wrong place,
+# producing a false "ok" pass (G3c round 11 P1-1/P1-2).
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "pre-commit FAIL: git rev-parse --show-toplevel failed (not in a git repo?)" >&2
+  exit 1
+}
+cd "$REPO_ROOT" || {
+  echo "pre-commit FAIL: cd $REPO_ROOT failed" >&2
+  exit 1
+}
 
 FAIL=0
 # PID-unique temp files so concurrent git operations on one host
