@@ -33,6 +33,7 @@ E = external (pre-existing, consumed read-only).
 | artifact | path | pin | created by |
 |---|---|---|---|
 | CUDA 13.0 build container (local image) | docker `nvidia/cuda:13.0.2-devel-ubuntu24.04` | `nvidia/cuda@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6` (multi-arch manifest; aarch64 verified) | MAP 0.3 (build stage for MAP 1.2; needs `apt-get install cmake ninja-build` inside — see MAP 0.3) |
+| bonsai2 fork build pipeline (local image) | docker `bonsai2-server-build:121a` (repo `image/Dockerfile`), binary at `/opt/bonsai2/bin/llama-server` inside | build inputs: fork pin `9a9394a8` + CUDA image digest above + `libnvidia-compute-580` (driver lib, NVIDIA apt repo); image ID recorded in the build log | MAP 1.2 (builds the S1.2 binary for the MAP 1.4 runtime image `bonsai2-server:<tag>`; rebuild on any pin change) |
 
 Planned host locations (fixed by SPEC — do not relocate without a spec
 delta):

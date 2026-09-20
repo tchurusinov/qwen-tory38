@@ -1,0 +1,16 @@
+# Docker build context hygiene for the bonsai2 build pipeline (MAP 1.2).
+# The only context the Dockerfile reads is third_party/llama.cpp/ source.
+.git
+.gitmodules
+third_party/llama.cpp/.git
+test-logs/
+docs/
+bench-results/
+.ruff_cache/
+__pycache__/
+scr.txt
+*.md
+MAP.md
+AGENTS.md
+SPEC.md
+ARTIFACTS.md

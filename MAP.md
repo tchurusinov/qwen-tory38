@@ -176,11 +176,29 @@ under the manager or the full stack).
       `-DCMAKE_CUDA_ARCHITECTURES="121a"`, no F16/CURL/ACCELERATE
       flags). Version policy: bump only via a PR with S5 quick bench
       (S1.2, S5.5).
-- [ ] 1.2 Build pipeline: source build aarch64 in the pinned CUDA image,
-      S1.2 cmake flags at the pin (delta 2026-09-20: no ternary kernel
-      toggles — they compile unconditionally at `9a9394a8`), arch `121a`;
-      assert fork ternary banner in `llama-server --version` (S1.2,
-      S1.8 #1).
+- [x] 1.2 Build pipeline (2026-09-20, this box): `image/Dockerfile`
+      builds the pinned fork source in the MAP 0.3 CUDA image
+      (`nvidia/cuda@sha256:5dc1bca2...`, digest-pinned FROM), S1.2
+      cmake flags at the pin, `-DCMAKE_CUDA_ARCHITECTURES="121a"`,
+      `-DLLAMA_BUILD_COMMIT=<engine_pin prefix>` (build context has no
+      git metadata: COPY strips .git, so the commit line is supplied
+      from the pin; CMake falls back to git-derived BUILD_COMMIT only
+      when LLAMA_BUILD_COMMIT is unset). Artifact: aarch64 ELF
+      `llama-server` + all its shared libs side by side in
+      `/opt/bonsai2/bin/` (RUNPATH `$ORIGIN`, patchelf; one `lib*.so*`
+      glob so new libs like libllama-server-impl.so can't drift out of
+      the copy). In-build assertions: sm_121a in
+      compile_commands.json, aarch64 ELF, banner carries the pin prefix
+      ("version: 0.2.0-dev (build 0, commit 9a9394a8)"),
+      libggml-cuda linked. Verified: build exit 0; banner + sm_121a in
+      the build log (test-logs/build-*.log, rotated); @gpu suite
+      tests/gpu/test_build_banner.py 3/3 OK (pin in banner,
+      libggml-cuda link, aarch64 ELF). Note for 1.4: the build log's
+      "ggml_cuda_init: no CUDA-capable device is detected" is the
+      expected GPU-less build-container outcome, not a failure; the
+      runtime image gets `--gpus all`. Build-image local tag:
+      `bonsai2-server-build:121a` (build pipeline artifact, not the
+      S1.6 image_pin — that is the runtime image, MAP 1.4).
 - [ ] 1.3 Model download + SHA256 verification: `PQ2_0` (default) +
       `PTQ1_0` (fallback); retry ×3 / 10 s backoff; `ERR_HASH_MISMATCH`
       exit 4 path (S1.1, S1.5).
@@ -451,6 +469,49 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-20 — Phase 1: build pipeline landed (item 1.2), fork binary built at pin
+- agent/model: Hermes qwen3.8-27b (session: Phase 1, branch `phase1-build-pipeline`)
+- phase(s): P1 (1.2 done; G3 pending on this branch)
+- items checked: 1.2
+- machine state: `image/Dockerfile` (build pipeline) + `.dockerignore` +
+  `tests/gpu/test_build_banner.py` (@gpu banner test, 3 cases) on branch
+  `phase1-build-pipeline` (cut from origin/main 1f515a4, i.e. post-1.1
+  merge). LOCAL docker image `bonsai2-server-build:121a` built (not
+  pushed; build pipeline artifact — the S1.6 image_pin is the MAP 1.4
+  runtime image, a different thing). Inside: aarch64 ELF
+  /opt/bonsai2/bin/llama-server + all shared libs (RUNPATH $ORIGIN,
+  patchelf). No /opt/bonsai2 host dir yet (that is install/1.4+ work).
+  Gitea token for this session: 66dacd04... (same as before, still valid).
+- next: 1.3 model download + SHA256 (PQ2_0 default + PTQ1_0 fallback,
+  retry x3/10s, ERR_HASH_MISMATCH exit 4). Note: local PTQ1_0 already on
+  the box (LM Studio copy, 5.95 GB) — the 1.3 download is PQ2_0 (7.21 GB)
+  to /opt/bonsai2/cache + the fallback SHA check; disk /opt has 353 GB.
+- blockers/intricacies: (1) ggml-cuda links the CUDA driver API (VMM:
+  cuMemCreate & co) to libcuda.so.1; the CUDA image only ships the
+  toolkit STUB libcuda.so (SONAME libcuda.so.1, filename mismatch), so
+  the exe link fails with undefined cuMem* refs — fixed by apt
+  `libnvidia-compute-580` in the build image (library-only, no kernel/GL
+  deps; provenance: NVIDIA apt repo, machine rule) + -rpath-link to the
+  stubs dir as belt-and-braces. (2) The build context has no git metadata
+  (COPY strips .git; the submodule .git is a gitlink FILE, not a usable
+  repo), so the build-info commit line is supplied via
+  -DLLAMA_BUILD_COMMIT=<engine_pin prefix> (CMake only falls back to
+  git-derived BUILD_COMMIT when the var is unset — verified in
+  third_party/llama.cpp/CMakeLists.txt:159). LLAMA_BUILD_COMMIT/
+  LLAMA_BUILD_NUMBER are the documented override knobs. (3) This fork
+  links libllama-server-impl.so as a separate shared lib — a hardcoded
+  lib copy list would miss it; use a `lib*.so*` glob. (4) --version does
+  NOT print the "CUDA1 = 1" system-info line (that is a model-load
+  banner); it runs ggml_cuda_init anyway, which in the GPU-less build
+  container logs "no CUDA-capable device is detected" — expected, not a
+  failure. CUDA backend assertion = `ldd | grep libggml-cuda`. SPEC S1.8
+  #1 was made concrete accordingly (commit-carrying build line +
+  libggml-cuda linked). (5) sm_121a check: grep compile_commands.json
+  (nvcc command lines), asserted in-build.
+- spec deltas: S1.8 #1 made concrete at the pin (banner = commit-carrying
+  build line + libggml-cuda linked; no separate ternary banner line in
+  this fork). No other SPEC changes.
 
 ### 2026-09-20 — Phase 1 start: fork pinned at 9a9394a8, vendored as submodule (item 1.1)
 - agent/model: Hermes qwen3.8-27b (session: Phase 1, branch `phase1-fork-pin`)

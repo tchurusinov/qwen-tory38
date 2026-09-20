@@ -351,8 +351,12 @@ api_key: bonsai2-local
 1. `install.sh` produces a `subagent-engine.yaml` with a valid model
    SHA256, pinned engine commit, and a pinned image digest
    (`image_pin`); the `llama-server --version` output inside the
-   container contains the fork's
-   ternary banner.
+   container contains the fork's ternary banner — concretely at pin
+   `9a9394a8`: the commit-carrying build line
+   `version: 0.2.0-dev (build <N>, commit <engine_pin prefix>)` (the
+   pin only exists on the fork's prism branch; the fork has no
+   separate ternary banner line) plus the CUDA backend linked
+   (`libggml-cuda` resolvable from the binary, S1.2 `GGML_CUDA=ON`).
 2. N instances (N per S0 table = 3 on this box) all healthy within
    120 s of boot; `/v1/models` on each port returns the alias.
 3. Concurrent load test passes (t/s ≥ 26.2, zero 5xx, VRAM delta ±10%).
