@@ -9,6 +9,26 @@ sources: idea.txt, docs/transcripts/*.md (3 videos), open-questions.md (locked 2
 
 # qwen-tory38 — SPEC
 
+## Contents
+
+- [Document conventions (locked)](#document-conventions-locked)
+- [S0 — Project overview (VRAM budget, division of labor, non-goals, existing-stack contract)](#project-overview-s0)
+- [Section 1 — Subagent inference engine (bonsai2)](#section-1--subagent-inference-engine-bonsai2)
+  [1.1 Artifacts](#11-artifacts) · [1.2 Serving engine (locked — research R-02 complete)](#12-serving-engine-locked--research-r-02-complete) · [1.3 Per-instance serving command (locked)](#13-per-instance-serving-command-locked) · [1.4 VRAM accounting (formula, locked)](#14-vram-accounting-formula-locked) · [1.5 Error / edge cases (locked)](#15-error--edge-cases-locked) · [1.6 Configuration — `subagent-engine.yaml`](#16-configuration--subagent-engineyaml) · [1.7 Testing](#17-testing) · [1.8 Acceptance criteria (runnable)](#18-acceptance-criteria-runnable)
+- [Section 2 — Startup / serving lifecycle](#section-2--startup--serving-lifecycle)
+  [2.1 Order (locked)](#21-order-locked) · [2.2 Units (locked)](#22-units-locked) · [2.3 Boot-time budget check (locked)](#23-boot-time-budget-check-locked) · [2.4 N=0 / main-only mode (locked)](#24-n0--main-only-mode-locked) · [2.5 Failure policy (locked)](#25-failure-policy-locked) · [2.6 Configuration — `serving.yaml` (written by install.sh)](#26-configuration--servingyaml-written-by-installsh) · [2.7 Testing](#27-testing) · [2.8 Acceptance (runnable)](#28-acceptance-runnable)
+- [Section 3 — Harness control scripts (the main-agent API)](#section-3--harness-control-scripts-the-main-agent-api)
+  [3.1 Output contract (locked)](#31-output-contract-locked) · [3.2 Command surface (locked — the full API; every flag specced)](#32-command-surface-locked--the-full-api-every-flag-specced) · [3.3 Instance routing (locked — C-03 "i am not sure, which ever one will be more efficient... you choose")](#33-instance-routing-locked--c-03-i-am-not-sure-which-ever-one-will-be-more-efficient-you-choose) · [3.4 Slot model (locked)](#34-slot-model-locked) · [3.5 Bench runner wiring (S3.5)](#35-bench-runner-wiring-s35) · [3.6 Configuration — `harness.yaml`](#36-configuration--harnessyaml) · [3.7 Testing (hermetic-first)](#37-testing-hermetic-first) · [3.8 Acceptance (runnable)](#38-acceptance-runnable)
+- [Section 4 — Harness skill (the doctrine)](#section-4--harness-skill-the-doctrine)
+  [4.1 Shape (locked)](#41-shape-locked) · [4.2 Work-allocation table (v1 doctrine — recalibrated by S5, locked as the starting point per C-02/C-04)](#42-work-allocation-table-v1-doctrine--recalibrated-by-s5-locked-as-the-starting-point-per-c-02c-04) · [4.3 Session economy (locked — C-04: "keep subagent instances and sessions in check, we have limited instances, one sglang engine")](#43-session-economy-locked--c-04-keep-subagent-instances-and-sessions-in-check-we-have-limited-instances-one-sglang-engine) · [4.4 Cost doctrine (v1 numbers — calibrated by S5; C-11: "t/s first, quality becomes apparent from task success")](#44-cost-doctrine-v1-numbers--calibrated-by-s5-c-11-ts-first-quality-becomes-apparent-from-task-success) · [4.5 Failure doctrine (locked, per S3.2 exit code)](#45-failure-doctrine-locked-per-s32-exit-code) · [4.6 Testing](#46-testing) · [4.7 Acceptance (runnable)](#47-acceptance-runnable)
+- [Section 5 — Bench framework](#section-5--bench-framework)
+  [5.1 Scope (locked — C-13: "t/s first, quality becomes apparent from task success")](#51-scope-locked--c-13-ts-first-quality-becomes-apparent-from-task-success) · [5.2 Scenario matrix (locked, from R-08; v1 = M1–M8)](#52-scenario-matrix-locked-from-r-08-v1--m1m8) · [5.3 Success rubrics (locked, named)](#53-success-rubrics-locked-named) · [5.4 Runner (locked)](#54-runner-locked) · [5.5 Re-bench policy (locked — feeds S6.5 upgrade procedure)](#55-re-bench-policy-locked--feeds-s65-upgrade-procedure) · [5.6 Standard workload set (used by S4.6's fresh-session test)](#56-standard-workload-set-used-by-s46s-fresh-session-test) · [5.7 Configuration — `bench.yaml`](#57-configuration--benchyaml) · [5.8 Testing](#58-testing) · [5.9 Acceptance (runnable)](#59-acceptance-runnable)
+- [Section 6 — GB10 packaging (one-command install)](#section-6--gb10-packaging-one-command-install)
+  [6.1 Artifact form (locked — main-stack parity: pinned docker image under systemd)](#61-artifact-form-locked--main-stack-parity-pinned-docker-image-under-systemd) · [6.2 Prerequisites (verified on this box, R-09 — locked as the supported matrix)](#62-prerequisites-verified-on-this-box-r-09--locked-as-the-supported-matrix) · [6.3 The one command (locked, ordered)](#63-the-one-command-locked-ordered) · [6.4 Idempotency + main-stack contract (locked)](#64-idempotency--main-stack-contract-locked) · [6.5 Upgrade procedure (locked — C-06: "whenever a new version of the main agent or subagent model engine is released")](#65-upgrade-procedure-locked--c-06-whenever-a-new-version-of-the-main-agent-or-subagent-model-engine-is-released) · [6.6 aarch64 pin list (locked — ARM64-only rule, every dep has an aarch64 build)](#66-aarch64-pin-list-locked--arm64-only-rule-every-dep-has-an-aarch64-build) · [6.7 Testing](#67-testing) · [6.8 Acceptance (runnable)](#68-acceptance-runnable)
+- [Global testing discipline](#global-testing-discipline)
+- [Global acceptance criteria (project-level, runnable)](#global-acceptance-criteria-project-level-runnable)
+- [Out of scope (locked, from S0 non-goals)](#out-of-scope-locked-from-s0-non-goals)
+
 ## Document conventions (locked)
 
 - Status lifecycle via YAML frontmatter: `proposed` / `active` / `superseded`
@@ -104,11 +124,12 @@ re-running `install.sh` without the flag (or `--instances 3`) — N is
 recomputed via S1.4, the YAML rewrites, and the remaining instances
 boot through the S1.4 allocation tier (S6.3/S6.5).
 
-**Component inventory.** S1 bonsai2 serving engine (pinned fork, one
-process per instance). S2 lifecycle (systemd, health, budget, failover).
-S3 harness control scripts (the main-agent API). S4 harness skill
-(doctrine). S5 bench framework. S6 packaging (build image + install.sh;
-no compose file in v1, S6.1).
+**Component inventory.** S1 bonsai2 serving engine (pinned fork; one
+docker container per instance under systemd — main-stack parity, S2.2).
+S2 lifecycle (systemd, health, budget, failover). S3 harness control
+scripts (the main-agent API). S4 harness skill (doctrine). S5 bench
+framework. S6 packaging (pinned bonsai image + install.sh; no compose
+file in v1, S6.1).
 
 **Non-goals (from idea.txt, locked).** (1) No LLM-to-LLM orchestration
 of subagents — no LLM endpoint is ever used to schedule or coordinate
@@ -130,6 +151,9 @@ is the main-agent engine.
 This project: reads its endpoint from `harness.yaml` (default
 `http://localhost:30001`), never restarts/rebuilds it, and treats a
 dead :30001 as external failure (harness exit 82), not its own.
+Bonsai runs in its own containers (`bonsai2-server@i`, S2.2) — the
+main stack and the bonsai pool are separate container families;
+install only ever reads from the main container (S6.4).
 
 ---
 
@@ -167,8 +191,11 @@ v1, re-pinned on re-bench (S5.5).
   `LLAMA_BONSAI_TERNARY_KERNELS_CUDA_LLAMA_CPP=ON`. CUDA arch `121a` =
   Blackwell sm_121 (GB10). Requires driver ≥ 580 (box has 580.126.09 ✓),
   CUDA ≥ 12.8 (build container provides 13.0 ✓).
-- **Binary location:** `/opt/bonsai2/bin/llama-server` inside the
-  subagent image; one process per instance.
+- **Binary location:** `/opt/bonsai2/` on the host (installed from the
+  pinned image, S2.2/S6.1); the same binary ships inside
+  `bonsai2-server:v1` and the per-instance containers run from the
+  image (main-stack parity — the main stack also runs from a pinned
+  image under a systemd unit, S2.2). One container per instance.
 - **Version policy:** `engine_pin.commit` is bumped only via a PR that
   re-runs the S5 quick bench; no silent upgrades.
 
@@ -186,6 +213,12 @@ v1, re-pinned on re-bench (S5.5).
   --reasoning-format deepseek_r1 \
   --alias "qwen38-27b-subagent"
 ```
+
+This is the container's `CMD` — each instance runs inside its
+`bonsai2-server@i` container (S2.2), host networking (parity with the
+main stack's `--network host`), the model baked into the image at
+`/opt/bonsai2/models/`, the S2.2 memory cap applied at the container
+level (`--memory` + cgroup `MemoryHigh`).
 
 - `--ctx-size 262144`: matches the model's 262K hybrid-attention ceiling
   (131072 effective per HF card; 262144 verified to work in the demo —
@@ -263,10 +296,14 @@ manager.
 ```yaml
 # /opt/bonsai2/etc/subagent-engine.yaml (written by install.sh)
 engine:
-  binary: /opt/bonsai2/bin/llama-server
+  binary: /opt/bonsai2/bin/llama-server   # as baked into the image below
   pin:
     repo: https://github.com/PrismML-Eng/llama.cpp
     commit: <pinned-sha>          # recorded at install
+image:
+  pin:
+    tag: bonsai2-server:<tag>     # recorded at install (S2.2)
+    sha256: <docker-content-digest at install>   # image_pin: {tag, sha256}
 model:
   repo: prism-ml/Ternary-Bonsai-2-27B-gguf
   revision: main
@@ -310,8 +347,10 @@ api_key: bonsai2-local
 
 ### 1.8 Acceptance criteria (runnable)
 
-1. `install.sh` produces a `subagent-engine.yaml` with a valid SHA256 and
-   pinned commit; `llama-server --version` output contains the fork's
+1. `install.sh` produces a `subagent-engine.yaml` with a valid model
+   SHA256, pinned engine commit, and a pinned image digest
+   (`image_pin`); the `llama-server --version` output inside the
+   container contains the fork's
    ternary banner.
 2. N instances (N per S0 table = 3 on this box) all healthy within
    120 s of boot; `/v1/models` on each port returns the alias.
@@ -328,12 +367,13 @@ api_key: bonsai2-local
 ### 2.1 Order (locked)
 
 Main sglang first (pre-existing, `qwen38-sglang` + `qwen38-keepalive`
-systemd units — untouched by this project). Bonsai instances after: a
-single `bonsai2-sglang.service` unit spawns the instance manager, which
-spawns N `bonsai2-llama-server@i` transient units (systemd template
-unit), in order, gated by the S1.4 allocation tier. Rationale: if the main
-stack fails at boot, we don't want N bonsai instances eating ~33 GB that
-a main-stack fix might need.
+systemd units — untouched by this project). Bonsai instances after: the
+`bonsai2-server@i` units are installed by `install.sh` (S2.2, same
+paradigm as the main stack's unit), but only the ones the S1.4
+allocation tier grants are started, in order, by the
+`bonsai2-sglang.service` manager. Rationale: if the main
+stack fails at boot, we don't want N bonsai instances eating ~33 GB
+that a main-stack fix might need.
 
 ### 2.2 Units (locked)
 
@@ -342,26 +382,52 @@ a main-stack fix might need.
   `subagent-engine.yaml`, runs the S1.4 boot check, spawns instances,
   watches each (restart policy below), emits health JSON on
   `/run/bonsai2/health.json` (schema S3.1).
-- `bonsai2-llama-server@%i.service` (transient, started by the manager):
-  `ExecStart=` the S1.3 command with `--port {port_base+i}`;
-  `Restart=on-failure`, `RestartSec=5`, `StartLimitBurst=3` (then
-  `bfailed`), `CPUQuota=64%` (a ceiling ≈ 12.8 of this 20-core box's
-  cores — a bound on one instance's worst-case hog, not a reserved
-  allocation; the N instances share the 20 cores by demand alongside
-  the main stack, overridable), no `MemoryMax` (unified memory; cgroup v2
-  `MemoryHigh` = per_instance_budget_gb). On this box's unified memory
-  (S0), the instance's weights + KV live in the same LPDDR5X pool as
-  the host: the unified-memory driver charges the instance's GPU
-  allocations to its cgroup, so `MemoryHigh` bounds the instance's total
-  unified-memory footprint. The S2.5 drift detector watches sustained
-  over-`MemoryHigh` pressure as a budget guard (an "over its share"
+- `bonsai2-server@%i.service` (persistent template unit; one per
+  instance i): runs `docker run` for that instance, **verbatim the same
+  configuration shape as the main stack's `qwen38-sglang.service`**
+  (user decision 2026-09-20: the main stack is robust and reliable the
+  way it is set up — subagents run exactly the same way):
+
+  ```
+  docker run --rm --name bonsai2-server-i \
+    --gpus all \
+    --memory {per_instance_budget_gb}g --memory-swap {per_instance_budget_gb}g \
+    --shm-size 4g \
+    --network host --ipc=host \
+    bonsai2-server:<pinned-tag> \
+      /opt/bonsai2/bin/llama-server {S1.3 flags, --port {port_base+i}}
+  ```
+
+  The image `bonsai2-server:<tag>` is pinned in `subagent-engine.yaml`
+  (`image_pin: {tag, sha256}` — the docker content digest, recorded at
+  install, same pinning discipline as the main stack's
+  `qwen38-dflash2:v1.2.3`); it bundles the S1.2-built binary + the
+  model files + the CUDA runtime. `--network host` → the instance port
+  is a host port directly (30101 + i), no publishing. The container's
+  memory cap is `--memory` = the S1.4 per-instance budget (the
+  unified-memory driver charges the instance's GPU allocations to its
+  cgroup, so this bounds the instance's total footprint; `--memory-swap`
+  = same value, no swap escape, matching the main stack's pattern).
+- Per-instance unit hardening (same class as the main unit's
+  `Requires=docker.service`): `ExecStartPre=` `docker rm -f
+  bonsai2-server-i` (clean stale container, verbatim the main unit's
+  pattern); `Restart=on-failure`, `RestartSec=5`,
+  `StartLimitBurst=3` (then `bfailed`), `CPUQuota=64%` (a ceiling ≈
+  12.8 of this 20-core box's cores — a bound on one instance's
+  worst-case hog, not a reserved allocation; the N instances share the
+  20 cores by demand alongside the main stack, overridable). The
+  S2.5 drift detector watches sustained over-`--memory` pressure on
+  the instance's cgroup as a budget guard (an "over its share"
   signal), not as an exact VRAM meter.
-- **No docker for bonsai in v1** (C-05 locked: "i prefer this way, and
-  its more efficient, and less of a risk to have it outside of docker"):
-  the image builds the binary (S1.2), the install extracts binary+model
-  to `/opt/bonsai2/`, systemd runs them. The main stack stays docker;
-  two paradigms coexist deliberately — bonsai is lightweight
-  (binary+file), main is a heavyweight pinned env (image).
+- **Manager ↔ units:** the manager spawns instance i by `systemctl
+  start bonsai2-server@i` (the units are installed by `install.sh`,
+  not transient — one unit file per instance, same paradigm as the
+  main stack's one-unit-per-stack); unload (`bonsai2-unload`, S3.2) =
+  `systemctl stop bonsai2-server@i` (+ `docker rm -f`), reload =
+  `systemctl start` through the S1.4 allocation tier first. A
+  restarted unit after a ctx reduction (S2.5) keeps the same unit
+  name/port/model, and `systemctl restart` resets the unit's
+  start-limit counter so drift handling itself cannot trip `bfailed`.
 - Health probe (per instance, every 10 s, from the manager):
   `GET /v1/models` with Bearer → healthy iff 200 + alias in body
   AND a 16-token completion round-trip < 10 s (catches alive-but-stuck).
@@ -439,13 +505,13 @@ exit 4 — zero instances but not main-only mode.
   ≤ 180 s after `multi-user.target` (measured at install; T recorded in
   `serving.yaml`).
 - VRAM drift (main stack grows over time): manager re-checks every 5 min;
-  if an instance's `MemoryHigh` cgroup is thrashing (>30 s over
-  high), it scales that instance's ctx down: the manager rewrites that
+  if an instance's cgroup memory pressure is sustained (>30 s over its
+  `--memory` cap, S2.2), it scales that instance's ctx down: the manager rewrites that
   instance's `--ctx-size` to half (rounded down to a multiple of 8192,
-  floor 8192) and restarts that one process in place via its transient
-  unit (`systemctl restart bonsai2-llama-server@i`). This is a
-  *process*-level restart, not systemd re-plumbing: same unit name,
-  same port, same model file, and `systemctl restart` resets the unit's
+  floor 8192) in its unit's `docker run` flags and restarts that one
+  container in place (`systemctl restart bonsai2-server@i`). This is a
+  *container*-level restart, not systemd re-plumbing: same unit name,
+  same port, same image, and `systemctl restart` resets the unit's
   start-limit counter so the drift handling itself cannot trip
   `bfailed`. Recorded in health.json as `ctx_reduced: true` + the new
   `ctx` value, and counted in that instance's restart budget (global #5).
@@ -564,9 +630,9 @@ bonsai2-health                                   # raw /run/bonsai2/health.json,
 ```
 
 `bonsai2-unload` / `bonsai2-reload` (pool control):
-- Unload: the manager SIGTERMs the targeted `bonsai2-llama-server@i`
-  units (graceful drain, SIGKILL after 5 s, same as `cancel`'s signal
-  path), releases the VRAM immediately, and marks the instance
+- Unload: the manager stops the targeted `bonsai2-server@i` units
+  (`systemctl stop` → the unit's `docker rm -f`, same signal path as
+  `cancel`), releases the VRAM immediately, and marks the instance
   `bunloaded` in health.json. Routing (S3.3) skips `bunloaded`
   instances; with zero running instances the stack enters main-only
   mode with `main_only_reason: "user_unloaded"` (S2.4), so spawn/collect
@@ -1002,23 +1068,35 @@ main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
 
 ## Section 6 — GB10 packaging (one-command install)
 
-### 6.1 Artifact form (locked — C-05: systemd + binary, not docker)
+### 6.1 Artifact form (locked — main-stack parity: pinned docker image
+under systemd)
 
-- `bonsai2-image`: a build-only Docker image (`Dockerfile.build`) that
-  compiles the pinned fork (S1.2 flags) for aarch64 and bundles
-  `llama-server` + a CUDA 13.0 runtime. Used to **build**, not to run
-  (C-05: efficient outside docker).
-- `install.sh` (the one command): downloads/extracts the built binary
-  (or builds in-place if no prebuilt), downloads the model (S1.1, hash
-  check), writes the four config files (S1.6/S2.6/S3.6/S5.7) from
-  detected box state, installs the S2.2 units, starts the manager, runs
-  the S2.7 health checks, prints the stack-ready report.
-- No compose file in v1 and no docker-*running* bonsai (nothing runs in
-  docker besides the pre-existing
-  main stack, which install.sh never touches). The `Dockerfile.build`
-  image is a build-time tool only: it compiles the pinned fork
-  (S1.2), then the binary is extracted to `/opt/bonsai2/` and systemd
-  runs it.
+- `bonsai2-server:<tag>`: the **runtime image** for every subagent
+  instance (S2.2). Bundles the S1.2-built `llama-server` binary, the
+  model files (S1.1, hash-verified before baking), and the CUDA 13.0
+  runtime. It is the bonsai equivalent of the main stack's
+  `qwen38-dflash2:v1.2.3` — the user decision 2026-09-20: subagent
+  inference runs exactly the way the main agent's does, because that
+  configuration is robust and reliable on this box. Pinning: tag +
+  docker content digest recorded in `subagent-engine.yaml`
+  (`image_pin`, S1.6) at install — same discipline as the main image.
+- Build stage: `install.sh` builds the image in a docker build stage
+  (aarch64 + CUDA 13.0, the S1.2 toolchain — the same pipeline class
+  as the main image's build in the dgx-spark-qwen38 repo) unless a
+  prebuilt image with a matching pin is already present locally. The
+  fork commit (S1.2) + model SHA (S1.1) are the build inputs; a change
+  to either forces a rebuild, recorded in the new image's digest.
+- `install.sh` (the one command): build-or-verify the image + record
+  its digest, downloads the model with the S1.1 hash check (skipped if
+  the baked image already carries the matching SHA), writes the four
+  config files (S1.6/S2.6/S3.6/S5.7) from detected box state, installs
+  the S2.2 units (manager + one `bonsai2-server@i` per instance),
+  starts the manager, runs the S2.7 health checks, prints the
+  stack-ready report.
+- No compose file in v1: nothing besides the two container families
+  (the pre-existing main stack, which install.sh never touches, and the
+  bonsai pool) runs in docker, and the bonsai containers are driven by
+  systemd units exactly like the main stack's container is.
 
 ### 6.2 Prerequisites (verified on this box, R-09 — locked as the
 supported matrix)
@@ -1029,7 +1107,7 @@ supported matrix)
 | aarch64 | ✓ | `uname -m == aarch64` (else `ERR_ARCH`, exit 3) |
 | NVIDIA driver ≥ 580 | 580.126.09 ✓ | `nvidia-smi` parses, version ≥ 580 |
 | nvidia-container-toolkit | ✓ (main stack uses it) | presence check only (build stage) |
-| docker (build stage only) | 27.5.1 ✓ | `docker version` |
+| docker (runtime + build) | 27.5.1 ✓ | `docker version` (runtime: the main stack and the `bonsai2-server@i` containers, S2.2; build: the image stage, S6.1) |
 | unified memory ≥ 96 GiB | 121.6 GiB ✓ | `/proc/meminfo` MemTotal ≥ 103 GB decimal (= 96 GiB; the S0 table and this column use GiB). **Warn, not fail:** at/above 96 GiB the install proceeds normally; below 96 GiB it logs `WARN_MEMORY_BELOW_MATRIX` and still computes N via S1.4/S2.3 (a ~96 GiB box with the 76.4 GB main stack computes N = 1; below ~95.9 GiB N comes out 0 → main-only mode (S2.4)), still exit 0 |
 | python 3.12 (bench runner) | 3.12.3 ✓ | `python3 --version` ≥ 3.10 |
 | free disk ≥ 20 GB | ~100 GB ✓ | `df /opt` ≥ 20 GB — a floor, not an expectation: a clean install writes ~8 GB (model + binary + configs), the build stage peaks higher; ~100 GB free is normal on a fresh GB10 |
@@ -1043,8 +1121,9 @@ sudo ./install.sh          # idempotent; see S6.4
 Steps: (1) prereq checks (S6.2 table; a **hard-fail** row → named ERR,
 exit ≠ 0, nothing installed. Rows marked "warn" in S6.2 — currently the
 unified-memory row — proceed with a logged warning and are not a
-failure). (2) build/extract binary to `/opt/bonsai2/bin` (skip
-if present + version matches the pin — idempotency). (3) download model
+failure). (2) build-or-verify the bonsai image and record its digest
+(S1.6 `image_pin`; skip the build if a local image matches the pin —
+idempotency). (3) download model
 (S1.1, skip if SHA matches). (4) detect the main-stack fresh-load
 footprint: read the main container's SGLang startup log
 (`docker logs qwen38-sglang`, `available_gpu_mem` + pool size lines,
@@ -1071,7 +1150,8 @@ proceed); exit 2 on config.
 
 ### 6.4 Idempotency + main-stack contract (locked)
 
-- Re-run: binary/model skipped if pinned-and-verified; YAMLs
+- Re-run: image skipped if the recorded digest matches the local image;
+  model skipped if SHA-matched; YAMLs
   regenerated only if detected state changed (N changed, main fresh-load
   footprint (the recorded `main_stack.footprint_gb`, S6.3 step 4)
   drifted > 5 GB — a policy constant, set below the per-instance budget
@@ -1093,8 +1173,10 @@ the main agent or subagent model engine is released")
   re-runs `install.sh --refresh-main` (re-detects footprint, recomputes
   N, re-runs quick bench M1/M2/M7). No in-place main-stack surgery here.
 - **Subagent engine (llama.cpp fork pin):** PR bumps
-  `engine_pin.commit` → CI/build stage recompiles → `install.sh` picks up
-  the new binary (S6.4 step 2) → **quick bench gates the PR** (S5.5,
+  `engine_pin.commit` → the docker build stage recompiles the fork into
+  a new `bonsai2-server` image → `install.sh` picks up the new image
+  (S6.4 step 2, digest re-recorded) → **quick bench gates the PR**
+  (S5.5,
   >10% t/s regression or auto-rubric regression = PR blocked).
 - **Subagent model (revision/quant):** same PR flow; full bench (S5.5)
   when the quant or revision changes; the doctrine audit (S4.6) re-runs
@@ -1183,7 +1265,5 @@ LLM-to-LLM orchestration of subagents (the main agent orchestrates via
 S3.2 bash + the S4 skill — that is the design; LLMs calling LLMs to
 coordinate is what's out), main-stack changes, vision (mmproj),
 multi-box v1,
-fine-tuning, LLM-judge bench mode, instance kill-for-drift,
-docker-run
-bonsai (the Dockerfile.build image is build-time only, S6.1), stateful
+fine-tuning, LLM-judge bench mode, instance kill-for-drift, stateful
 subagents.
