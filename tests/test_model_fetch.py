@@ -287,12 +287,21 @@ class TestFetchEntry(_Base):
     def test_corrupt_download_clears_and_reports_mismatch(self):
         # The fake writes the wrong content at the pinned size: the fetch
         # completes, verification fails, and the mismatch is surfaced. The
-        # .part is cleared because it is not a plausible partial.
+        # .part is cleared because it is not a plausible partial. A full-size
+        # corrupt download must be re-fetched from scratch on every retry
+        # (not resumed), so exactly total_attempts (=4) download calls
+        # happen (G3c round 6 P2@247).
         data = b"wrong-content"
         cache = self.tmp / "cache"
         fake, _state = _ok_stream_factory(data)
+        calls = []
+
+        def _counting(url, part, size, **kw):
+            calls.append(1)
+            return fake(url, part, size, **kw)
+
         orig = fetch._stream
-        fetch._stream = fake
+        fetch._stream = _counting
         try:
             ok, err = fetch.fetch_entry(
                 url="http://x/w.gguf",
@@ -306,6 +315,7 @@ class TestFetchEntry(_Base):
             fetch._stream = orig
         self.assertFalse(ok)
         self.assertEqual(err, fetch.ERR_HASH_MISMATCH)
+        self.assertEqual(len(calls), 4)  # 1 initial + 3 retries (S1.5)
         self.assertFalse((cache / "w.gguf").exists())
         self.assertFalse((cache / "w.gguf.part").exists())
 

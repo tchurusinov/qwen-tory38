@@ -352,7 +352,11 @@ def main(argv: list[str] | None = None) -> int:
         "--force", action="store_true", help="re-download even if cached + verified"
     )
     ap.add_argument(
-        "--retries", type=int, default=3, help="download attempts (S1.5: 3)"
+        "--retries",
+        type=int,
+        default=3,
+        help="download RETRIES after the initial attempt (S1.5 'retry x3': "
+        "1 initial + 3 retries = 4 total attempts)",
     )
     ap.add_argument(
         "--backoff", type=float, default=10.0, help="seconds between retries (S1.5: 10)"
