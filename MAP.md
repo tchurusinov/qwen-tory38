@@ -513,6 +513,35 @@ SPEC.md `status` → `active`.
 - spec deltas: S1.8 #1 made concrete at the pin (banner = commit-carrying
   build line + libggml-cuda linked; no separate ternary banner line in
   this fork). No other SPEC changes.
+- G3c review loop (same session, continued): 5 isolated review rounds
+  on PR #4 (blckwell/qwen-tory38, Gitea), all raw-output + disposition
+  comments posted. R1 (9d2b72f): 1 P0, 2 P1, 2 P2 -> fixed in 0ebcc5d
+  (.dockerignore dedupe, env -i transitive-lib check, token prefix
+  dropped from this log). R2 (0ebcc5d): 0 P0, 4 P1, 3 P2 -> fixed in
+  4b45764 (exact-arch assert, unmasked libggml-cuda ldd, --gpus all on
+  the banner test, pin-parse docstrings). R3 (4b45764): 1 P0, 2 P1,
+  2 P2 -> fixed in 4480fa3 (arch positive+exhaustive asserts on
+  compile_commands.json, nproc-capped -j, boundary-anchored pin parse,
+  root-docs named instead of blanket *.md so fork .md stays in context,
+  LD_LIBRARY_PATH scope note). R4 (4480fa3): 0 P0, 1 P1, 2 P2 -> fixed
+  in 8b75332: the P1 was the pin being ARG-hardcoded AND in the YAML
+  (silent-drift risk) -- now the pin is read from
+  etc/subagent-engine.yaml in-build (S1.6 source of truth), the
+  LLAMA_PIN_SHORT build-arg only cross-checks it (ERR_PIN_DRIFT exit 4,
+  negative-tested with a fake arg in 0.1 s); patchelf loop now skips
+  versioned symlinks deliberately and fails loud on a real .so
+  (ERR_RPATH); .git ignore rule documented as form-agnostic
+  (submodule gitlink file OR plain-clone dir). R5 (8b75332): 0 P0,
+  1 P1, 3 P2 -- posted raw-only per user instruction, NOT yet
+  dispositioned/fixed: P1 = anchor the banner check to the full
+  `version:` line rather than a `commit <8hex>` substring; P2s =
+  broken-symlink robustness, pin helper erroring when the template is
+  absent (fresh clone), exhaustive-arch check's file-path assumption.
+  Branch head 8b75332; gate PASS; @gpu 3/3; last rebuild exit 0 with
+  all in-build assertions (banner commit 9a9394a8, sm_121a-only,
+  aarch64, libggml-cuda, env -i banner + ldd-from-own-dir).
+  Next: fix R5 (or user disposition), final review pass, G4 merge gate;
+  then MAP 1.3 (model download + SHA256).
 
 ### 2026-09-20 — Phase 1 start: fork pinned at 9a9394a8, vendored as submodule (item 1.1)
 - agent/model: Hermes qwen3.8-27b (session: Phase 1, branch `phase1-fork-pin`)
