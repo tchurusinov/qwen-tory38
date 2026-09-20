@@ -99,6 +99,12 @@ def _stream(url: str, dest_part: str, expected_size: int | None) -> tuple[int, i
     transport failure; a truncated body (final size != pinned size when a
     pinned size is known) raises URLError so the caller retries. Resume is
     byte-accurate: a Range-ignored 200 restarts from byte 0.
+
+    On ANY mid-transfer failure the `.part` on disk is a clean, byte-accurate
+    prefix (the open-for-write context manager flushes closed bytes before
+    the exception propagates). We re-measure it and fold that confirmed size
+    into the raised error so the retry can audit and reuse it instead of
+    blindly re-opening a partial it never inspected (G3c round 2 P1).
     """
     start = os.path.getsize(dest_part) if os.path.exists(dest_part) else 0
     if expected_size is not None and start > expected_size:
@@ -106,14 +112,27 @@ def _stream(url: str, dest_part: str, expected_size: int | None) -> tuple[int, i
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     if start > 0:
         req.add_header("Range", f"bytes={start}-")
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        code = getattr(resp, "status", resp.getcode())
-        resume = start > 0 and code == 206
-        got = start if resume else 0
-        with open(dest_part, "ab" if resume else "wb") as out:
-            for block in iter(lambda: resp.read(_CHUNK), b""):
-                out.write(block)
-                got += len(block)
+    got = start
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            code = getattr(resp, "status", resp.getcode())
+            resume = start > 0 and code == 206
+            got = start if resume else 0
+            with open(dest_part, "ab" if resume else "wb") as out:
+                for block in iter(lambda: resp.read(_CHUNK), b""):
+                    out.write(block)
+                    got += len(block)
+    except Exception:
+        # Mid-transfer reset / non-200 / early close. `dest_part` holds the
+        # bytes actually written so far; surface that confirmed size so the
+        # caller's resume/clear decision is on inspected data, not a guess.
+        on_disk = os.path.getsize(dest_part) if os.path.exists(dest_part) else 0
+        if expected_size is not None and on_disk != expected_size:
+            raise urllib.error.URLError(
+                f"transfer interrupted at {on_disk}B of {expected_size}B "
+                f"(resuming from {on_disk}B)"
+            )
+        raise
     if expected_size is not None and got != expected_size:
         raise urllib.error.URLError(
             f"truncated body: expected {expected_size}B, got {got}B"
@@ -221,12 +240,16 @@ def fetch_entry(
     return False, verr or ERR_HASH_MISMATCH
 
 
-def load_model_config(config_path: str) -> dict:
+def load_model_config(config_path: str, want: str = "all") -> dict:
     """Read the S1.6 `model` block; returns {default, fallback} fetch specs.
 
     Each spec is {url, disk_name, expected_sha, expected_size}. A missing pin
     raises SystemExit(EXIT_CONFIG) with a named message so a bad config is a
-    config error, not a silent wrong download.
+    config error, not a silent wrong download. `want` scopes which quant's pin
+    must be complete: the default keys are always required; the fallback keys
+    are required when `want` is "fallback" or "all" (the common case), and
+    only then — a config with a complete default block and no fallback block
+    is still valid for `--quant default` (G3c round 2 P2).
     """
     try:
         import yaml
@@ -238,11 +261,14 @@ def load_model_config(config_path: str) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     model = data.get("model") or {}
-    missing = [
-        k
-        for k in ("repo", "revision", "file", "source_object", "sha256")
-        if not model.get(k)
-    ]
+    required = ["repo", "revision", "file", "source_object", "sha256"]
+    if want in ("fallback", "all"):
+        required += [
+            "fallback_file",
+            "fallback_source_object",
+            "fallback_sha256",
+        ]
+    missing = [k for k in required if not model.get(k)]
     if missing:
         print(
             f"ERR_CONFIG: model block missing {missing} in {config_path}",
@@ -307,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        cfg = load_model_config(args.config)
+        cfg = load_model_config(args.config, want=args.quant)
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - config read failure -> named config error

@@ -253,5 +253,120 @@ class TestFetchEntry(_Base):
         self.assertFalse((cache / "w.gguf.part").exists())
 
 
+class TestStreamRealPath(_Base):
+    """Drive the REAL `_stream` (the only urllib-touching function) via a
+    fake `urllib.request.urlopen`. Closes the P2@56 gap: the resume /
+    mid-transfer-reset / truncation paths in _stream are exercised hermetically,
+    not just the _stream-monkeypatched retry loop.
+
+    NOTE: a fake response serves the FULL object every time; Range-resume
+    byte-offsets are therefore approximated (the fake writes from byte 0).
+    The truncation / reset / size checks — the paths under test — do not
+    depend on the exact resume offset, so the approximation is safe here.
+    """
+
+    def _patch_urlopen(self, resp_factory):
+        import urllib.request
+
+        orig = urllib.request.urlopen
+        urllib.request.urlopen = lambda req, timeout=None: resp_factory()
+        return orig
+
+    def _resp(self, chunks):
+        class R:
+            status = 200
+
+            def __init__(self):
+                self._c = iter(chunks)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def getcode(self):
+                return self.status
+
+            def read(self, n):
+                try:
+                    return next(self._c)
+                except StopIteration:
+                    return b""
+
+        return R
+
+    def _reset_resp(self, prefix, total_len):
+        class R:
+            status = 200
+
+            def __init__(self):
+                self._served = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def getcode(self):
+                return self.status
+
+            def read(self, n):
+                if self._served:
+                    raise ConnectionResetError("mid-transfer reset")
+                self._served = True
+                return prefix
+
+        return R
+
+    def test_success_writes_full_file(self):
+        import urllib.request
+
+        data = b"z" * 50
+        resp_factory = self._resp([data])
+        orig = self._patch_urlopen(resp_factory)
+        try:
+            got, _start = fetch._stream("http://x", str(self.dl_dir / "p"), 50)
+        finally:
+            urllib.request.urlopen = orig
+        self.assertEqual(got, 50)
+        self.assertEqual((self.dl_dir / "p").read_bytes(), data)
+
+    def test_mid_transfer_reset_leaves_confirmed_prefix(self):
+        import urllib.error
+        import urllib.request
+
+        prefix = b"A" * 40
+        total = 100
+        resp_factory = self._reset_resp(prefix, total)
+        orig = self._patch_urlopen(resp_factory)
+        try:
+            with self.assertRaises(urllib.error.URLError) as ctx:
+                fetch._stream("http://x", str(self.dl_dir / "p"), total)
+        finally:
+            urllib.request.urlopen = orig
+        # The confirmed on-disk prefix (40 B of 100) is in the raised error so
+        # the retry can audit and resume from it — not a silent blind reopen.
+        self.assertIn("40B", str(ctx.exception))
+        self.assertIn("100B", str(ctx.exception))
+        self.assertEqual((self.dl_dir / "p").read_bytes(), prefix)
+
+    def test_truncated_body_rejects_short_completion(self):
+        import urllib.error
+        import urllib.request
+
+        data = b"B" * 30
+        total = 100
+        resp_factory = self._resp([data])
+        orig = self._patch_urlopen(resp_factory)
+        try:
+            with self.assertRaises(urllib.error.URLError) as ctx:
+                fetch._stream("http://x", str(self.dl_dir / "p"), total)
+        finally:
+            urllib.request.urlopen = orig
+        self.assertIn("truncated", str(ctx.exception).lower())
+
+
 if __name__ == "__main__":
     unittest.main()
