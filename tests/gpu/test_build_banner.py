@@ -2,10 +2,10 @@
 
 Runs against the locally built `bonsai2-server-build:121a` image (the
 MAP 1.2 build pipeline, image/Dockerfile). Skips when the image is not
-present locally (fresh clone before the first build). No GPU is needed
-to print --version, but this test is @gpu-labeled because it runs the
-engine binary on the box's GPU stack (S1.2, S1.8 #1, Global testing
-discipline: @gpu tests live in tests/gpu/ only).
+present locally (fresh clone before the first build). `--version` is
+run with `--gpus all`: the binary calls ggml_cuda_init, which touches
+the GPU stack, so the @gpu label + VRAM audit rule apply (Global
+testing discipline: @gpu tests live in tests/gpu/ only).
 
 Assertions (the S1.8 #1 "fork ternary banner", adapted to this pin):
   * `llama-server --version` exits 0
@@ -36,10 +36,14 @@ def _engine_pin_sha8() -> str:
     """First 8 hex chars of the pinned fork commit from the template YAML.
 
     stdlib-only parse (hermetic-suite rule): the value lives on the line
-    `    commit: "<40-hex>"` under engine.pin (S1.6).
+    `    commit: "<40-hex>"` under engine.pin (S1.6). The engine commit
+    is the FIRST `commit:` with a quoted 40-hex in the template: the
+    `engine:` block precedes `image_pin:`, which carries tag/sha256
+    keys and no `commit:`. If a future unrelated `commit:` lands above
+    the engine block, re-anchor this helper.
     """
     text = ENGINE_YAML.read_text()
-    m = re.search(r'commit:\s*"([0-9a-f]{40})"', text)
+    m = re.search(r"commit:\s*\"([0-9a-f]{40})\"", text)
     assert m, f"engine_pin.commit not found in {ENGINE_YAML}"
     return m.group(1)[:8]
 
@@ -69,6 +73,8 @@ class TestForkBuildBanner(unittest.TestCase):
                 "docker",
                 "run",
                 "--rm",
+                "--gpus",
+                "all",
                 "--entrypoint",
                 BIN_IN_IMAGE,
                 BUILD_IMAGE,

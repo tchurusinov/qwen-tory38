@@ -60,7 +60,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/cuda/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64
 
-# aarch64 sanity: S6.2's ERR_ARCH row, exit 3, fail fast on a wrong-arch host.
+# aarch64 sanity: S6.2's ERR_ARCH row, exit 3. Checks the build *target*
+# arch (uname -m in the container): with --platform linux/arm64 this is
+# the native arch on an aarch64 host, the QEMU-emulated target on an
+# x86_64 host — either way it fails fast when the target isn't aarch64.
 RUN set -eu; \
     UARCH=$(uname -m); \
     if [ "$UARCH" != "aarch64" ]; then \
@@ -116,8 +119,14 @@ RUN set -eu; \
         -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs"; \
     cmake --build build -j16; \
-    echo "=== sm_121a sanity (count must be >0) ==="; \
+    echo "=== sm_121a sanity (every CUDA TU must target sm_121a only) ==="; \
     test "$(grep -c sm_121a build/compile_commands.json)" -gt 0; \
+    # the arch is pinned to 121a (S1.2 delta): no other compute_1XX may
+    # appear in the nvcc command lines (a fat multi-arch build would
+    # show e.g. compute_120 too). \
+    # -j16: this box has 20 cores (GB10); 16 keeps headroom for the host
+    # while staying well above the CUDA-TU compile fanout.
+    test "$(grep -o 'arch=compute_[0-9a-z]*' build/compile_commands.json | sort -u | grep -v 'arch=compute_121a' | wc -l)" -eq 0; \
     mkdir -p /opt/bonsai2/bin; \
     cp -f build/bin/llama-server /opt/bonsai2/bin/llama-server; \
     # all shared libs the binary needs at runtime (libllama.so, libggml*.so, \
@@ -152,4 +161,9 @@ RUN set -eu; \
     env -i /opt/bonsai2/bin/llama-server --version > /tmp/banner2.txt 2>&1 \
         || { cat /tmp/banner2.txt; echo "ERR_ENVI: --version failed under env -i" >&2; exit 4; }; \
     grep -q "commit ${LLAMA_PIN_SHORT}" /tmp/banner2.txt \
-        || { echo "ERR_ENVI_COMMIT: pin not in env -i banner" >&2; exit 4; }
+        || { echo "ERR_ENVI_COMMIT: pin not in env -i banner" >&2; exit 4; }; \
+    # the CUDA backend must resolve from /opt/bonsai2/bin (its own dir),
+    # not from a system location: unmasked ldd of the server binary.
+    env -i ldd /opt/bonsai2/bin/llama-server 2>/dev/null \
+        | grep -q '/opt/bonsai2/bin/libggml-cuda' \
+        || { echo "ERR_ENVI_CUDA: libggml-cuda not resolved from /opt/bonsai2/bin under env -i" >&2; exit 4; }
