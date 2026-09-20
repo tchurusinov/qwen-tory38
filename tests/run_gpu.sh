@@ -36,7 +36,7 @@ set -e
 
 {
   echo "--- nvidia-smi snapshot (post) ---"
-  nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv
+  nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv || true
   echo "--- exit code: $rc ---"
 } >> "$LOG"
 

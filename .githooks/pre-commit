@@ -29,8 +29,10 @@ FAIL=0
 TMP_PREFIX="/tmp/precommit-$$"
 trap 'rm -f "${TMP_PREFIX}"_*' EXIT
 
-# Collect staged files (added/copied/modified; ignore deletions)
-STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
+# Collect staged files (added/copied/modified/renamed; ignore deletions).
+# ACMR: R = rename-with-edit — a renamed .sh/.py must not escape the
+# checks below (G3c round 5 P2).
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
 
 if [ -n "$STAGED" ]; then
   # 1) bash -n (hard) + shellcheck (hard when installed) on staged .sh
