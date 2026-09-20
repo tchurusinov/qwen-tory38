@@ -168,14 +168,19 @@ class TestFetchEntryRetry(_Base):
             fetch._stream = orig
         self.assertFalse(ok)
         self.assertEqual(err, fetch.ERR_DOWNLOAD)
-        self.assertEqual(len(calls), 3)  # 3 download attempts
-        self.assertEqual(sleeps, [10.0, 10.0])  # backoff between, not after
+        # S1.5 "retry x3": 1 initial + 3 retries = 4 attempts; backoff between
+        # attempts only (3 intervals, not after the last).
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(sleeps), 3)
+        self.assertEqual(sleeps, [10.0, 10.0, 10.0])
 
     def test_mismatched_download_retries_x3_then_err_hash_mismatch(self):
         cache = self.tmp / "cache"
         wrong = b"X" * 100
+        calls = []
 
         def _always_wrong(_url, part, _size, **_kw):
+            calls.append(1)
             Path(part).write_bytes(wrong)
             return len(wrong), 0
 
@@ -196,8 +201,10 @@ class TestFetchEntryRetry(_Base):
             fetch._stream = orig
         self.assertFalse(ok)
         self.assertEqual(err, fetch.ERR_HASH_MISMATCH)
-        # The full-size corrupt .part is cleared each attempt, so the retry
-        # re-downloads from scratch rather than "resuming" the corrupt file.
+        # The full-size corrupt .part is cleared each attempt, so every retry
+        # re-downloads from scratch — assert the re-download actually happened
+        # (4 attempts = initial + 3 retries, not "resumed" the corrupt file).
+        self.assertEqual(len(calls), 4)
         self.assertFalse((cache / "w.gguf.part").exists())
 
 
@@ -381,6 +388,48 @@ class TestStreamRealPath(_Base):
         finally:
             urllib.request.urlopen = orig
         self.assertEqual(got, 50)
+        self.assertEqual((self.dl_dir / "p").read_bytes(), data)
+
+    def test_complete_partial_short_circuits_no_fetch(self):
+        # A `.part` that already holds exactly the pinned byte count (e.g. a
+        # crash after download, before promotion) must NOT trigger a Range
+        # request (which would 416) — it short-circuits and the caller verifies
+        # the bytes it has (G3c round 4 P1@186).
+        import urllib.request
+
+        data = b"q" * 60
+        (self.dl_dir / "p").write_bytes(data)
+        called = {"n": 0}
+
+        def _factory():
+            called["n"] += 1
+
+            class R:
+                status = 200
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def getcode(self):
+                    return self.status
+
+                def read(self, n):
+                    return b""
+
+            return R()
+
+        orig = self._patch_urlopen(_factory)
+        try:
+            got, resumed_from = fetch._stream("http://x", str(self.dl_dir / "p"), 60)
+        finally:
+            urllib.request.urlopen = orig
+        # Short-circuit: the fake response was never read (no fetch happened).
+        self.assertEqual(got, 60)
+        self.assertEqual(resumed_from, 60)
+        # The bytes on disk are untouched.
         self.assertEqual((self.dl_dir / "p").read_bytes(), data)
 
     def test_mid_transfer_reset_leaves_confirmed_prefix(self):

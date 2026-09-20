@@ -98,7 +98,9 @@ def _stream(url: str, dest_part: str, expected_size: int | None) -> tuple[int, i
     Returns (final_size, resumed_from). Raises URLError/HTTPError/OSError on
     transport failure; a truncated body (final size != pinned size when a
     pinned size is known) raises URLError so the caller retries. Resume is
-    byte-accurate: a Range-ignored 200 restarts from byte 0.
+    byte-accurate: a Range-ignored 200 restarts from byte 0. If the partial
+    already holds exactly the pinned byte count, the fetch is short-circuited
+    (nothing left to download) and the caller verifies the bytes it has.
 
     On ANY mid-transfer failure the `.part` on disk is a clean, byte-accurate
     prefix (the open-for-write context manager flushes closed bytes before
@@ -109,6 +111,14 @@ def _stream(url: str, dest_part: str, expected_size: int | None) -> tuple[int, i
     start = os.path.getsize(dest_part) if os.path.exists(dest_part) else 0
     if expected_size is not None and start > expected_size:
         start = 0  # partial longer than the pin: restart
+    if expected_size is not None and start == expected_size:
+        # The partial already holds exactly the pinned byte count (e.g. a run
+        # that crashed after the download completed but before promotion).
+        # Nothing left to fetch: short-circuit so the caller can verify-and-
+        # promote it (or clear-and-retry on a hash mismatch) instead of
+        # issuing `Range: bytes=size-`, getting HTTP 416, and burning the
+        # retry budget (G3c round 4 P1@186).
+        return start, start
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     if start > 0:
         req.add_header("Range", f"bytes={start}-")
@@ -210,15 +220,19 @@ def fetch_entry(
             # download attempt.
             os.replace(target, part)  # corrupt/partial: resume from these bytes
 
+    # S1.5 "retry download x3 (10 s backoff)": 1 initial download + 3 retries
+    # = 4 total attempts (the spec is master — G3c round 4 P2@286). `retries`
+    # is the retry budget; the total attempt count is retries + 1.
+    total_attempts = max(1, retries) + 1
     last_err = ERR_DOWNLOAD
-    for attempt in range(1, max(1, retries) + 1):
+    for attempt in range(1, total_attempts + 1):
         dl_ok, dl_err = download_one(url, part, expected_size, log=log, sleep=sleep)
         if not dl_ok:
             last_err = dl_err or ERR_DOWNLOAD
             # keep .part so a later attempt (or a later run) can resume
-            if attempt < retries and backoff > 0:
+            if attempt < total_attempts and backoff > 0:
                 log(
-                    f"    {disk_name}: backoff {backoff}s, retrying ({attempt}/{retries})"
+                    f"    {disk_name}: backoff {backoff}s, retrying ({attempt}/{total_attempts})"
                 )
                 sleep(backoff)
             continue
@@ -247,8 +261,10 @@ def fetch_entry(
                 os.remove(part)
             except OSError:
                 pass
-        if attempt < retries and backoff > 0:
-            log(f"    {disk_name}: backoff {backoff}s, retrying ({attempt}/{retries})")
+        if attempt < total_attempts and backoff > 0:
+            log(
+                f"    {disk_name}: backoff {backoff}s, retrying ({attempt}/{total_attempts})"
+            )
             sleep(backoff)
     return False, last_err
 
@@ -274,12 +290,13 @@ def load_model_config(config_path: str, want: str = "all") -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     model = data.get("model") or {}
-    required = ["repo", "revision", "file", "source_object", "sha256"]
+    required = ["repo", "revision", "file", "source_object", "sha256", "size_bytes"]
     if want in ("fallback", "all"):
         required += [
             "fallback_file",
             "fallback_source_object",
             "fallback_sha256",
+            "fallback_size_bytes",
         ]
     missing = [k for k in required if not model.get(k)]
     if missing:
