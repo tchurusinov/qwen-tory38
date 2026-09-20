@@ -144,11 +144,21 @@ if [ -n "$STAGED" ]; then
       FAIL=1
     fi
     # Text-file checks below: binary skip = extension whitelist OR a NUL
-    # byte in the first 64 KB of the staged blob (catches PDFs/fonts/
-    # wasm/... without a growing extension list). The NUL count is done
-    # with tr: bash's $'\0' is a ZERO-LENGTH string, so `grep -q $'\0'`
-    # matches every line — probe: text file "counted" as binary and all
-    # text checks silently skipped (found in G3c round 9).
+    # byte ANYWHERE in the staged blob. The NUL test is the same
+    # classifier git itself uses for binary detection, so the hook and
+    # git agree on what a text file is. The NUL count is done with tr:
+    # bash's $'\0' is a ZERO-LENGTH string, so `grep -q $'\0'` matches
+    # every line — probe: text file "counted" as binary and all text
+    # checks silently skipped (found in G3c round 9). The window is the
+    # WHOLE blob, not a leading window: a binary whose NULs all sit
+    # past 64 KB would otherwise reach the text greps and could trip
+    # them on binary bytes (G3c round 13 P1; tr handles NULs fine —
+    # the zero-length-string trap only hits bash/grep, not tr).
+    # Residual edge (documented, not a bug): a file with NO NUL byte
+    # anywhere (e.g. an all-0xFF block) is classified as text — exactly
+    # as git classifies it; if such a file stages a trailing-space
+    # line the hook blocks it and --no-verify (or the .gguf-style
+    # extension whitelist) is the documented path.
     case "$f" in
       *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;;
     esac
@@ -156,7 +166,7 @@ if [ -n "$STAGED" ]; then
     if ! git cat-file blob ":0:$f" > "$blob" 2>/dev/null; then
       continue
     fi
-    if [ "$(head -c 65536 "$blob" | tr -cd '\0' | wc -c)" -gt 0 ]; then
+    if [ "$(tr -cd '\0' < "$blob" | wc -c)" -gt 0 ]; then
       continue
     fi
     if grep -qE ' +$' "$blob"; then
