@@ -248,6 +248,14 @@ def fetch_entry(
         # pin) so the next attempt resumes it; otherwise clear it so the next
         # attempt re-downloads from scratch (a full-size corrupt file would
         # otherwise keep being "resumed" forever).
+        #
+        # A full-size mismatch is always re-fetched from byte 0, NOT resumed
+        # from the existing prefix: with only a whole-file SHA (HF provides
+        # no per-chunk hash) we cannot verify the leading bytes in isolation,
+        # so the "valid" prefix might itself be corrupt. Re-downloading from 0
+        # is the conservative, convergent choice — at most one extra full
+        # re-transfer per corrupt event (G3c round 7 P1@139, waived as
+        # design/efficiency note, not a correctness defect).
         part_size = os.path.getsize(part) if os.path.exists(part) else 0
         if expected_size is None or part_size < expected_size:
             log(
@@ -392,6 +400,11 @@ def main(argv: list[str] | None = None) -> int:
         if not ok:
             print(f"[fetch] {name}: {err} — exit {EXIT_ERR}", file=sys.stderr)
             rc = EXIT_ERR
+    # G3c round 7 P2@380: a single stderr line per failed quant above is easy
+    # to miss when `--quant all` fails on more than one; add a final summary
+    # so the exit reason is unambiguous when multiple quants fail.
+    if rc:
+        print(f"[fetch] done with errors (exit {EXIT_ERR})", file=sys.stderr)
     return rc
 
 
