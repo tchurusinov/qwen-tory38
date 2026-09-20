@@ -49,13 +49,15 @@
 
 FROM nvidia/cuda@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
 ARG LLAMA_CUDA_ARCHS="121a"
-# Short engine pin (first 8 hex of engine_pin.commit). The build context has
-# no git metadata (COPY strips .git; the submodule's .git is a gitlink file),
-# so build-info's commit line is supplied from the pin: CMake only falls
-# back to git-derived BUILD_COMMIT when LLAMA_BUILD_COMMIT is unset.
-# Build with: docker build --build-arg LLAMA_PIN_SHORT=9a9394a8 ...
-# (install.sh, MAP 6.2, reads it from the rendered subagent-engine.yaml).
-ARG LLAMA_PIN_SHORT="9a9394a8"
+# Build with: docker build --platform linux/arm64 -f image/Dockerfile \
+#       -t bonsai2-server-build:121a .
+# The engine pin is read from etc/subagent-engine.yaml (S1.6 source of
+# truth) — the Dockerfile carries no hardcoded pin default. The optional
+# LLAMA_PIN_SHORT build-arg (first 8 hex) cross-checks the YAML pin and
+# fails the build on drift (ERR_PIN_DRIFT): install.sh (MAP 6.2) passes
+# it from the rendered subagent-engine.yaml so a pin bump that missed
+# one place cannot silently build the old commit.
+ARG LLAMA_PIN_SHORT=""
 # LD_LIBRARY_PATH: build-time scope (nvcc + the link steps). The runtime
 # image is not this image — the binaries ship with RUNPATH $ORIGIN and
 # the env -i assertions below prove they resolve without it. A debug
@@ -94,6 +96,9 @@ RUN apt-get update \
 WORKDIR /src
 # Pinned fork source (in-repo submodule: project-wide, never system-wide).
 COPY third_party/llama.cpp/ /src/
+# S1.6 source of truth for the engine pin: the build reads the commit
+# from this template (COPY'd in, not ARG-hardcoded).
+COPY etc/subagent-engine.yaml /tmp/engine.yaml
 
 # S1.2 at pin 9a9394a8:
 #   - ternary kernels: unconditional at the pin (no LLAMA_BONSAI_* toggles)
@@ -107,9 +112,20 @@ COPY third_party/llama.cpp/ /src/
 # cuMem* references. The real libcuda.so.1 is provided by the box's driver
 # at runtime (S1.2: driver >= 580).
 RUN set -eu; \
-    echo "=== build inputs: arch=${LLAMA_CUDA_ARCHS} pin_short=${LLAMA_PIN_SHORT} ==="; \
-    test -n "${LLAMA_PIN_SHORT}" \
-        || { echo "ERR_PIN: LLAMA_PIN_SHORT build-arg empty" >&2; exit 4; }; \
+    # the engine pin comes from the YAML template (S1.6 source of truth):
+    # first 8 hex of engine.pin.commit. The build-arg, when provided,
+    # cross-checks it — a pin bump that updated only one place fails
+    # loudly instead of silently building the old commit.
+    # first 8 hex of engine.pin.commit, anchored after the opening quote
+    # (a bare `[0-9a-f]{8}` would match all five 8-hex chunks of the
+    # 40-hex SHA and yield a 5-line PIN8).
+    PIN8=$(awk '/^engine:/{f=1}/^image:/{f=0}f' /tmp/engine.yaml | grep -oE 'commit: "[0-9a-f]{40}"' | head -1 | grep -oE '^commit: "[0-9a-f]{8}' | grep -oE '[0-9a-f]{8}$'); \
+    test -n "${PIN8}" \
+        || { echo "ERR_PIN: engine pin commit not found in /tmp/engine.yaml" >&2; exit 4; }; \
+    if [ -n "${LLAMA_PIN_SHORT}" ] && [ "${LLAMA_PIN_SHORT}" != "${PIN8}" ]; then \
+        echo "ERR_PIN_DRIFT: build-arg ${LLAMA_PIN_SHORT} != YAML pin ${PIN8}" >&2; exit 4; \
+    fi; \
+    echo "=== build inputs: arch=${LLAMA_CUDA_ARCHS} pin_short=${PIN8}${LLAMA_PIN_SHORT:+ (arg cross-check: ${LLAMA_PIN_SHORT})} ==="; \
     test -f /usr/local/cuda/lib64/stubs/libcuda.so \
         || { echo "ERR_CUDA_STUBS: /usr/local/cuda/lib64/stubs/libcuda.so missing" >&2; exit 4; }; \
     cmake -B build -G Ninja \
@@ -118,7 +134,7 @@ RUN set -eu; \
         -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHS}" \
         -DLLAMA_BUILD_UI=OFF \
         -DLLAMA_USE_PREBUILT_UI=OFF \
-        -DLLAMA_BUILD_COMMIT="${LLAMA_PIN_SHORT}" \
+        -DLLAMA_BUILD_COMMIT="${PIN8}" \
         -DLLAMA_BUILD_NUMBER="0" \
         -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs"; \
@@ -138,7 +154,14 @@ RUN set -eu; \
     cp -f build/bin/lib*.so* /opt/bonsai2/bin/; \
     patchelf --set-rpath '$ORIGIN' /opt/bonsai2/bin/llama-server; \
     for so in /opt/bonsai2/bin/lib*.so*; do \
-        patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true; \
+        # only set RUNPATH on real files; a versioned symlink
+        # (libggml.so -> .so.0 -> .so.0.21.0) inherits the target's
+        # RUNPATH, and patchelf may exit non-zero on a symlink (harmless).
+        # A real .so that still can't get RUNPATH set is a mis-resolution
+        # the env -i checks below are meant to catch, so that must be loud.
+        if [ -L "$so" ]; then continue; fi; \
+        patchelf --set-rpath '$ORIGIN' "$so" \
+            || { echo "ERR_RPATH: patchelf failed on $so" >&2; exit 5; }; \
     done; \
     echo "=== artifact sanity ==="; \
     file /opt/bonsai2/bin/llama-server; \
@@ -147,9 +170,10 @@ RUN set -eu; \
         || { cat /tmp/banner.txt; echo "ERR_BANNER: llama-server --version failed" >&2; exit 4; }; \
     cat /tmp/banner.txt; \
     # S1.8 #1: the commit-carrying build line is the fork assertion
-    # (this pin only exists on the fork's prism branch).
-    grep -q "commit ${LLAMA_PIN_SHORT}" /tmp/banner.txt \
-        || { echo "ERR_BANNER_COMMIT: pin ${LLAMA_PIN_SHORT} not in banner" >&2; exit 4; }; \
+    # (this pin only exists on the fork's prism branch). ${PIN8} is the
+    # YAML-sourced pin actually baked in; the banner must carry it.
+    grep -q "commit ${PIN8}" /tmp/banner.txt \
+        || { echo "ERR_BANNER_COMMIT: pin ${PIN8} not in banner" >&2; exit 4; }; \
     # CUDA backend built in: the binary links libggml-cuda (and the
     # --version output shows ggml_cuda_init running - the CUDA code path
     # is compiled in; without a GPU in this container init fails with
@@ -164,8 +188,8 @@ RUN set -eu; \
     # in-build ldd above can be masked by LD_LIBRARY_PATH; this cannot.
     env -i /opt/bonsai2/bin/llama-server --version > /tmp/banner2.txt 2>&1 \
         || { cat /tmp/banner2.txt; echo "ERR_ENVI: --version failed under env -i" >&2; exit 4; }; \
-    grep -q "commit ${LLAMA_PIN_SHORT}" /tmp/banner2.txt \
-        || { echo "ERR_ENVI_COMMIT: pin not in env -i banner" >&2; exit 4; }; \
+    grep -q "commit ${PIN8}" /tmp/banner2.txt \
+        || { echo "ERR_ENVI_COMMIT: pin ${PIN8} not in env -i banner" >&2; exit 4; }; \
     # the CUDA backend must resolve from /opt/bonsai2/bin (its own dir),
     # not from a system location: unmasked ldd of the server binary.
     env -i ldd /opt/bonsai2/bin/llama-server 2>/dev/null \
