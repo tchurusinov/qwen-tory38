@@ -47,10 +47,6 @@ bench mode · kill-for-drift instance retirement · stateful subagents.
 <!-- maintained by agents; one line each: what is blocked, on what, since when.
      Move resolved lines into Decisions (or delete). Empty = no blockers. -->
 
-- fork-vendoring (since 2026-09-20, top-2 open per AGENTS.md uncertainty
-  rule): third_party/llama.cpp as pinned git submodule (chosen default)
-  vs plain clone + pin recorded in ARTIFACTS.md. Decide at MAP 1.1;
-  either way: in-repo, project-wide, never system-wide.
 - PQ2_0 weights not on the box yet (since 2026-09-20): local copy is
   PTQ1_0 (fallback quant, 5.95 GB) + mmproj only. SPEC default PQ2_0
   (7.21 GB) downloads at install (MAP 1.3) — not a blocker, note for
@@ -160,17 +156,31 @@ Exit: one instance runs by hand from the pinned image and passes S1.7
 integration. S1.8 #2–#5 complete at end of Phase 6/7 (they need N ≥ 1
 under the manager or the full stack).
 
-- [ ] 1.1 Pin the fork commit: `PrismML-Eng/llama.cpp` branch `prism`,
-      pick SHA; record `engine_pin: {repo, commit}` (S1.2). Merge
-      status checked 2026-09-20 (Q1_0 merged upstream; generic ternary
-      Q2_0/g64 on mainline; **PQ2_0/PTQ1_0 packing still needs the
-      fork** — re-verify at first build: attempt a stock-build load of
-      PQ2_0, expect refusal). Also decide fork-vendoring (Open items:
-      submodule vs clone+pin). Version policy: bump only via a PR with
-      S5 quick bench (S1.2, S5.5).
-- [ ] 1.2 Build pipeline: source build aarch64, S1.2 cmake flags, arch
-      `121a`, ternary kernel toggles; assert fork ternary banner in
-      `llama-server --version` (S1.2, S1.8 #1).
+- [x] 1.1 Pin the fork commit: `PrismML-Eng/llama.cpp` branch `prism`,
+      pinned at `9a9394a895b96003ca842a6041cb28ac49a108f7` (prism tip
+      2026-09-18, checked via `git ls-remote` 2026-09-20 — same SHA the
+      2026-09-20 merge-status check recorded; no drift). Recorded in
+      `etc/subagent-engine.yaml` `engine_pin` (rendered to
+      `/opt/bonsai2/etc/` by install.sh, S1.2). **Fork-vendoring decided:
+      git submodule** at `third_party/llama.cpp` (the 0.1 layout
+      `third_party/llama.cpp/` line; `.gitmodules` tracks `prism`), in
+      repo, project-wide, never system-wide. Re-verify-at-first-build
+      still owed at 1.2: attempt a stock-build load of PQ2_0, expect
+      refusal (Q1_0 merged upstream; generic ternary Q2_0/g64 on
+      mainline; PQ2_0/PTQ1_0 packing still fork-only — re-checked 2026-09-20).
+      Spec delta (2026-09-20, backported per the document conventions):
+      at this pin the fork's ternary kernels compile unconditionally;
+      no `LLAMA_BONSAI_*` cmake toggles exist (verified: zero matches in
+      any CMake file at the pin) — S1.2 build flags now match the
+      Bonsai-demo script at the pin (`-G Ninja`,
+      `-DCMAKE_CUDA_ARCHITECTURES="121a"`, no F16/CURL/ACCELERATE
+      flags). Version policy: bump only via a PR with S5 quick bench
+      (S1.2, S5.5).
+- [ ] 1.2 Build pipeline: source build aarch64 in the pinned CUDA image,
+      S1.2 cmake flags at the pin (delta 2026-09-20: no ternary kernel
+      toggles — they compile unconditionally at `9a9394a8`), arch `121a`;
+      assert fork ternary banner in `llama-server --version` (S1.2,
+      S1.8 #1).
 - [ ] 1.3 Model download + SHA256 verification: `PQ2_0` (default) +
       `PTQ1_0` (fallback); retry ×3 / 10 s backoff; `ERR_HASH_MISMATCH`
       exit 4 path (S1.1, S1.5).
@@ -441,6 +451,43 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-20 — Phase 1 start: fork pinned at 9a9394a8, vendored as submodule (item 1.1)
+- agent/model: Hermes qwen3.8-27b (session: Phase 1, branch `phase1-fork-pin`)
+- phase(s): P1 (1.1 done; G3 pending on this branch)
+- items checked: 1.1
+- machine state: branch `phase1-fork-pin` cut from origin/main (371747a);
+  `third_party/llama.cpp` submodule added at `9a9394a8`
+  (PrismML-Eng/llama.cpp `prism` tip, 2026-09-18 commit "build: fix Ubuntu
+  ARM64 and Windows Vulkan release jobs"); `.gitmodules` tracks the
+  `prism` branch; `etc/subagent-engine.yaml` `engine_pin.commit` filled
+  with the SHA; ARTIFACTS.md in-repo row updated; SPEC S1.2 build flags
+  backported to the pin's reality. No /opt/bonsai2, no bonsai units/images
+  (unchanged). No uncommitted work on the box.
+- next: 1.2 build pipeline (docker build stage: nvidia/cuda:13.0.2-devel
+  image + apt cmake/ninja + cmake flags now per the updated S1.2, arch
+  `121a`), including the 1.1-owed stock-build refusal probe: build a
+  stock llama.cpp and attempt a PQ2_0 load, expect refusal, record the
+  result in the session log. Note the stock probe is cheap to skip if the
+  fork build (1.2 proper) lands first and the 1.1 re-verify can piggyback
+  on the fork's load test at 1.7 instead — say so in the PR.
+- blockers/intricacies: (1) Spec delta S1.2: `LLAMA_BONSAI_*` cmake
+  toggles do not exist at the pin (grep -r "BONSAI" over CMakeLists.txt +
+  cmake/ = zero hits); the fork compiles its ternary kernels
+  unconditionally. S1.2 now cites the demo script AT THE PIN; the MAP 1.2
+  flags changed accordingly (Ninja generator,
+  `-DCMAKE_CUDA_ARCHITECTURES="121a"`). (2) Fork-vendoring decision:
+  submodule chosen (the 0.1 layout line, the AGENTS.md "chosen default");
+  the alternative (plain clone + pin in ARTIFACTS.md) noted in the PR as
+  the open decision per the uncertainty rule. (3) The submodule is a real
+  clone of a large repo: `git submodule update --init` on re-clone pulls
+  the whole fork history; acceptable, and a `.gitmodules` `branch = prism`
+  means `git submodule update --remote` tracks the right ref when the pin
+  bumps via PR.
+- spec deltas: S1.2 build-flags paragraph rewritten to match the fork at
+  `9a9394a8` (no `LLAMA_BONSAI_*` toggles; demo-script flags at the pin;
+  arch list replaced by `121a`). Backport per the document conventions
+  (implementation finding contradicted the spec; code/pin was right).
 
 ### 2026-09-20 — Phase 0 review loop closed: round-14 lint-alignment + session log (items 0.1–0.4, G3b rounds 1–14)
 - agent/model: Hermes qwen3.8-27b (session: Phase 0, branch `phase0-scaffolding`)
