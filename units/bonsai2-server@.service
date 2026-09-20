@@ -1,0 +1,45 @@
+# bonsai2-server@.service — per-instance TEMPLATE unit (SPEC S2.2).
+#
+# PLACEHOLDER: install.sh (MAP 2.4) renders one concrete unit per
+# granted instance i from this template (systemd template syntax:
+# instance i runs as bonsai2-server@i). NOT a runnable unit as-is:
+# systemd refuses to start it without ExecStart (verified:
+# `systemd-analyze verify` reports "no ExecStart= … Refusing"), so
+# the only way this file reaches a system is via install.sh, which
+# fills ExecStart and installs it under the name bonsai2-server@i.
+# The docker run flags are
+# VERBATIM the main-stack shape (user decision 2026-09-20) with values
+# filled from /opt/bonsai2/etc/subagent-engine.yaml:
+#
+#   ExecStartPre=/usr/bin/docker rm -f bonsai2-server-%i
+#   ExecStart=/usr/bin/docker run --rm --name bonsai2-server-%i \
+#     --gpus all \
+#     --memory {per_instance_budget_gb}g --memory-swap {per_instance_budget_gb}g \
+#     --shm-size 4g \
+#     --network host --ipc=host \
+#     {image_pin.tag} \
+#       /opt/bonsai2/bin/llama-server {S1.3 flags, --port {port_base+i}}
+#
+#   Restart=on-failure / RestartSec=5 / StartLimitBurst=3 (then bfailed)
+#   / CPUQuota=64%
+#
+# Port collision at boot -> ERR_PORT_IN_USE, exit 3, instance skipped
+# (S1.5); the manager drives all lifecycle (spawn/unload/reload/drift,
+# S2.2/S2.5/S3.2).
+
+[Unit]
+Description=bonsai2 subagent instance %i (llama-server container)
+Requires=docker.service
+After=docker.service bonsai2-sglang.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+ExecStartPre=/usr/bin/docker rm -f bonsai2-server-%i
+# ExecStart rendered by install.sh (see header)
+Restart=on-failure
+RestartSec=5
+CPUQuota=64%
+
+[Install]
+WantedBy=multi-user.target

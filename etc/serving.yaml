@@ -1,0 +1,21 @@
+# serving.yaml — TEMPLATE (SPEC S2.6).
+#
+# install.sh renders the real file to /opt/bonsai2/etc/serving.yaml:
+# main_stack.footprint_gb is detected from the main container's SGLang
+# startup log (S6.3 step 4) with the S2.3/S2.6 fallbacks; boot_target_s
+# is written back from the measured cold-boot test (S2.7).
+
+main_stack:
+  container: qwen38-sglang
+  endpoint: http://localhost:30001
+  footprint_gb: 76.4            # fresh-load footprint (SGLang log); live cgroup read preferred (S2.3)
+
+os_reserved_gb: 8.0
+
+manager:
+  binary: /opt/bonsai2/bin/bonsai2-manager
+  health_dir: /run/bonsai2
+  restart_burst: 3
+  health_poll_s: 10
+
+boot_target_s: 180              # measured, not guessed; updated by install test (S2.7)

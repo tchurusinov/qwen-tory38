@@ -75,23 +75,84 @@ Exit: repo layout decided and recorded; toolchain verified; test runner works he
       (trackability ledger for everything outside the repo; created
       2026-09-20, pre-implementation — its "created by this project"
       table fills in as phases land).
-- [ ] 0.1 Decide + record repo layout: which source lives where — `install.sh`,
-      `bonsai2-manager` (or its source), the S3.2 harness scripts, unit files,
-      `bench/` (runner, `score/`, `goldens/`), `tests/`. Host paths are
-      fixed by spec: `/opt/bonsai2/{bin,etc,cache}` (S1.6, S2.2, S3.2);
-      write the layout decision into this map under 0.1 when done.
-- [ ] 0.2 Test runner + conventions: hermetic tests runnable with no GPU/no
-      network; `@gpu` label for GPU tests; `nvidia-smi` snapshot into the
-      test log before GPU tests (Global testing discipline).
-- [ ] 0.3 Verify build toolchain: aarch64 + CUDA 13.0 build container,
-      cmake/ninja, driver ≥ 580 — the S1.2/S6.6 matrix on this box.
-- [ ] 0.4 Pre-commit enforcement (AGENTS.md "Code quality"):
-      `.githooks/pre-commit` (bash -n + shellcheck on .sh, ruff on .py,
-      secret scan on staged diff, whitespace/CRLF/size checks, then full
+- [x] 0.1 Decide + record repo layout (decided 2026-09-20, branch
+      `phase0-scaffolding`): the repo mirrors the host `/opt/bonsai2/`
+      layout 1:1 so source and deploy paths never diverge in naming;
+      `install.sh` (Phase 6) is the deployer.
+      ```
+      install.sh                  # S6.3 one-command installer (Phase 6)
+      bin/                        # -> /opt/bonsai2/bin/ (S3.2 scripts, S2.1
+                                  #   manager; MAP P2/P3; llama-server NOT
+                                  #   here — baked into the image, S1.2)
+      etc/                        # -> /opt/bonsai2/etc/ TEMPLATES; install.sh
+      |   subagent-engine.yaml    #   renders real YAMLs (S1.6/S2.6/S3.6/S5.7)
+      |   serving.yaml
+      |   harness.yaml
+      |   bench.yaml
+      units/                      # -> /etc/systemd/system/ (S2.2; MAP 2.4
+      |   bonsai2-sglang.service  #   renders/installs the concrete units)
+      |   bonsai2-server@.service #   (template syntax, one per instance i)
+      bench/                      # S5 framework source (run.py, score/,
+      |   goldens/                #   goldens + M4 seeded-bug fixture; MAP P4)
+      tests/                      # hermetic default: python3 -m unittest
+      |   test_smoke.py           #   discover -s tests (no GPU/no network,
+      |   fixtures/               #   stdlib unittest; S3.7 mock engine +
+                                  #   manager stub lands at MAP P3)
+      |   run_gpu.sh              # @gpu runner: runs tests/gpu/ ONLY, with
+      |   gpu/                    #   nvidia-smi + /proc/meminfo snapshots
+                                  #   first — @gpu tests live ONLY here
+      third_party/llama.cpp/      # fork submodule pinned (MAP 1.1)
+      scripts/                    # repo workflow tooling (gate.sh, review.sh,
+                                  #   install-hooks.sh; not host-installed)
+      .githooks/pre-commit        # MAP 0.4 (core.hooksPath=.githooks)
+      ```
+      Notes: `bench/` is repo-source only — runtime results go to
+      `/run/bonsai2/bench/` and committed summaries to `bench-results/`
+      (S5.2); `etc/` holds TEMPLATES with `<placeholder>` values — the
+      four runtime YAMLs are written by install.sh with computed
+      pins/hashes/N; the `tests/` split encodes the Global testing
+      discipline (hermetic default vs `@gpu` explicit).
+- [x] 0.2 Test runner + conventions (2026-09-20): stdlib `unittest`
+      only (zero deps, S6.6-safe); hermetic default =
+      `python3 -m unittest discover -s tests` from repo root — verified
+      green (2 tests, 0.000s, no GPU/network). `@gpu` label = separate
+      `tests/gpu/` discover target, run via `tests/run_gpu.sh` which
+      snapshots `nvidia-smi` (driver/memory/utilization + `free -h`)
+      into `test-logs/gpu-<ts>.log` before discovery (Global testing
+      discipline). `tests/test_smoke.py` asserts the suite is hermetic
+      (std-only imports; no requests/yaml leaked in).
+- [x] 0.3 Verify build toolchain (probed 2026-09-20 on this box, S1.2/
+      S6.2/S6.6 matrix):
+      - arch: aarch64 ✓ (uname -m)
+      - driver 580.159.03 ✓ (≥ 580; newer than the 580.126.09 recorded
+        at spec time — box was re-imaged since, still in-matrix)
+      - python 3.12.3 ✓ (≥ 3.10)
+      - docker 29.2.1 (client + server) ✓ with BuildKit
+      - nvidia-container-toolkit 1.19.1 ✓ (`nvidia-ctk --version`)
+      - CUDA build container: `nvidia/cuda:13.0.2-devel-ubuntu24.04`
+        — pulled + manifest-verified arm64+aarch64 (digest
+        `nvidia/cuda@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6`);
+        inside it: nvcc 13.0 (cuda_13.0.r13.0), gcc/g++ present;
+        cmake + ninja MISSING from the base image — install via
+        `apt-get install -y cmake ninja-build` (Ubuntu 24.04 repos,
+        aarch64 ✓; verified: cmake 3.28.3, ninja 1.11.1 in-container).
+        install.sh's build stage (MAP 1.2/6.2) must pin this image
+        digest + the apt line.
+      - /opt free: 353 GB ✓ (≥ 20 GB floor)
+      - host linters: shellcheck + ruff still not installed (soft in
+        gate/pre-commit; Open items).
+- [x] 0.4 Pre-commit enforcement (2026-09-20): `.githooks/pre-commit`
+      (staged-only: bash -n + shellcheck-soft on .sh; ruff-soft on .py;
+      secret scan of staged diff — same heuristic as gate.sh;
+      trailing-whitespace/CRLF/no-staged-file>50MB; then full
       `./scripts/gate.sh`) + `scripts/install-hooks.sh` (sets
-      `core.hooksPath=.githooks`, idempotent); install it in this clone
-      and verify with a deliberate dirty-file commit (must block) + a
-      clean commit (must pass).
+      `core.hooksPath=.githooks`, idempotent — ran twice, no drift).
+      Enabled in this clone. Verified with deliberate probes: dirty
+      staged .sh (trailing whitespace) → hook exit 1 (BLOCKED); staged
+      .sh carrying a 16-char string after `token = "` → secret-scan
+      FAIL exit 1; clean staged file → real `git commit` ran the hook
+      to "pre-commit: ok" + gate PASS (test commit reverted after). `git commit --no-verify`
+      remains allowed with a one-line PR-body reason.
 
 ### Phase 1 — Subagent inference engine + image (SPEC S1)
 
@@ -380,6 +441,74 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-20 — Phase 0 review loop closed: round-14 lint-alignment + session log (items 0.1–0.4, G3b rounds 1–14)
+- agent/model: Hermes qwen3.8-27b (session: Phase 0, branch `phase0-scaffolding`)
+- phase(s): P0 (0.1–0.4 done; G3b independent-review loop closed at round 14)
+- items checked: 0.1, 0.2, 0.3, 0.4 (unchanged this session — all already
+  [x]; this session closed the review loop + aligned the lint contract)
+- machine state: no /opt/bonsai2, no bonsai2 units/images (Phase 0 is
+  repo-only). Pre-commit hook ENABLED in this clone (core.hooksPath=
+  .githooks). NEW contract alignment (G3c round 14 P1): `scripts/gate.sh`
+  now runs shellcheck HARD when installed (was WARN-only) and a NEW ruff
+  step (format --check + check, HARD when `ruff` or `uvx ruff` is
+  available) — the pre-commit tripwire and the formal G2 gate now run the
+  SAME lint contract. Tree made ruff-clean: `scripts/diagram_qwen38_stack.py`
+  + `tests/test_smoke.py` reformatted + 2 ruff issues fixed (import order,
+  unused `fill`→`_fill`) + the diagram script chmod +x (EXE001). ruff is
+  uv-managed on this box (not on the bare PATH), so the gate/hook detect
+  it via `uvx ruff`. Gate PASS, hermetic suite OK (2 tests), hook green.
+- next: Phase 1, item 1.1 — pin the fork commit (PrismML-Eng/llama.cpp
+  `prism` branch; check tip SHA + the fork-vendoring decision: submodule
+  vs clone+pin; add `third_party/llama.cpp` per the 0.1 layout). Note the
+  gate baseline is now "ruff available → hard, shellcheck not installed →
+  soft-skip": a fresh session must not read the old "shellcheck soft" note
+  as still authoritative.
+- blockers/intricacies: (1) round-14 P1 was a real contract gap: the
+  tripwire checked `.py` at all and treated shellcheck as hard-when-
+  installed, while the formal gate treated shellcheck as WARN-only and had
+  no ruff step — fixed by aligning gate.sh UP to the documented contract
+  (not the hook down), so the tripwire cannot block what the gate allows.
+  (2) ruff availability axis: `command -v ruff` is false on this box (uv
+  manages it), so both gate.sh and the hook now fall back to `uvx ruff`;
+  if a future session installs ruff on the bare PATH, the `ruff` branch
+  wins and uvx is not used. (3) `scripts/diagram_qwen38_stack.py` lives
+  OUTSIDE tests/, so its ruff reformat did NOT trip the stdlib-import
+  AST check — that scanner walks tests/ only (the hermetic suite root),
+  while the gate's ruff step covers every tracked .py.
+- spec deltas: none (round-14 findings were tripwire/gate contract, not
+  SPEC content; no SPEC.md change).
+
+### 2026-09-20 — Phase 0 scaffolding: layout, test runner, toolchain, pre-commit (items 0.1–0.4)
+- agent/model: Hermes qwen3.8-27b (session: Phase 0, branch `phase0-scaffolding`)
+- phase(s): P0 (0.1–0.4 done; Phase 0 exit criteria met)
+- items checked: 0.1, 0.2, 0.3, 0.4
+- machine state: repo now carries the full Phase 0 layout (bin/, etc/
+  templates ×4, units/ placeholders ×2, tests/ + tests/gpu/,
+  .githooks/pre-commit, scripts/install-hooks.sh). Pre-commit hook
+  ENABLED in this clone (core.hooksPath=.githooks — a fresh clone must
+  run `./scripts/install-hooks.sh` once). No /opt/bonsai2 yet, no
+  bonsai units/images. NEW local docker image:
+  `nvidia/cuda:13.0.2-devel-ubuntu24.04` (digest in ARTIFACTS.md;
+  build-stage toolchain for MAP 1.2 — note cmake+ninja must be apt'd
+  inside it). Hermetic suite green: `python3 -m unittest discover -s
+  tests` (2 tests). Gate PASS on the branch tip.
+- next: Phase 1, item 1.1 — pin the fork commit (PrismML-Eng/llama.cpp
+  `prism` branch; check tip SHA + the fork-vendoring decision: submodule
+  vs clone+pin, Open items; add `third_party/llama.cpp` per the 0.1
+  layout) → 1.2 build pipeline (uses the pinned CUDA image from 0.3).
+- blockers/intricacies: (1) driver on this box is now 580.159.03 —
+  SPEC S1.2/S6.2 recorded 580.126.09; still in-matrix (≥ 580), no spec
+  delta needed, but the spec's "this box" column is stale. (2) The
+  CUDA base image ships WITHOUT cmake/ninja (verified in-container):
+  the 1.2 build stage = image + `apt-get install -y cmake ninja-build`
+  + cmake S1.2 flags; don't assume a stock toolchain inside. (3)
+  nvidia-smi on this GB10 returns `[N/A]` for memory.used/mem.total
+  via --query-gpu (unified-memory driver quirk) — use
+  `nvidia-smi -q -d MEMORY` or /proc/meminfo for VRAM probes in
+  S1.4/S2.3 code; recorded in run_gpu.sh's pre-snapshot.
+- spec deltas: none (0.3's driver version note is a re-measurement,
+  the spec's "≥ 580" requirement is the binding one).
 
 ### 2026-09-20 — AGENTS.md + ARTIFACTS.md created; fork merge status checked
 - agent/model: Hermes qwen3.8-27b (session: guidance docs, no implementation)

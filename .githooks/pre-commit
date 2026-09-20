@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — tripwire, not the gate.
+#
+# Runs on STAGED changes only:
+#   1. bash -n on staged .sh (hard); shellcheck on staged .sh — hard
+#      when shellcheck is installed, skipped when absent (AGENTS.md "Code
+#      quality": these are pre-commit checks, not optional)
+#   2. ruff format --check + ruff check on staged .py — hard when ruff is
+#      installed, skipped when absent
+#   3. trailing whitespace / CRLF / staged files > 50 MB (all staged
+#      files; text-only checks for text files)
+#   4. secret scan of the staged diff (same heuristic as scripts/gate.sh;
+#      unconditional — runs even on delete-only commits)
+#   5. full ./scripts/gate.sh — note: gate.sh inspects TRACKED files in
+#      the WORKING TREE (bash -n / shellcheck / yaml parse) plus the
+#      committed diff, so a dirty worktree (an unstaged edit to a tracked
+#      .sh/.yaml) can also block the commit, not just the staged changes.
+#      This is a known trade-off, documented here rather than silenced
+#      (G3c round 10 P1-2; probe: stage a valid .sh, break the worktree
+#      copy, gate.sh exits 1 on the worktree copy).
+#
+# Presence = the only axis of softness: a linter that is not installed is
+# skipped (its baseline is "not installed" per the gate baseline note), a
+# linter that IS installed blocks on failure (FAIL=1). This is what makes
+# the hook a real tripwire rather than a no-op once the tooling lands.
+#
+# git commit --no-verify stays allowed with a one-line reason in the PR
+# body (AGENTS.md "Code quality"). The G2 gate (gate.sh) is still the
+# formal check; this hook is the early warning.
+
+set -uo pipefail
+
+# Run the hook from the repo root no matter where git invoked it
+# (git commit -C, manual sh .githooks/pre-commit — G3c round 6 P2).
+# Guard the cd: without `set -e` a failed rev-parse (invoked outside a
+# repo / broken worktree) would leave us in the invoking CWD and every
+# subsequent `git diff`/`git cat-file` would run from the wrong place,
+# producing a false "ok" pass (G3c round 11 P1-1/P1-2).
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "pre-commit FAIL: git rev-parse --show-toplevel failed (not in a git repo?)" >&2
+  exit 1
+}
+cd "$REPO_ROOT" || {
+  echo "pre-commit FAIL: cd $REPO_ROOT failed" >&2
+  exit 1
+}
+
+FAIL=0
+# PID-unique temp files so concurrent git operations on one host
+# (rebase + commit) cannot interleave on shared /tmp names; cleaned up
+# on exit (G3c round 4 P1).
+TMP_PREFIX="/tmp/precommit-$$"
+trap 'rm -f "${TMP_PREFIX}"_*' EXIT
+
+# Collect staged files (added/copied/modified/renamed; ignore deletions).
+# ACMR: R = rename-with-edit — a renamed .sh/.py must not escape the
+# checks below (G3c round 5 P2).
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
+
+if [ -n "$STAGED" ]; then
+  # 1) bash -n (hard) + shellcheck (hard when installed) on staged .sh.
+  #    bash -n runs on EVERY staged .sh (cheap, authoritative — a syntax
+  #    break in any one file is a hard stop). shellcheck findings are
+  #    capped at the first 3 failing files: a commit that breaks N files
+  #    at once would otherwise emit N blocks of findings; capping keeps
+  #    the failure signal legible (G3c round 10 P1-1 — "wall of noise").
+  SC_FAILS=0
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    if ! bash -n "$f" 2>"${TMP_PREFIX}_bashn"; then
+      echo "pre-commit FAIL: bash -n $f" >&2
+      cat "${TMP_PREFIX}_bashn" >&2
+      FAIL=1
+      # Syntax is already broken: skip the rest of this file's checks
+      # (shellcheck on a broken file just adds noise — G3c round 4 P2).
+      continue
+    fi
+    if command -v shellcheck >/dev/null 2>&1; then
+      if [ "$SC_FAILS" -ge 3 ]; then
+        # 3 shellcheck failures already reported — don't add more noise
+        # (G3c round 10 P1-1). bash -n still runs on every file.
+        continue
+      fi
+      if ! shellcheck "$f" >"${TMP_PREFIX}_shellcheck" 2>&1; then
+        echo "pre-commit FAIL: shellcheck $f (installed, so hard):" >&2
+        sed 's/^/    /' "${TMP_PREFIX}_shellcheck" >&2
+        FAIL=1
+        SC_FAILS=$((SC_FAILS + 1))
+        if [ "$SC_FAILS" -eq 3 ]; then
+          echo "pre-commit: 3 shellcheck failures so far — remaining staged .sh files skip shellcheck (fix and re-run)" >&2
+        fi
+      fi
+    fi
+  done < <(echo "$STAGED" | grep -E '\.sh$' || true)
+
+  # 2) ruff format --check + ruff check (hard when ruff is available) on
+  #    staged .py. Availability = `ruff` on the bare PATH or `uvx ruff`
+  #    (uv present) — same detection as the gate step (G3c round 14 P1:
+  #    the tripwire and the formal gate must run the same lint contract;
+  #    on this box ruff is uv-managed, not on the bare PATH, so uvx is
+  #    the axis that makes it "installed").
+  RUFF_CMD=""
+  if command -v ruff >/dev/null 2>&1; then
+    RUFF_CMD="ruff"
+  elif command -v uvx >/dev/null 2>&1; then
+    RUFF_CMD="uvx ruff"
+  fi
+  if [ -n "$RUFF_CMD" ]; then
+    PYFILES=()
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      PYFILES+=("$f")
+    done < <(echo "$STAGED" | grep -E '\.py$' || true)
+    if [ "${#PYFILES[@]}" -gt 0 ]; then
+      if ! $RUFF_CMD format --check "${PYFILES[@]}" >"${TMP_PREFIX}_rufffmt" 2>&1; then
+        echo "pre-commit FAIL: ruff format --check (available, so hard):" >&2
+        sed 's/^/    /' "${TMP_PREFIX}_rufffmt" >&2
+        FAIL=1
+      fi
+      if ! $RUFF_CMD check "${PYFILES[@]}" >"${TMP_PREFIX}_ruff" 2>&1; then
+        echo "pre-commit FAIL: ruff check (available, so hard):" >&2
+        sed 's/^/    /' "${TMP_PREFIX}_ruff" >&2
+        FAIL=1
+      fi
+    fi
+  fi
+
+  # 3) trailing whitespace / CRLF / no staged file > 50 MB — all checks
+  #    run on the STAGED BLOB (git cat-file blob :0:<file>): pre-commit
+  #    validates what will actually be committed, and the working tree
+  #    can drift after staging (G3c round 9 P1). Renamed files included
+  #    (ACMR: the new path is what lands; G3c round 9 P2). The loop no
+  #    longer requires the WORKTREE file to exist — a staged blob whose
+  #    worktree copy was deleted still gets every check (G3c round 10
+  #    P1, probe: 50 MB blob + `rm` of the worktree file was slipping
+  #    past the cap because the old `[ -f "$f" ]` guard skipped it).
+  while IFS= read -r f; do
+    # 50 MB staged-file cap: applies to ALL staged files, including
+    # binaries (a 5 GB .gguf staged by a later phase must not sneak
+    # past silently — G3c round 6 P1). Measured on the STAGED BLOB
+    # (`git cat-file -s :0:<file>` — the index entry, not the working-
+    # tree file; G3c round 8 P2). No worktree fallback: an empty read
+    # means the index entry vanished mid-hook, in which case skipping
+    # is correct (a `stat` on a drifted worktree file could only lie) —
+    # but it is no longer silent: the skip is logged so the cap cannot
+    # become a no-op for a file without a visible trace (G3c round 12
+    # P1).
+    size="$(git cat-file -s ":0:$f" 2>/dev/null)"
+    if [ -z "$size" ]; then
+      echo "pre-commit: note: could not read staged size for $f (index entry gone mid-hook?) — skipping cap + text checks for it" >&2
+      continue
+    fi
+    if [ "$size" -gt 52428800 ]; then
+      echo "pre-commit FAIL: $f is $((size / 1048576)) MB (> 50 MB staged-file cap)" >&2
+      FAIL=1
+    fi
+    # Text-file checks below: binary skip = extension whitelist OR a NUL
+    # byte ANYWHERE in the staged blob. The NUL test is the same
+    # classifier git itself uses for binary detection, so the hook and
+    # git agree on what a text file is. The NUL count is done with tr:
+    # bash's $'\0' is a ZERO-LENGTH string, so `grep -q $'\0'` matches
+    # every line — probe: text file "counted" as binary and all text
+    # checks silently skipped (found in G3c round 9). The window is the
+    # WHOLE blob, not a leading window: a binary whose NULs all sit
+    # past 64 KB would otherwise reach the text greps and could trip
+    # them on binary bytes (G3c round 13 P1; tr handles NULs fine —
+    # the zero-length-string trap only hits bash/grep, not tr).
+    # Residual edge (documented, not a bug): a file with NO NUL byte
+    # anywhere (e.g. an all-0xFF block) is classified as text — exactly
+    # as git classifies it; if such a file stages a trailing-space
+    # line the hook blocks it and --no-verify (or the .gguf-style
+    # extension whitelist) is the documented path.
+    case "$f" in
+      *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;;
+    esac
+    blob="${TMP_PREFIX}_blob"
+    if ! git cat-file blob ":0:$f" > "$blob" 2>/dev/null; then
+      continue
+    fi
+    if [ "$(tr -cd '\0' < "$blob" | wc -c)" -gt 0 ]; then
+      continue
+    fi
+    if grep -qE ' +$' "$blob"; then
+      echo "pre-commit FAIL: trailing whitespace in $f (staged blob)" >&2
+      grep -nE ' +$' "$blob" | head -5 | sed 's/^/    /' >&2
+      FAIL=1
+    fi
+    if grep -q $'\r' "$blob"; then
+      echo "pre-commit FAIL: CRLF line endings in $f (staged blob)" >&2
+      FAIL=1
+    fi
+  done < <(echo "$STAGED")
+fi
+
+# 4) secret scan of the staged diff (same logic as gate.sh). Heuristic,
+#    not a scanner: a 16+ char quoted literal after a key= / key: pair is
+#    flagged. Runs UNCONDITIONALLY — even on a delete-only commit the
+#    full cached diff is scanned, so deleting a file that carries a
+#    secret still blocks (G3c round 6 P1). Placeholders like
+#    "<pinned-sha-at-install>" do NOT match (the value inside the quotes
+#    must be bare [A-Za-z0-9]{16,}); ${...} and multi-word values
+#    likewise. Known FP class: real-but-local identifiers — the
+#    --no-verify escape hatch is the documented path for those.
+if git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
+   | grep -Eiq '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}'; then
+  echo "pre-commit FAIL: possible secret literal in staged diff:" >&2
+  git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
+    | grep -Ei '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}' \
+    | sed 's/^/    /' >&2
+  FAIL=1
+fi
+
+# 5) full local gate (its own exit code is authoritative for the diff)
+if ! bash ./scripts/gate.sh; then
+  echo "pre-commit: gate.sh failed (details above)" >&2
+  FAIL=1
+fi
+
+if [ $FAIL -ne 0 ]; then
+  echo "pre-commit: BLOCKED (fix and re-stage, or --no-verify with a one-line PR-body reason)" >&2
+  exit 1
+fi
+echo "pre-commit: ok"
