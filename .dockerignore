@@ -1,0 +1,31 @@
+# Docker build context hygiene for the bonsai2 build pipeline (MAP 1.2).
+# The Dockerfile's only COPY is third_party/llama.cpp/ -> /src; everything
+# else in the repo root is excluded to keep the context small.
+#
+# NOTE: we exclude the 4 root docs by name (NOT a blanket `*.md`) so the
+# fork's own .md files under third_party/llama.cpp/ (README, AGENTS, ...)
+# stay in context. The build does not read them today (no CMake `read()`
+# of .md at the pin), but if the fork ever adds a required .md at configure
+# time, a blanket `*.md` here would ENOENT it — the named entries keep that
+# failure visible rather than silent.
+.git
+.gitmodules
+# gitlink form: a submodule's .git is a regular *file* in the working
+# tree; this entry excludes it. The pattern is path-based (not
+# type-based), so it also excludes a `third_party/llama.cpp/.git`
+# *directory* if the submodule is ever replaced by a plain nested
+# clone — the context stays small and the "COPY has no git metadata"
+# assumption in the Dockerfile header holds in either form.
+third_party/llama.cpp/.git
+test-logs/
+docs/
+bench-results/
+.ruff_cache/
+__pycache__/
+# scr.txt: tracked scratch file (also in .gitignore) — keep excluded.
+scr.txt
+# Root project docs (not fork source):
+AGENTS.md
+ARTIFACTS.md
+MAP.md
+SPEC.md
