@@ -82,35 +82,44 @@ if [ -n "$STAGED" ]; then
     fi
   fi
 
-  # 3) trailing whitespace / CRLF / no staged file > 50 MB
+  # 3) trailing whitespace / CRLF / no staged file > 50 MB — all checks
+  #    run on the STAGED BLOB (git cat-file blob :0:<file>): pre-commit
+  #    validates what will actually be committed, and the working tree
+  #    can drift after staging (G3c round 9 P1). Renamed files included
+  #    (ACMR: the new path is what lands; G3c round 9 P2).
   while IFS= read -r f; do
     [ -f "$f" ] || continue
     # 50 MB staged-file cap: applies to ALL staged files, including
     # binaries (a 5 GB .gguf staged by a later phase must not sneak
-    # past silently — G3c round 6 P1). Measured on the STAGED BLOB, not
-    # the working tree, so an unstaged shrink cannot mask the limit
-    # (G3c round 8 P2).
+    # past silently — G3c round 6 P1).
     size="$(git cat-file -s ":0:$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)"
     if [ -n "$size" ] && [ "$size" -gt 52428800 ]; then
       echo "pre-commit FAIL: $f is $((size / 1048576)) MB (> 50 MB staged-file cap)" >&2
       FAIL=1
     fi
     # Text-file checks below: binary skip = extension whitelist OR a NUL
-    # byte in the first 64 KB (catches PDFs/fonts/wasm/... without a
-    # growing extension list).
+    # byte in the first 64 KB of the staged blob (catches PDFs/fonts/
+    # wasm/... without a growing extension list). The NUL count is done
+    # with tr: bash's $'\0' is a ZERO-LENGTH string, so `grep -q $'\0'`
+    # matches every line — probe: text file "counted" as binary and all
+    # text checks silently skipped (found in G3c round 9).
     case "$f" in
       *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;;
     esac
-    if head -c 65536 "$f" | LC_ALL=C grep -q $'\0'; then
+    blob="${TMP_PREFIX}_blob"
+    if ! git cat-file blob ":0:$f" > "$blob" 2>/dev/null; then
       continue
     fi
-    if grep -qE ' +$' "$f"; then
-      echo "pre-commit FAIL: trailing whitespace in $f" >&2
-      grep -nE ' +$' "$f" | head -5 | sed 's/^/    /' >&2
+    if [ "$(head -c 65536 "$blob" | tr -cd '\0' | wc -c)" -gt 0 ]; then
+      continue
+    fi
+    if grep -qE ' +$' "$blob"; then
+      echo "pre-commit FAIL: trailing whitespace in $f (staged blob)" >&2
+      grep -nE ' +$' "$blob" | head -5 | sed 's/^/    /' >&2
       FAIL=1
     fi
-    if grep -q $'\r' "$f"; then
-      echo "pre-commit FAIL: CRLF line endings in $f" >&2
+    if grep -q $'\r' "$blob"; then
+      echo "pre-commit FAIL: CRLF line endings in $f (staged blob)" >&2
       FAIL=1
     fi
   done < <(echo "$STAGED")

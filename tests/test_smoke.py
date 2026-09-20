@@ -31,7 +31,14 @@ class TestSuiteSmoke(unittest.TestCase):
 
     def test_test_modules_import_stdlib_only(self):
         root = pathlib.Path(__file__).resolve().parent
-        files = sorted(root.glob("test_*.py"))
+        # Every .py under tests/ EXCEPT the @gpu target (tests/gpu/ may
+        # use the S6.6 runtime deps): today that is test_smoke.py, and
+        # it also covers future hermetic helpers (e.g. tests/fixtures/,
+        # which lands at MAP P3) — G3c round 9 P2.
+        files = sorted(
+            p for p in root.rglob("*.py")
+            if p.is_file() and "gpu" not in p.parts
+        )
         self.assertGreaterEqual(len(files), 1,
                                 "hermetic suite has no test modules")
         allowed = set(sys.stdlib_module_names)
