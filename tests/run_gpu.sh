@@ -33,6 +33,12 @@ set +e
 python3 -m unittest discover -s tests/gpu -v 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
 set -e
+# "NO TESTS RAN" (exit 5) is the documented Phase-0 state (tests/gpu/ is
+# empty until MAP 1.7 adds the first @gpu test) — not a failure.
+if [ "$rc" -eq 5 ]; then
+  echo "@gpu runner: no tests in tests/gpu/ yet (expected until MAP 1.7) — passing"
+  rc=0
+fi
 
 {
   echo "--- nvidia-smi snapshot (post) ---"

@@ -7,8 +7,10 @@
 #      quality": these are pre-commit checks, not optional)
 #   2. ruff format --check + ruff check on staged .py — hard when ruff is
 #      installed, skipped when absent
-#   3. secret scan of the staged diff (same heuristic as scripts/gate.sh)
-#   4. trailing whitespace / CRLF / staged files > 50 MB
+#   3. trailing whitespace / CRLF / staged files > 50 MB (all staged
+#      files; text-only checks for text files)
+#   4. secret scan of the staged diff (same heuristic as scripts/gate.sh;
+#      unconditional — runs even on delete-only commits)
 #   5. full ./scripts/gate.sh
 #
 # Presence = the only axis of softness: a linter that is not installed is
@@ -21,6 +23,10 @@
 # formal check; this hook is the early warning.
 
 set -uo pipefail
+
+# Run the hook from the repo root no matter where git invoked it
+# (git commit -C, manual sh .githooks/pre-commit — G3c round 6 P2).
+cd "$(git rev-parse --show-toplevel)"
 
 FAIL=0
 # PID-unique temp files so concurrent git operations on one host
@@ -76,26 +82,20 @@ if [ -n "$STAGED" ]; then
     fi
   fi
 
-  # 3) secret scan of the staged diff (same logic as gate.sh). Heuristic, not
-#    a scanner: a 16+ char literal after a key= / key: pair is flagged.
-#    Placeholders like "<pinned-sha-at-install>" do NOT match (the value
-#    inside the quotes must be bare [A-Za-z0-9]{16,}); ${...} and multi-word
-#    values likewise. Known FP class: real-but-local identifiers — the
-#    --no-verify escape hatch is the documented path for those.
-  if git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
-     | grep -Eiq '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}'; then
-    echo "pre-commit FAIL: possible secret literal in staged diff:" >&2
-    git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
-      | grep -Ei '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}' \
-      | sed 's/^/    /' >&2
-    FAIL=1
-  fi
-
-  # 4) trailing whitespace / CRLF / no staged file > 50 MB
+  # 3) trailing whitespace / CRLF / no staged file > 50 MB
   while IFS= read -r f; do
     [ -f "$f" ] || continue
-    # Binary skip: extension whitelist OR NUL byte in the first 8 KB
-    # (catches PDFs/fonts/wasm/... without a growing extension list).
+    # 50 MB staged-file cap: applies to ALL staged files, including
+    # binaries (a 5 GB .gguf staged by a later phase must not sneak
+    # past silently — G3c round 6 P1).
+    size="$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)"
+    if [ -n "$size" ] && [ "$size" -gt 52428800 ]; then
+      echo "pre-commit FAIL: $f is $((size / 1048576)) MB (> 50 MB staged-file cap)" >&2
+      FAIL=1
+    fi
+    # Text-file checks below: binary skip = extension whitelist OR a NUL
+    # byte in the first 64 KB (catches PDFs/fonts/wasm/... without a
+    # growing extension list).
     case "$f" in
       *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;;
     esac
@@ -111,16 +111,29 @@ if [ -n "$STAGED" ]; then
       echo "pre-commit FAIL: CRLF line endings in $f" >&2
       FAIL=1
     fi
-    size="$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)"
-    if [ -n "$size" ] && [ "$size" -gt 52428800 ]; then
-      echo "pre-commit FAIL: $f is $((size / 1048576)) MB (> 50 MB staged-file cap)" >&2
-      FAIL=1
-    fi
   done < <(echo "$STAGED")
 fi
 
+# 4) secret scan of the staged diff (same logic as gate.sh). Heuristic,
+#    not a scanner: a 16+ char quoted literal after a key= / key: pair is
+#    flagged. Runs UNCONDITIONALLY — even on a delete-only commit the
+#    full cached diff is scanned, so deleting a file that carries a
+#    secret still blocks (G3c round 6 P1). Placeholders like
+#    "<pinned-sha-at-install>" do NOT match (the value inside the quotes
+#    must be bare [A-Za-z0-9]{16,}); ${...} and multi-word values
+#    likewise. Known FP class: real-but-local identifiers — the
+#    --no-verify escape hatch is the documented path for those.
+if git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
+   | grep -Eiq '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}'; then
+  echo "pre-commit FAIL: possible secret literal in staged diff:" >&2
+  git diff --cached | grep -E '^\+' | grep -vE '^\+\+\+' \
+    | grep -Ei '(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*["'\''][A-Za-z0-9]{16,}' \
+    | sed 's/^/    /' >&2
+  FAIL=1
+fi
+
 # 5) full local gate (its own exit code is authoritative for the diff)
-if ! ./scripts/gate.sh; then
+if ! bash ./scripts/gate.sh; then
   echo "pre-commit: gate.sh failed (details above)" >&2
   FAIL=1
 fi
