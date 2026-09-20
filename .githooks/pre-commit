@@ -11,7 +11,13 @@
 #      files; text-only checks for text files)
 #   4. secret scan of the staged diff (same heuristic as scripts/gate.sh;
 #      unconditional — runs even on delete-only commits)
-#   5. full ./scripts/gate.sh
+#   5. full ./scripts/gate.sh — note: gate.sh inspects TRACKED files in
+#      the WORKING TREE (bash -n / shellcheck / yaml parse) plus the
+#      committed diff, so a dirty worktree (an unstaged edit to a tracked
+#      .sh/.yaml) can also block the commit, not just the staged changes.
+#      This is a known trade-off, documented here rather than silenced
+#      (G3c round 10 P1-2; probe: stage a valid .sh, break the worktree
+#      copy, gate.sh exits 1 on the worktree copy).
 #
 # Presence = the only axis of softness: a linter that is not installed is
 # skipped (its baseline is "not installed" per the gate baseline note), a
@@ -41,7 +47,13 @@ trap 'rm -f "${TMP_PREFIX}"_*' EXIT
 STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
 
 if [ -n "$STAGED" ]; then
-  # 1) bash -n (hard) + shellcheck (hard when installed) on staged .sh
+  # 1) bash -n (hard) + shellcheck (hard when installed) on staged .sh.
+  #    bash -n runs on EVERY staged .sh (cheap, authoritative — a syntax
+  #    break in any one file is a hard stop). shellcheck findings are
+  #    capped at the first 3 failing files: a commit that breaks N files
+  #    at once would otherwise emit N blocks of findings; capping keeps
+  #    the failure signal legible (G3c round 10 P1-1 — "wall of noise").
+  SC_FAILS=0
   while IFS= read -r f; do
     [ -f "$f" ] || continue
     if ! bash -n "$f" 2>"${TMP_PREFIX}_bashn"; then
@@ -53,10 +65,19 @@ if [ -n "$STAGED" ]; then
       continue
     fi
     if command -v shellcheck >/dev/null 2>&1; then
+      if [ "$SC_FAILS" -ge 3 ]; then
+        # 3 shellcheck failures already reported — don't add more noise
+        # (G3c round 10 P1-1). bash -n still runs on every file.
+        continue
+      fi
       if ! shellcheck "$f" >"${TMP_PREFIX}_shellcheck" 2>&1; then
         echo "pre-commit FAIL: shellcheck $f (installed, so hard):" >&2
         sed 's/^/    /' "${TMP_PREFIX}_shellcheck" >&2
         FAIL=1
+        SC_FAILS=$((SC_FAILS + 1))
+        if [ "$SC_FAILS" -eq 3 ]; then
+          echo "pre-commit: 3 shellcheck failures so far — remaining staged .sh files skip shellcheck (fix and re-run)" >&2
+        fi
       fi
     fi
   done < <(echo "$STAGED" | grep -E '\.sh$' || true)
