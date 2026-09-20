@@ -482,7 +482,8 @@ SPEC.md `status` → `active`.
   runtime image, a different thing). Inside: aarch64 ELF
   /opt/bonsai2/bin/llama-server + all shared libs (RUNPATH $ORIGIN,
   patchelf). No /opt/bonsai2 host dir yet (that is install/1.4+ work).
-  Gitea token for this session: 66dacd04... (same as before, still valid).
+  Gitea API: the session token (from the 2026-09-20 session) still
+  valid.
 - next: 1.3 model download + SHA256 (PQ2_0 default + PTQ1_0 fallback,
   retry x3/10s, ERR_HASH_MISMATCH exit 4). Note: local PTQ1_0 already on
   the box (LM Studio copy, 5.95 GB) — the 1.3 download is PQ2_0 (7.21 GB)

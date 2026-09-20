@@ -1,5 +1,6 @@
 # Docker build context hygiene for the bonsai2 build pipeline (MAP 1.2).
-# The only context the Dockerfile reads is third_party/llama.cpp/ source.
+# The only context the Dockerfile reads is third_party/llama.cpp/ source;
+# everything else is excluded to keep the context small.
 .git
 .gitmodules
 third_party/llama.cpp/.git
@@ -8,9 +9,7 @@ docs/
 bench-results/
 .ruff_cache/
 __pycache__/
+# scr.txt: tracked scratch file (also in .gitignore) — keep excluded.
 scr.txt
+# All markdown (SPEC/MAP/AGENTS/ARTIFACTS + any future .md).
 *.md
-MAP.md
-AGENTS.md
-SPEC.md
-ARTIFACTS.md

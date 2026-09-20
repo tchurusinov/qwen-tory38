@@ -143,4 +143,13 @@ RUN set -eu; \
     # "no CUDA-capable device is detected", which is the expected
     # no-GPU outcome, not a link failure).
     ldd /opt/bonsai2/bin/llama-server | grep -q "libggml-cuda" \
-        || { echo "ERR_BANNER_CUDA: libggml-cuda not linked into llama-server" >&2; exit 4; }
+        || { echo "ERR_BANNER_CUDA: libggml-cuda not linked into llama-server" >&2; exit 4; }; \
+    # Transitive-lib resolution without any environment (the runtime
+    # container will have no LD_LIBRARY_PATH): every lib in
+    # /opt/bonsai2/bin was patchelf'd to RUNPATH $ORIGIN above, so the
+    # binary + all nested libs must resolve via $ORIGIN alone. The
+    # in-build ldd above can be masked by LD_LIBRARY_PATH; this cannot.
+    env -i /opt/bonsai2/bin/llama-server --version > /tmp/banner2.txt 2>&1 \
+        || { cat /tmp/banner2.txt; echo "ERR_ENVI: --version failed under env -i" >&2; exit 4; }; \
+    grep -q "commit ${LLAMA_PIN_SHORT}" /tmp/banner2.txt \
+        || { echo "ERR_ENVI_COMMIT: pin not in env -i banner" >&2; exit 4; }
