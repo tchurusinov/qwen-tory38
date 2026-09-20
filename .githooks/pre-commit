@@ -130,9 +130,15 @@ if [ -n "$STAGED" ]; then
     # (`git cat-file -s :0:<file>` — the index entry, not the working-
     # tree file; G3c round 8 P2). No worktree fallback: an empty read
     # means the index entry vanished mid-hook, in which case skipping
-    # is correct (a `stat` on a drifted worktree file could only lie).
+    # is correct (a `stat` on a drifted worktree file could only lie) —
+    # but it is no longer silent: the skip is logged so the cap cannot
+    # become a no-op for a file without a visible trace (G3c round 12
+    # P1).
     size="$(git cat-file -s ":0:$f" 2>/dev/null)"
-    [ -n "$size" ] || continue
+    if [ -z "$size" ]; then
+      echo "pre-commit: note: could not read staged size for $f (index entry gone mid-hook?) — skipping cap + text checks for it" >&2
+      continue
+    fi
     if [ "$size" -gt 52428800 ]; then
       echo "pre-commit FAIL: $f is $((size / 1048576)) MB (> 50 MB staged-file cap)" >&2
       FAIL=1

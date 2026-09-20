@@ -32,10 +32,15 @@ LOG="$LOGDIR/gpu-$TS.log"
   echo "--- unittest discover tests/gpu ---"
 } > "$LOG"
 
-set +e
+# Run the test and capture ITS exit code (PIPESTATUS[0]) — the result
+# is authoritative. The pipe into tee is for the log only; a tee
+# failure (disk full) must NOT change the recorded test result, so
+# tee's exit code is intentionally ignored (G3c round 12 P1: the old
+# `set +e`/`set -e` toggle around this block was a no-op — `set -e`
+# was never globally enabled — and made the intent look load-bearing;
+# dropped it and documented the intent instead).
 python3 -m unittest discover -s tests/gpu -v 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
-set -e
 # "NO TESTS RAN" (exit 5) is the documented Phase-0 state (tests/gpu/ is
 # empty until MAP 1.7 adds the first @gpu test) — not a failure.
 if [ "$rc" -eq 5 ]; then
