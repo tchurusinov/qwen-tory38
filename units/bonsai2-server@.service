@@ -26,14 +26,14 @@
 Description=bonsai2 subagent instance %i (llama-server container)
 Requires=docker.service
 After=docker.service bonsai2-sglang.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 ExecStartPre=/usr/bin/docker rm -f bonsai2-server-%i
 # ExecStart rendered by install.sh (see header)
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=3
 CPUQuota=64%
 
 [Install]

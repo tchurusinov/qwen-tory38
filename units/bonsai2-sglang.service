@@ -14,14 +14,14 @@
 Description=bonsai2 subagent pool manager
 Wants=qwen38-sglang.service
 After=network.target qwen38-sglang.service docker.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=notify
 ExecStart=/opt/bonsai2/bin/bonsai2-manager
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target

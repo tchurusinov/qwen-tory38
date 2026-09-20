@@ -2,11 +2,19 @@
 # .githooks/pre-commit — tripwire, not the gate.
 #
 # Runs on STAGED changes only:
-#   1. bash -n on staged .sh; shellcheck (if installed — soft until it is)
-#   2. ruff format --check + ruff check on staged .py (if installed — soft)
+#   1. bash -n on staged .sh (hard); shellcheck on staged .sh — hard
+#      when shellcheck is installed, skipped when absent (AGENTS.md "Code
+#      quality": these are pre-commit checks, not optional)
+#   2. ruff format --check + ruff check on staged .py — hard when ruff is
+#      installed, skipped when absent
 #   3. secret scan of the staged diff (same heuristic as scripts/gate.sh)
 #   4. trailing whitespace / CRLF / staged files > 50 MB
 #   5. full ./scripts/gate.sh
+#
+# Presence = the only axis of softness: a linter that is not installed is
+# skipped (its baseline is "not installed" per the gate baseline note), a
+# linter that IS installed blocks on failure (FAIL=1). This is what makes
+# the hook a real tripwire rather than a no-op once the tooling lands.
 #
 # git commit --no-verify stays allowed with a one-line reason in the PR
 # body (AGENTS.md "Code quality"). The G2 gate (gate.sh) is still the
@@ -15,28 +23,32 @@
 set -uo pipefail
 
 FAIL=0
+# PID-unique temp files so concurrent git operations on one host (rebase +
+# commit) cannot interleave on shared /tmp names.
+TMP_PREFIX="/tmp/precommit-$$.txt."
 
 # Collect staged files (added/copied/modified; ignore deletions)
 STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
 
 if [ -n "$STAGED" ]; then
-  # 1) bash -n + shellcheck on staged .sh
+  # 1) bash -n (hard) + shellcheck (hard when installed) on staged .sh
   while IFS= read -r f; do
     [ -f "$f" ] || continue
-    if ! bash -n "$f" 2>/tmp/precommit-bashn.txt; then
+    if ! bash -n "$f" 2>"$TMP_PREFIX bashn"; then
       echo "pre-commit FAIL: bash -n $f" >&2
-      cat /tmp/precommit-bashn.txt >&2
+      cat "$TMP_PREFIX bashn" >&2
       FAIL=1
     fi
     if command -v shellcheck >/dev/null 2>&1; then
-      if ! shellcheck "$f" >/tmp/precommit-shellcheck.txt 2>&1; then
-        echo "pre-commit WARN: shellcheck $f (soft until baseline set):" >&2
-        sed 's/^/    /' /tmp/precommit-shellcheck.txt >&2
+      if ! shellcheck "$f" >"$TMP_PREFIX shellcheck" 2>&1; then
+        echo "pre-commit FAIL: shellcheck $f (installed, so hard):" >&2
+        sed 's/^/    /' "$TMP_PREFIX shellcheck" >&2
+        FAIL=1
       fi
     fi
   done < <(echo "$STAGED" | grep -E '\.sh$' || true)
 
-  # 2) ruff on staged .py (soft until installed)
+  # 2) ruff format --check + ruff check (hard when installed) on staged .py
   if command -v ruff >/dev/null 2>&1; then
     PYFILES=()
     while IFS= read -r f; do
@@ -44,12 +56,15 @@ if [ -n "$STAGED" ]; then
       PYFILES+=("$f")
     done < <(echo "$STAGED" | grep -E '\.py$' || true)
     if [ "${#PYFILES[@]}" -gt 0 ]; then
-      if ! ruff format --check "${PYFILES[@]}" >/tmp/precommit-rufffmt.txt 2>&1; then
-        echo "pre-commit WARN: ruff format (soft until baseline set):" >&2
-        sed 's/^/    /' /tmp/precommit-rufffmt.txt >&2
+      if ! ruff format --check "${PYFILES[@]}" >"$TMP_PREFIX rufffmt" 2>&1; then
+        echo "pre-commit FAIL: ruff format --check (installed, so hard):" >&2
+        sed 's/^/    /' "$TMP_PREFIX rufffmt" >&2
+        FAIL=1
       fi
-      if ! ruff check "${PYFILES[@]}" >/tmp/precommit-ruff.txt 2>&1; then
-        sed 's/^/    /' /tmp/precommit-ruff.txt >&2
+      if ! ruff check "${PYFILES[@]}" >"$TMP_PREFIX ruff" 2>&1; then
+        echo "pre-commit FAIL: ruff check (installed, so hard):" >&2
+        sed 's/^/    /' "$TMP_PREFIX ruff" >&2
+        FAIL=1
       fi
     fi
   fi
@@ -67,9 +82,14 @@ if [ -n "$STAGED" ]; then
   # 4) trailing whitespace / CRLF / no staged file > 50 MB
   while IFS= read -r f; do
     [ -f "$f" ] || continue
+    # Binary skip: extension whitelist OR NUL byte in the first 8 KB
+    # (catches PDFs/fonts/wasm/... without a growing extension list).
     case "$f" in
-      *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;; # binary
+      *.png|*.jpg|*.jpeg|*.gif|*.woff2|*.gguf) continue ;;
     esac
+    if head -c 8192 "$f" | LC_ALL=C grep -q $'\0'; then
+      continue
+    fi
     if grep -qE ' +$' "$f"; then
       echo "pre-commit FAIL: trailing whitespace in $f" >&2
       grep -nE ' +$' "$f" | head -5 | sed 's/^/    /' >&2
