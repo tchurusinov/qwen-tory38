@@ -94,11 +94,13 @@ Exit: repo layout decided and recorded; toolchain verified; test runner works he
       |   bonsai2-server@.service #   (template syntax, one per instance i)
       bench/                      # S5 framework source (run.py, score/,
       |   goldens/                #   goldens + M4 seeded-bug fixture; MAP P4)
-      tests/                      # hermetic suite (default discover target:
-      |   test_smoke.py           #   no GPU/no network; stdlib unittest)
-      |   fixtures/               #   mock engine + manager stub (S3.7, P3)
-      |   run_gpu.sh              #   @gpu runner with nvidia-smi snapshot
-      |   gpu/                    #   @gpu tests ONLY (first: MAP 1.7)
+      tests/                      # hermetic default: python3 -m unittest
+      |   test_smoke.py           #   discover -s tests (no GPU/no network,
+      |   fixtures/               #   stdlib unittest; S3.7 mock engine +
+                                  #   manager stub lands at MAP P3)
+      |   run_gpu.sh              # @gpu runner: runs tests/gpu/ ONLY, with
+      |   gpu/                    #   nvidia-smi + /proc/meminfo snapshots
+                                  #   first — @gpu tests live ONLY here
       third_party/llama.cpp/      # fork submodule pinned (MAP 1.1)
       scripts/                    # repo workflow tooling (gate.sh, review.sh,
                                   #   install-hooks.sh; not host-installed)

@@ -24,6 +24,9 @@ LOG="$LOGDIR/gpu-$TS.log"
   echo "--- nvidia-smi snapshot (pre) ---"
   nvidia-smi --query-gpu=driver_version,memory.used,memory.total,utilization.gpu --format=csv || true
   nvidia-smi -q -d MEMORY | grep -E 'Used|Total' | head -4 || true
+  # /proc/meminfo is the reliable unified-memory view on this GB10 box
+  # (nvidia-smi --query-gpu reports [N/A] for memory fields — MAP 0.3).
+  grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
   echo "--- free -h ---"
   free -h | sed -n '1,2p'
   echo "--- unittest discover tests/gpu ---"
@@ -43,6 +46,7 @@ fi
 {
   echo "--- nvidia-smi snapshot (post) ---"
   nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv || true
+  grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
   echo "--- exit code: $rc ---"
 } >> "$LOG"
 
