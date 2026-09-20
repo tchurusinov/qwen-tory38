@@ -5,7 +5,11 @@ MAP 1.2 build pipeline, image/Dockerfile). Skips when the image is not
 present locally (fresh clone before the first build). `--version` is
 run with `--gpus all`: the binary calls ggml_cuda_init, which touches
 the GPU stack, so the @gpu label + VRAM audit rule apply (Global
-testing discipline: @gpu tests live in tests/gpu/ only).
+testing discipline: @gpu tests live in tests/gpu/ only). It is the
+only test here that allocates a CUDA context — and only a transient
+one: no model is loaded, init + exit measures <1s (probe 2026-09-20).
+The ldd/file tests run without `--gpus` because they only read ELF
+metadata.
 
 Assertions (the S1.8 #1 "fork ternary banner", adapted to this pin):
   * `llama-server --version` exits 0
@@ -36,14 +40,16 @@ def _engine_pin_sha8() -> str:
     """First 8 hex chars of the pinned fork commit from the template YAML.
 
     stdlib-only parse (hermetic-suite rule): the value lives on the line
-    `    commit: "<40-hex>"` under engine.pin (S1.6). The engine commit
-    is the FIRST `commit:` with a quoted 40-hex in the template: the
-    `engine:` block precedes `image_pin:`, which carries tag/sha256
-    keys and no `commit:`. If a future unrelated `commit:` lands above
-    the engine block, re-anchor this helper.
+    `    commit: "<40-hex>"` under engine.pin (S1.6). Boundary-based:
+    the engine block runs from the `engine:` top-level key to the next
+    top-level key (`image:`), so a future `commit:` under another block
+    cannot re-anchor this assertion.
     """
     text = ENGINE_YAML.read_text()
-    m = re.search(r"commit:\s*\"([0-9a-f]{40})\"", text)
+    m_block = re.search(r"(?m)^engine:.*?(?=^image:)", text, re.DOTALL)
+    if m_block is None:
+        raise AssertionError(f"engine: block not found in {ENGINE_YAML}")
+    m = re.search(r'commit:\s*"([0-9a-f]{40})"', m_block.group(0))
     assert m, f"engine_pin.commit not found in {ENGINE_YAML}"
     return m.group(1)[:8]
 

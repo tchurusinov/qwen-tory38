@@ -56,6 +56,10 @@ ARG LLAMA_CUDA_ARCHS="121a"
 # Build with: docker build --build-arg LLAMA_PIN_SHORT=9a9394a8 ...
 # (install.sh, MAP 6.2, reads it from the rendered subagent-engine.yaml).
 ARG LLAMA_PIN_SHORT="9a9394a8"
+# LD_LIBRARY_PATH: build-time scope (nvcc + the link steps). The runtime
+# image is not this image — the binaries ship with RUNPATH $ORIGIN and
+# the env -i assertions below prove they resolve without it. A debug
+# `docker run --entrypoint bash` into this image inherits the env.
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/cuda/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64
@@ -118,15 +122,15 @@ RUN set -eu; \
         -DLLAMA_BUILD_NUMBER="0" \
         -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs"; \
-    cmake --build build -j16; \
+    cmake --build build -j"$(nproc | awk '{print ($1>16)?16:$1}')"; \
     echo "=== sm_121a sanity (every CUDA TU must target sm_121a only) ==="; \
-    test "$(grep -c sm_121a build/compile_commands.json)" -gt 0; \
-    # the arch is pinned to 121a (S1.2 delta): no other compute_1XX may
-    # appear in the nvcc command lines (a fat multi-arch build would
-    # show e.g. compute_120 too). \
-    # -j16: this box has 20 cores (GB10); 16 keeps headroom for the host
-    # while staying well above the CUDA-TU compile fanout.
-    test "$(grep -o 'arch=compute_[0-9a-z]*' build/compile_commands.json | sort -u | grep -v 'arch=compute_121a' | wc -l)" -eq 0; \
+    # -j cap: 16 on this 20-core GB10 box (host headroom); nproc-based so
+    # a smaller build host (e.g. 8-core) cannot overcommit. \
+    # positive: the exact arch token appears (one per CUDA nvcc line).
+    test "$(grep -c 'arch=compute_121a' build/compile_commands.json)" -gt 0; \
+    # exhaustive: every arch-flagged line is 121a (a fat multi-arch build
+    # would carry other arch=compute_1XX tokens; none may remain).
+    test "$(grep -o 'arch=compute_[0-9a-z]*' build/compile_commands.json | grep -cv 'arch=compute_121a$')" -eq 0; \
     mkdir -p /opt/bonsai2/bin; \
     cp -f build/bin/llama-server /opt/bonsai2/bin/llama-server; \
     # all shared libs the binary needs at runtime (libllama.so, libggml*.so, \
