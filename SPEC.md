@@ -163,8 +163,8 @@ install only ever reads from the main container (S6.4).
 
 | artifact | size | role |
 |---|---|---|
-| `prism-ml/Ternary-Bonsai-2-27B-gguf` / `bonsai-2-27b-gguf-PQ2_0.gguf` | 7.21 GB | **v1 default** (fastest decode on Blackwell, per README; best prefill; ~461 t/s context handling) |
-| same repo, `...-PTQ1_0.gguf` | 5.95 GB | lower-memory fallback (~18% smaller) when N comes out 0 or headroom is tight; slower decode on Blackwell |
+| `prism-ml/Ternary-Bonsai-2-27B-gguf` / `Ternary-Bonsai-2-27B-PQ2_0.gguf` (→ disk `bonsai-2-27b-gguf-PQ2_0.gguf`) | 7.21 GB | **v1 default** (fastest decode on Blackwell, per README; best prefill; ~461 t/s context handling) |
+| same repo, `Ternary-Bonsai-2-27B-PTQ1_0.gguf` (→ disk `bonsai-2-27b-gguf-PTQ1_0.gguf`) | 5.95 GB | lower-memory fallback (~18% smaller) when N comes out 0 or headroom is tight; slower decode on Blackwell |
 | `prism-ml/Ternary-Bonsai-2-27B-mmproj` / `mmproj-Q8_0.gguf` | 0.63 GB | optional, **not loaded in v1** (non-goal 3) |
 
 Pinning: artifact + exact download URL + SHA256 recorded in
@@ -308,9 +308,16 @@ image:
 model:
   repo: prism-ml/Ternary-Bonsai-2-27B-gguf
   revision: main
+  # On-disk names (used by the S1.3 serving command /opt/bonsai2/models/):
   file: bonsai-2-27b-gguf-PQ2_0.gguf
-  sha256: <computed-at-install>
   fallback_file: bonsai-2-27b-gguf-PTQ1_0.gguf   # used when N==0-quant-fallback (S2.4)
+  # HuggingFace source objects (the real filenames in the repo, S1.1):
+  source_object: Ternary-Bonsai-2-27B-PQ2_0.gguf
+  fallback_source_object: Ternary-Bonsai-2-27B-PTQ1_0.gguf
+  sha256: <pinned-at-install>
+  size_bytes: <bytes>
+  fallback_sha256: <pinned-at-install>
+  fallback_size_bytes: <bytes>
 instances:
   count: 3                  # S0 default on this box (worked example: floor(37.2/11.5) = 3)
   port_base: 30101
