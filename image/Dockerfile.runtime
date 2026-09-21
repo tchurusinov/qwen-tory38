@@ -1,0 +1,224 @@
+# bonsai2-server runtime image (MAP 1.4, SPEC S1.6 / S6.1).
+#
+# The runtime image for every subagent instance (S2.2), main-stack parity
+# with qwen38-dflash2:v1.2.3: binary + model files + CUDA runtime, pinned
+# by tag + docker content digest in subagent-engine.yaml `image.pin`
+# (S1.6). This Dockerfile is driven by bin/bonsai2_build_image.py (the
+# MAP 1.4 orchestrator), which:
+#   * pre-verifies the host model cache (MAP 1.3, /opt/bonsai2/cache)
+#     against the YAML pins BEFORE building (fail fast: no build on a
+#     bad cache file),
+#   * stages the two model files as the build context (a tiny dir with
+#     only models/ — the binary comes from --from, not the context),
+#   * passes the build args below (PIN8, MODEL_SHA_*, MODEL_SIZE_*),
+#   * records the resulting docker content digest into
+#     etc/subagent-engine.yaml `image.pin` (the S1.6 image_pin).
+#
+# Base image (S6.1 "CUDA 13.0 runtime" — the runtime variant, NOT the
+# devel/toolkit image MAP 1.2 used to compile):
+#   nvidia/cuda:13.0.2-runtime-ubuntu24.04
+#   digest nvidia/cuda@sha256:6a0e31b59e70890446f2c17356d6efc0d54260090a8c63d6ca7c2ad049db95d2
+#   (pulled + manifest-verified on this box 2026-09-21; aarch64 entry of
+#    the multi-arch manifest; install.sh re-verifies at build, S6.1)
+#
+# Binary source: the MAP 1.2 build-pipeline image
+#   bonsai2-server-build:121a   (repo image/Dockerfile, built from the
+#                                pinned fork at third_party/llama.cpp)
+# referenced with `COPY --from=` (the local image is resolved by tag in
+# the docker store; no pull). BuildKit named build contexts are NOT
+# available on this box's docker driver (probed 2026-09-21: `# name =
+# image=...` declarations are treated as image refs), so the plain
+# `--from=<image:tag>` form is used. The orchestrator cross-checks the
+# build image's banner against the YAML engine pin before building, so
+# a stale build image fails the runtime build loudly (ERR_BANNER_COMMIT),
+# it cannot silently ship an old fork commit.
+#
+# Models: both quants are baked (default PQ2_0 + S2.4 fallback PTQ1_0)
+# at the S1.3 on-disk paths /opt/bonsai2/models/<file>. The S1.1
+# "hash-verified before baking" clause is enforced in-build: each baked
+# file's sha256 is checked against the YAML pin (MODEL_SHA_* args);
+# mismatch = ERR_HASH_MISMATCH, exit 4 (the S1.5 code).
+#
+# In-build assertions (all under `env -i` where relevant, so no
+# inherited env can mask a failure — same discipline as the MAP 1.2
+# build pipeline):
+#   * aarch64 ELF check on the binary (byte-exact e_magic 7f454c46
+#     (\x7f 'E' 'L' 'F') + e_machine 0xB7 (AArch64) at offset 18;
+#     `file` is not in the runtime base — probed 2026-09-21)
+#   * banner carries the engine pin prefix (PIN8 arg, sourced from
+#     etc/subagent-engine.yaml by the orchestrator — S1.6 source of
+#     truth; no ARG-hardcoded default)
+#   * `env -i ldd` of the server: no "not found" ANYWHERE in the
+#     transitive tree (probed 2026-09-21: the server's own NEEDED is
+#     only libllama-server-impl + libc++; the CUDA libs are TRANSITIVE
+#     through libggml-cuda — libcudart/libcublas/libcublasLt from
+#     /usr/local/cuda, libcuda.so.1 from libnvidia-compute-580 — so a
+#     ldd on the server binary catches every one of them)
+#   * libggml-cuda resolves from /opt/bonsai2/bin (RUNPATH $ORIGIN,
+#     patched in the build pipeline; S1.2 GGML_CUDA=ON)
+#   * libcuda.so.1 + libcudart + libcublas(+Lt) present in the image
+#     (the S6.1 "CUDA runtime" claim, verified in-image)
+#   * sha256 of each baked model == the YAML pin
+#
+# CMD: the S1.3 per-instance serving command, verbatim, with instance 0's
+# port (30101). The S2.2 systemd unit supplies the full command (with
+# port_base+i) at docker-run time; this CMD is the manual-run default.
+#
+# Build (driven by bin/bonsai2_build_image.py, not by hand):
+#   docker buildx build --platform linux/arm64 \
+#     -f image/Dockerfile.runtime \
+#     --build-arg PIN8=<8-hex> --build-arg MODEL_SHA_DEFAULT=<64-hex> \
+#     --build-arg MODEL_SHA_FALLBACK=<64-hex> --build-arg MODEL_SIZE_DEFAULT=<int> \
+#     --build-arg MODEL_SIZE_FALLBACK=<int> \
+#     -t bonsai2-server:1.0 <staged-context-dir>
+#
+# Verification (S1.6/S1.8 #1, runtime-image half — tests/gpu/
+# test_runtime_image.py, @gpu):
+#   * --version banner carries the fork pin prefix
+#   * binary is aarch64 ELF; libggml-cuda linked + resolved
+#   * models present at the pinned byte sizes
+#   * the S1.3 CMD is the image default (docker create + inspect)
+
+# MAP 1.2 build-pipeline image (the binary source; local tag, no pull —
+# the tag is the build pipeline's fixed convention, same constant as
+# tests/gpu/test_build_banner.py; the orchestrator verifies that image
+# exists and its banner matches the YAML pin before building).
+FROM nvidia/cuda@sha256:6a0e31b59e70890446f2c17356d6efc0d54260090a8c63d6ca7c2ad049db95d2
+
+# Build args (all supplied by the orchestrator from the YAML pins —
+# the Dockerfile carries no hardcoded pins, same rule as MAP 1.2):
+#   PIN8               first 8 hex of engine.pin.commit (banner check)
+#   MODEL_SHA_DEFAULT  SHA256 of the default quant (YAML model.sha256)
+#   MODEL_SHA_FALLBACK SHA256 of the fallback quant (YAML fallback_sha256)
+#   MODEL_SIZE_DEFAULT / _FALLBACK  pinned byte sizes (belt-and-braces:
+#                      a wrong-size file that somehow also wrong-hashes
+#                      is caught twice)
+ARG PIN8
+ARG MODEL_SHA_DEFAULT
+ARG MODEL_SHA_FALLBACK
+ARG MODEL_SIZE_DEFAULT
+ARG MODEL_SIZE_FALLBACK
+# Traceability labels only (LABELs do not create image layers).
+
+# Binary + shared libs from the MAP 1.2 build image. One COPY of the
+# whole dir (the build pipeline's `lib*.so*` glob already captured every
+# lib the binary needs; symlinks preserved).
+COPY --from=bonsai2-server-build:121a /opt/bonsai2/bin/ /opt/bonsai2/bin/
+
+# System libs the binary needs that are NOT in the CUDA runtime base
+# (probed 2026-09-21: diff of `ldd llama-server` needed-lib list vs the
+# base's ld cache — exactly two: libgomp.so.1 and libcuda.so.1; the
+# ggml/llama/mtmd libs ship with /opt/bonsai2/bin via RUNPATH $ORIGIN):
+#   libgomp.so.1   GCC OpenMP runtime (libgomp1:arm64 in the build
+#                  image) — missing = `env -i llama-server` dies with
+#                  "cannot open shared object file: libgomp.so.1"
+#                  (caught by the in-build banner check).
+#   libcuda.so.1   driver interface stub (libnvidia-compute-580, 96 MB,
+#                  symlink chain libcuda.so.1 -> .so.580.178.04). The
+#                  CUDA runtime base deliberately carries NO libcuda:
+#                  at docker-run time the nvidia container runtime
+#                  bind-mounts the host's real /usr/lib/aarch64-linux-
+#                  gnu/libcuda.so.1 over this path, so the baked copy
+#                  is a resolution placeholder only, not the driver
+#                  that actually runs.
+COPY --from=bonsai2-server-build:121a /lib/aarch64-linux-gnu/libgomp.so.1  /usr/lib/aarch64-linux-gnu/libgomp.so.1
+COPY --from=bonsai2-server-build:121a /lib/aarch64-linux-gnu/libcuda.so.1  /usr/lib/aarch64-linux-gnu/libcuda.so.1
+RUN ldconfig
+
+# Models from the staged build context (the orchestrator staged the
+# MAP 1.3 cache files here; see the header for why the context is a
+# tiny staging dir, not the repo root).
+COPY models/bonsai-2-27b-gguf-PQ2_0.gguf  /opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf
+COPY models/bonsai-2-27b-gguf-PTQ1_0.gguf /opt/bonsai2/models/bonsai-2-27b-gguf-PTQ1_0.gguf
+
+LABEL org.opencontainers.image.title="bonsai2-server" \
+      org.opencontainers.image.description="qwen-tory38 subagent inference engine (S1/S6): pinned fork binary + hash-verified models + CUDA 13.0 runtime" \
+      io.qwen-tory38.engine-pin="${PIN8}" \
+      io.qwen-tory38.model-default-sha="${MODEL_SHA_DEFAULT}" \
+      io.qwen-tory38.model-fallback-sha="${MODEL_SHA_FALLBACK}" \
+      io.qwen-tory38.source-build-image="bonsai2-server-build:121a"
+
+WORKDIR /opt/bonsai2
+
+# In-build assertions (fail the build, do not just warn — S6.1: the
+# image is the artifact, a broken image must not be taggable).
+RUN set -eu; \
+    echo "=== in-image artifacts ==="; \
+    ls -la /opt/bonsai2/bin/llama-server /opt/bonsai2/models/; \
+    echo "=== aarch64 ELF check (byte-exact: e_magic 7f454c46 = \\x7f E L F; e_machine b700 = AArch64) ==="; \
+    MAGIC=$(head -c 4 /opt/bonsai2/bin/llama-server | od -An -tx1 | tr -d ' \n'); \
+    test "$MAGIC" = "7f454c46" \
+        || { echo "ERR_ARCH: e_magic $MAGIC (expected 7f454c46)" >&2; exit 3; }; \
+    MACHINE=$(head -c 20 /opt/bonsai2/bin/llama-server | tail -c 2 | od -An -tx1 | tr -d ' \n'); \
+    test "$MACHINE" = "b700" \
+        || { echo "ERR_ARCH: e_machine $MACHINE (expected b700 = AArch64)" >&2; exit 3; }; \
+    echo "    ok: aarch64 ELF"; \
+    echo "=== banner (env -i: no inherited env can mask a resolution failure) ==="; \
+    test -n "${PIN8}" \
+        || { echo "ERR_CONFIG: PIN8 build-arg missing" >&2; exit 2; }; \
+    env -i /opt/bonsai2/bin/llama-server --version > /tmp/banner.txt 2>&1 \
+        || { cat /tmp/banner.txt; echo "ERR_BANNER: llama-server --version failed" >&2; exit 4; }; \
+    cat /tmp/banner.txt; \
+    grep -q "commit ${PIN8}" /tmp/banner.txt \
+        || { echo "ERR_BANNER_COMMIT: engine pin ${PIN8} not in banner" >&2; exit 4; }; \
+    echo "    ok: banner carries the engine pin"; \
+    echo "=== lib resolution (env -i ldd: RUNPATH \$ORIGIN + system ld cache only) ==="; \
+    env -i ldd /opt/bonsai2/bin/llama-server > /tmp/ldd.txt 2>&1 \
+        || { cat /tmp/ldd.txt; echo "ERR_LDD: ldd failed" >&2; exit 4; }; \
+    if grep -q 'not found' /tmp/ldd.txt; then \
+        echo "ERR_LDD: unresolved libs in the transitive tree:"; \
+        grep 'not found' /tmp/ldd.txt >&2; \
+        exit 4; \
+    fi; \
+    echo "    ok: no unresolved libs"; \
+    grep -q '/opt/bonsai2/bin/libggml-cuda' /tmp/ldd.txt \
+        || { echo "ERR_LDD: libggml-cuda not resolved from /opt/bonsai2/bin" >&2; exit 4; }; \
+    # S6.1 "CUDA runtime" in-image: the transitive CUDA libs the binary
+    # needs (probed 2026-09-21 via readelf: libggml-cuda NEEDED =
+    # libcudart.so.13 + libcuda.so.1; the server's ldd pulls in
+    # libcublas/libcublasLt too). libcuda.so.1 = the driver interface
+    # (libnvidia-compute-580 from the MAP 1.2 build image — the box's
+    # own driver provides the real one at container runtime, same
+    # split as the build image); the rest live in /usr/local/cuda.
+    echo "=== CUDA runtime libs present in the image ==="; \
+    ldconfig -p > /tmp/ldcache.txt 2>&1 \
+        || { echo "ERR_LDCONFIG: ldconfig failed" >&2; exit 4; }; \
+    for lib in libcudart.so.13 libcublas.so.13 libcublasLt.so.13 libcuda.so.1; do \
+        # ldconfig -p line shape: "<TAB><libname> (libc6,AArch64) => /path"
+        # — [[:space:]] (not ' '): the line opens with a TAB, and a
+        # ' *-only anchor never matches; the trailing ' \(' keeps
+        # "libcublas.so.13" from matching inside "libcublasLt.so.13".
+        grep -qE "^[[:space:]]*${lib}[[:space:]]+\(" /tmp/ldcache.txt \
+            || { echo "ERR_LDCACHE: $lib missing from the ld cache (S6.1 CUDA runtime incomplete)" >&2; exit 4; }; \
+    done; \
+    echo "    ok: libcudart/libcublas/libcublasLt/libcuda present"; \
+    echo "=== model SHAs vs the YAML pins (S1.1 hash-verified before baking) ==="; \
+    got_default=$(sha256sum /opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf | awk '{print $1}'); \
+    got_fallback=$(sha256sum /opt/bonsai2/models/bonsai-2-27b-gguf-PTQ1_0.gguf | awk '{print $1}'); \
+    test -n "${MODEL_SHA_DEFAULT}" -a -n "${MODEL_SHA_FALLBACK}" \
+        || { echo "ERR_CONFIG: MODEL_SHA_* build-arg(s) missing" >&2; exit 2; }; \
+    test "$(echo "$got_default" | tr 'A-F' 'a-f')" = "$(echo "$MODEL_SHA_DEFAULT" | tr 'A-F' 'a-f')" \
+        || { echo "ERR_HASH_MISMATCH: default quant sha ${got_default} != pin ${MODEL_SHA_DEFAULT}" >&2; exit 4; }; \
+    test "$(echo "$got_fallback" | tr 'A-F' 'a-f')" = "$(echo "$MODEL_SHA_FALLBACK" | tr 'A-F' 'a-f')" \
+        || { echo "ERR_HASH_MISMATCH: fallback quant sha ${got_fallback} != pin ${MODEL_SHA_FALLBACK}" >&2; exit 4; }; \
+    if [ -n "${MODEL_SIZE_DEFAULT}" ]; then \
+        test "$(stat -c %s /opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf)" = "${MODEL_SIZE_DEFAULT}" \
+            || { echo "ERR_HASH_MISMATCH: default quant size != pin ${MODEL_SIZE_DEFAULT}" >&2; exit 4; }; \
+    fi; \
+    if [ -n "${MODEL_SIZE_FALLBACK}" ]; then \
+        test "$(stat -c %s /opt/bonsai2/models/bonsai-2-27b-gguf-PTQ1_0.gguf)" = "${MODEL_SIZE_FALLBACK}" \
+            || { echo "ERR_HASH_MISMATCH: fallback quant size != pin ${MODEL_SIZE_FALLBACK}" >&2; exit 4; }; \
+    fi; \
+    echo "    ok: both models match the YAML pins"
+
+# S1.3 verbatim (instance 0 port; the S2.2 unit overrides per instance).
+CMD ["/opt/bonsai2/bin/llama-server", \
+     "--model", "/opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf", \
+     "--ctx-size", "262144", \
+     "--parallel", "8", \
+     "--batch-size", "2048", \
+     "--no-prompt", \
+     "--port", "30101", \
+     "--api-key", "bonsai2-local", \
+     "--reasoning-format", "deepseek_r1", \
+     "--alias", "qwen38-27b-subagent"]

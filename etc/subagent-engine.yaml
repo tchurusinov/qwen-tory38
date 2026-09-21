@@ -19,8 +19,8 @@ engine:
 
 image:
   pin:
-    tag: "bonsai2-server:<tag-at-install>"   # image_pin (S1.6, S6.1)
-    sha256: "<docker-content-digest-at-install>"   # key name `sha256` per S1.6 image_pin: {tag, sha256}
+    tag: "bonsai2-server:1.0"
+    sha256: "sha256:0fff95f5a12c03bfb4ad71c5edabbe312bd9d9b090bc5984edfec47c40b849ac"
 
 model:
   repo: prism-ml/Ternary-Bonsai-2-27B-gguf

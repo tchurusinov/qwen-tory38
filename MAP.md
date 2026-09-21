@@ -205,14 +205,50 @@ under the manager or the full stack).
       7 review rounds; tool = `bin/bonsai2_model_fetch.py`, hermetic
       suite 20 tests; live 7.21 GB + 5.95 GB download runs at install,
       MAP 6.2 step 3.)
-- [ ] 1.4 Build `bonsai2-server:<tag>` runtime image: binary + model files
+- [x] 1.4 Build `bonsai2-server:<tag>` runtime image: binary + model files
       + CUDA runtime; record docker content digest as `image_pin`
-      (S1.6, S6.1).
-- [ ] 1.5 `subagent-engine.yaml` writer + YAML schema validation: port
+      (S1.6, S6.1). (2026-09-21, this session: `image/Dockerfile.runtime`
+      + `bin/bonsai2_build_image.py` orchestrator; base =
+      `nvidia/cuda:13.0.2-runtime-ubuntu24.04` digest-pinned; binary via
+      `COPY --from=bonsai2-server-build:121a` (MAP 1.2 artifact; BuildKit
+      named contexts unavailable on this docker driver — probed, so the
+      `--from=image:tag` form; the orchestrator cross-checks that image's
+      banner against the YAML engine pin before building); both quants
+      baked with in-build sha256+size assertions vs the YAML pins
+      (S1.1 "hash-verified before baking"); + two system libs copied
+      from the build image that the CUDA runtime base lacks
+      (libgomp.so.1 OpenMP runtime, libcuda.so.1 driver stub — probed
+      by diffing the binary's needed-lib list against the base's ld
+      cache; the nvidia runtime shadows the baked libcuda with the
+      host's real one under --gpus all); tag `bonsai2-server:1.0`,
+      digest recorded in `etc/subagent-engine.yaml` `image.pin`
+      (surgical, comment-preserving writer). Hermetic:
+      tests/test_image_build.py; @gpu: tests/gpu/test_runtime_image.py
+      (banner pin, aarch64 ELF, libggml-cuda + CUDA-runtime ld-cache,
+      models at pinned sizes, S1.3 default CMD).)
+- [x] 1.5 `subagent-engine.yaml` writer + YAML schema validation: port
       math, ctx/parallel bounds, sampling ranges (S1.6, S1.7 unit half).
-- [ ] 1.6 VRAM formula as a pure function: `instance_footprint_GB`,
+      (2026-09-21, this session: `bin/bonsai2_render_config.py` —
+      `validate_engine_config` (S1.6 shape + S1.7 bounds: presence, pin
+      formats, port math incl. overflow + collision via optional
+      per-instance `ports` overrides, ctx 8192..262144 multiple of 8192,
+      parallel 1..64, count 0..8, sampling ranges, stop ids) returning
+      (errors, warnings) — the template's unrecorded image pin is a
+      warning, not an error, so the tracked template validates pre-build;
+      `render_config` + `main()` = the install.sh writer (S6.3: fill
+      placeholders, write the rendered YAML, --check for validation).
+      Hermetic: tests/test_render_config.py (60+ cases, incl. the
+      tracked template + the MAP 1.4 render flow).)
+- [x] 1.6 VRAM formula as a pure function: `instance_footprint_GB`,
       `N = floor(budget/11.5)` clamped [0,8], N=0 and N>8 cases (S1.4,
-      S1.7 unit half).
+      S1.7 unit half). (2026-09-21, this session: `bin/bonsai2_vram.py`
+      — `instance_footprint_gb` (S1.4 verbatim, 0.00000176 constant),
+      `instance_count` (clamp [0,8]; total on all floats: N=0 on
+      zero/negative budget, N=0 on non-positive footprint instead of a
+      ZeroDivision, N=8 clamp on over-budget), `subagent_budget_gb`
+      (S0 table: 121.6 − 76.4 − 8.0 = 37.2) + CLI; hermetic:
+      tests/test_vram.py incl. both spec worked examples (10.91 GB
+      footprint; N=3 at 37.2/11.5).)
 - [ ] 1.7 Manual single-instance bring-up: `docker run` per S1.3
       (verbatim flags, `--port 30101`), host networking, memory cap;
       `/v1/models` returns `qwen38-27b-subagent`; 16-token completion
