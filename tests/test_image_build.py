@@ -354,6 +354,96 @@ class TestBuildTimeoutPath(unittest.TestCase):
         self.assertEqual(sig.parameters["build_timeout_s"].default, 7200.0)
         self.assertEqual(build.DEFAULT_BUILD_TIMEOUT_S, 7200.0)
 
+    def _run_main_with_raised_build(self, msg: str) -> int:
+        # Drive main()'s exit-code dispatch directly: patch the whole
+        # build() to raise a ValueError carrying `msg`, return rc.
+        import io
+        from contextlib import redirect_stderr
+
+        orig = build.build
+
+        def _raise(*a, **k):
+            raise ValueError(msg)
+
+        build.build = _raise
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = build.main(
+                    [
+                        "--config",
+                        str(self.cfg),
+                        "--build-image",
+                        "bonsai2-server-build:121a",
+                        "--tag",
+                        "bonsai2-server:1.0",
+                        "--cache-dir",
+                        str(self.tmp),
+                    ]
+                )
+        finally:
+            build.build = orig
+        return rc
+
+    def test_exit_routing_leads_with_token(self):
+        # G3c round-3 P1 regression: routing is on the LEADING token, not a
+        # substring anywhere. Each named error must land on its own exit
+        # code, and a message that merely MENTIONS another token (e.g. a
+        # path containing 'ERR_CONFIG') must NOT be misrouted to it.
+        self.assertEqual(
+            self._run_main_with_raised_build("ERR_CONFIG: config bad"),
+            build.EXIT_CONFIG,
+        )
+        self.assertEqual(
+            self._run_main_with_raised_build("ERR_HASH_MISMATCH: sha bad"),
+            build.EXIT_HASH,
+        )
+        self.assertEqual(
+            self._run_main_with_raised_build("ERR_TIMEOUT: buildx hung"),
+            build.EXIT_TIMEOUT,
+        )
+        # The misroute case: the leading token is ERR_HASH_MISMATCH but the
+        # message body contains "ERR_CONFIG" (a path). Old `in str(exc)`
+        # logic returned EXIT_CONFIG; leading-token routing must return
+        # EXIT_HASH.
+        self.assertEqual(
+            self._run_main_with_raised_build(
+                "ERR_HASH_MISMATCH: cache file /tmp/ERR_CONFIG_x.sha mismatch"
+            ),
+            build.EXIT_HASH,
+        )
+
+    def test_write_image_pin_is_indent_agnostic(self):
+        # G3c round-3 P1 regression: the pin writer must not assume a
+        # specific YAML emitter's indentation. image.pin leaves indented
+        # by 4 or 6 spaces (hand-edited / a different emitter) must both
+        # round-trip — the old `^(    tag:)` (hard 4-space) regex raised
+        # ERR_CONFIG on anything but exactly 4 spaces.
+        import hashlib
+
+        digest = "sha256:" + hashlib.sha256(b"x").hexdigest()
+        for indent in ("    ", "      "):
+            src = (
+                "engine:\n"
+                "  binary: /x\n"
+                "image:\n"
+                "  pin:\n"
+                + indent
+                + 'tag: "bonsai2-server:<tag-at-install>"\n'
+                + indent
+                + 'sha256: "<docker-content-digest-at-install>"\n'
+                "model:\n"
+                "  file: y\n"
+            )
+            cfg = self.tmp / f"indent{len(indent)}.yaml"
+            cfg.write_text(src)
+            out = build.write_image_pin(str(cfg), "bonsai2-server:9.9", digest)
+            text = Path(out).read_text()
+            self.assertIn('tag: "bonsai2-server:9.9"', text, f"indent {indent!r}")
+            self.assertIn(f'sha256: "{digest}"', text, f"indent {indent!r}")
+            # The indentation the file had is preserved.
+            self.assertIn(indent + "tag:", text, f"indent {indent!r} preserved")
+
 
 if __name__ == "__main__":
     unittest.main()

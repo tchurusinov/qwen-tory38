@@ -149,8 +149,13 @@ def write_image_pin(
     if m_block is None:
         raise ValueError(f"ERR_CONFIG: no `image:` block in {config_path}")
     block = m_block.group(1)
-    m_tag = re.search(r"(?m)^(    tag:).*$", block)
-    m_sha = re.search(r"(?m)^(    sha256:).*$", block)
+    # The two pin leaf lines are matched indent-agnostically (G3c
+    # round-3 P1): the writer must not assume a specific YAML emitter's
+    # indentation (4 spaces here, but any [ \t]* depth on the `tag:` /
+    # `sha256:` leaves). group(1) captures the leading whitespace +
+    # `tag:`/`sha256:` so the splice preserves whatever indent was there.
+    m_tag = re.search(r"(?m)^([ \t]*tag:).*$", block)
+    m_sha = re.search(r"(?m)^([ \t]*sha256:).*$", block)
     if not m_tag or not m_sha:
         raise ValueError(
             f"ERR_CONFIG: image block in {config_path} lacks the "
@@ -174,10 +179,12 @@ def write_image_pin(
     # line-level round-trip assert (always):
     with open(out, "r", encoding="utf-8") as f:
         back = f.read()
-    if not re.search(rf'(?m)^image:\n.*?^    tag: "{re.escape(tag)}"', back, re.DOTALL):
+    if not re.search(
+        rf'(?m)^image:\n.*?^[ \t]*tag: "{re.escape(tag)}"', back, re.DOTALL
+    ):
         raise ValueError(f"ERR_CONFIG: image.pin tag not written to {out}")
     if not re.search(
-        rf'(?m)^image:\n.*?^    sha256: "{re.escape(digest)}"', back, re.DOTALL
+        rf'(?m)^image:\n.*?^[ \t]*sha256: "{re.escape(digest)}"', back, re.DOTALL
     ):
         raise ValueError(f"ERR_CONFIG: image.pin sha256 not written to {out}")
     # YAML round-trip assert (when PyYAML is present): the file must
@@ -487,10 +494,20 @@ def main(argv: list[str] | None = None) -> int:
             build_timeout_s=args.build_timeout,
         )
     except ValueError as exc:
+        msg = str(exc)
         print(f"[build] {exc}", file=sys.stderr)
-        if "ERR_TIMEOUT" in str(exc):
+        # G3c round-3 P1: route on the LEADING token, not a substring
+        # anywhere — every named error starts with its token (verified:
+        # the token + ':' is the message head), so leading-token matching
+        # is exact and does not misroute a message that merely mentions
+        # another token (e.g. a path containing 'ERR_CONFIG').
+        if msg.startswith(f"{ERR_TIMEOUT}:"):
             return EXIT_TIMEOUT
-        return EXIT_CONFIG if "ERR_CONFIG" in str(exc) else EXIT_HASH
+        if msg.startswith(f"{ERR_CONFIG}:"):
+            return EXIT_CONFIG
+        if msg.startswith(f"{ERR_HASH_MISMATCH}:"):
+            return EXIT_HASH
+        return EXIT_CONFIG
     except subprocess.CalledProcessError as exc:
         print(f"[build] docker build failed: {exc}", file=sys.stderr)
         return EXIT_CONFIG

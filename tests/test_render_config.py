@@ -463,6 +463,27 @@ class TestRenderConfig(_Base):
         out["instances"]["count"] = 7
         self.assertEqual(self.cfg["instances"]["count"], 3)
 
+    def test_render_preserves_non_json_yaml_values(self):
+        # G3c round-3 P2 regression: render_config must deep-copy, not
+        # round-trip through json (which silently drops non-JSON YAML
+        # values like a datetime in `revision` and coerces None->null).
+        import datetime
+
+        cfg = _template_dict()
+        cfg["model"]["revision"] = datetime.date(2026, 9, 21)
+        out, _errors = render.render_config(cfg)
+        self.assertEqual(
+            out["model"]["revision"],
+            datetime.date(2026, 9, 21),
+            "a YAML date value must survive render_config's copy "
+            "(json round-trip would drop it)",
+        )
+        # the input is untouched (deep-copy semantics): mutating the
+        # rendered copy must not leak back into the caller's dict.
+        out["model"]["revision"] = "mutated"
+        self.assertEqual(cfg["model"]["revision"], datetime.date(2026, 9, 21))
+        self.assertEqual(out["instances"], self.cfg["instances"])
+
 
 if __name__ == "__main__":
     unittest.main()

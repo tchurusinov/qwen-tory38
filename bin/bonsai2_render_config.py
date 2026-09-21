@@ -66,6 +66,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -377,7 +378,12 @@ def render_config(data: dict, image_pin: dict | None = None) -> tuple[dict, list
     Returns (rendered, errors); `errors` is empty only when the result
     is fully pinned + valid.
     """
-    out = json.loads(json.dumps(data))  # deep copy (json-safe YAML values)
+    # G3c round-3 P2: `copy.deepcopy` instead of a `json.loads(json.dumps())`
+    # round-trip — the json path silently drops non-JSON YAML values (a date
+    # in `revision`, a binary-safe string, a nested mapping key) and coerces
+    # `None` -> `null`. `deepcopy` is stdlib and preserves the YAML value set
+    # exactly, so the rendered dict is a faithful copy of the input.
+    out = copy.deepcopy(data)  # new dict; the caller's input is untouched
     if image_pin:
         tag, digest = image_pin.get("tag"), image_pin.get("sha256")
         if tag and digest:

@@ -54,11 +54,34 @@ class TestSuiteSmoke(unittest.TestCase):
             top_level: list[str] = []
             local: list[str] = []
 
+            def _nested_scope(node) -> bool:
+                # A node introduces a NEW (non-module) scope iff it is a
+                # function/class/lambda or a comprehension. G3c round-3
+                # P2: module-scope control-flow blocks (try/if/while/for/
+                # with/match) do NOT create a scope — an import under a
+                # module-level `try: ... except ImportError:` still
+                # executes at import time, so it must count as
+                # TOP-LEVEL (and fail the stdlib-only assert), not "local".
+                return isinstance(
+                    node,
+                    (
+                        ast.FunctionDef,
+                        ast.AsyncFunctionDef,
+                        ast.ClassDef,
+                        ast.Lambda,
+                        ast.ListComp,
+                        ast.SetComp,
+                        ast.DictComp,
+                        ast.GeneratorExp,
+                        ast.comprehension,
+                    ),
+                )
+
             def walk(node, top: bool, top_level=top_level, local=local) -> None:
-                # `top` = "node's DIRECT children are module-scope".
-                # Only a Module has module-scope children, so the
-                # recursion passes `top` through only for Module children
-                # (everything under a FunctionDef/If/Try/... is local).
+                # `top` = "node's DIRECT children execute at module scope".
+                # It stays True through module-scope statements and their
+                # control-flow containers, and flips False only when we
+                # descend into a real nested scope (see _nested_scope).
                 for child in ast.iter_child_nodes(node):
                     if isinstance(child, ast.Import):
                         for alias in child.names:
@@ -79,7 +102,7 @@ class TestSuiteSmoke(unittest.TestCase):
                             continue
                         (top_level if top else local).append(child.module or "")
                     else:
-                        walk(child, top and isinstance(child, ast.Module))
+                        walk(child, top and not _nested_scope(child))
 
             walk(tree, True)
             for n in top_level:
