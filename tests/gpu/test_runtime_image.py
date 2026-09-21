@@ -109,7 +109,8 @@ class TestRuntimeImage(unittest.TestCase):
     )
     def test_binary_is_aarch64_elf(self):
         # Byte-exact check (no `file` in the runtime base): e_magic
-        # 7f454647 + ELFCLASS64 + e_machine 0xB7 (AArch64) at offset 18.
+        # 7f454c46 (\x7f 'E' 'L' 'F') + e_machine 0xB7 (AArch64) at
+        # offset 18 (bytes 18-19, little-endian: b7 00).
         r = subprocess.run(
             [
                 "docker",
@@ -128,7 +129,7 @@ class TestRuntimeImage(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stderr[-500:])
         head = r.stdout.strip()
-        self.assertEqual(head[:8], "7f454647", f"e_magic {head[:8]}")
+        self.assertEqual(head[:8], "7f454c46", f"e_magic {head[:8]}")
         self.assertEqual(
             head[16:20], "b700", f"e_machine {head[16:20]} (expected b700 = AArch64)"
         )

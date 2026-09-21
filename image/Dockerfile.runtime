@@ -42,7 +42,8 @@
 # In-build assertions (all under `env -i` where relevant, so no
 # inherited env can mask a failure — same discipline as the MAP 1.2
 # build pipeline):
-#   * aarch64 ELF check on the binary (byte-exact e_magic + e_machine,
+#   * aarch64 ELF check on the binary (byte-exact e_magic 7f454c46
+#     (\x7f 'E' 'L' 'F') + e_machine 0xB7 (AArch64) at offset 18;
 #     `file` is not in the runtime base — probed 2026-09-21)
 #   * banner carries the engine pin prefix (PIN8 arg, sourced from
 #     etc/subagent-engine.yaml by the orchestrator — S1.6 source of
@@ -124,10 +125,10 @@ WORKDIR /opt/bonsai2
 RUN set -eu; \
     echo "=== in-image artifacts ==="; \
     ls -la /opt/bonsai2/bin/llama-server /opt/bonsai2/models/; \
-    echo "=== aarch64 ELF check (byte-exact: e_magic 7f454647, ELFCLASS64, e_machine 0xB7) ==="; \
+    echo "=== aarch64 ELF check (byte-exact: e_magic 7f454c46 = \\x7f E L F; e_machine b700 = AArch64) ==="; \
     MAGIC=$(head -c 4 /opt/bonsai2/bin/llama-server | od -An -tx1 | tr -d ' \n'); \
-    test "$MAGIC" = "7f454647" \
-        || { echo "ERR_ARCH: e_magic $MAGIC (expected 7f454647)" >&2; exit 3; }; \
+    test "$MAGIC" = "7f454c46" \
+        || { echo "ERR_ARCH: e_magic $MAGIC (expected 7f454c46)" >&2; exit 3; }; \
     MACHINE=$(head -c 20 /opt/bonsai2/bin/llama-server | tail -c 2 | od -An -tx1 | tr -d ' \n'); \
     test "$MACHINE" = "b700" \
         || { echo "ERR_ARCH: e_machine $MACHINE (expected b700 = AArch64)" >&2; exit 3; }; \
