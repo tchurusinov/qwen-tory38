@@ -215,7 +215,12 @@ under the manager or the full stack).
       `--from=image:tag` form; the orchestrator cross-checks that image's
       banner against the YAML engine pin before building); both quants
       baked with in-build sha256+size assertions vs the YAML pins
-      (S1.1 "hash-verified before baking"); tag `bonsai2-server:1.0`,
+      (S1.1 "hash-verified before baking"); + two system libs copied
+      from the build image that the CUDA runtime base lacks
+      (libgomp.so.1 OpenMP runtime, libcuda.so.1 driver stub — probed
+      by diffing the binary's needed-lib list against the base's ld
+      cache; the nvidia runtime shadows the baked libcuda with the
+      host's real one under --gpus all); tag `bonsai2-server:1.0`,
       digest recorded in `etc/subagent-engine.yaml` `image.pin`
       (surgical, comment-preserving writer). Hermetic:
       tests/test_image_build.py; @gpu: tests/gpu/test_runtime_image.py

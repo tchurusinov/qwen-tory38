@@ -123,14 +123,25 @@ class TestValidConfigs(_Base):
     def test_template_shape_is_valid(self):
         self.assert_valid()
 
-    def test_tracked_template_validates_with_only_placeholder_warnings(self):
+    def test_tracked_template_validates_no_errors(self):
+        # The tracked etc/subagent-engine.yaml must always be error-free,
+        # in either install state: pre-MAP 1.4 (placeholder image pin ->
+        # warning only) or post-MAP 1.4 (digest stamped in -> no warning).
         data = _template_from_yaml()
         if data is None:
             self.skipTest("PyYAML not available (template-load skipped)")
-        errors, warnings = render.validate_engine_config(data)
+        errors, _warnings = render.validate_engine_config(data)
         self.assertEqual(errors, [], f"tracked template must be error-free: {errors}")
-        # the template's image pin is still the documented placeholder:
-        # warnings, not errors (the MAP 1.4 build records the real digest)
+
+    def test_placeholder_image_pin_warns_not_errors(self):
+        # The pre-MAP 1.4 template state: image pin still the documented
+        # placeholder -> the validator reports it as a warning, not an
+        # error (the MAP 1.4 build records the real digest).
+        cfg = self.cfg
+        cfg["image"]["pin"]["tag"] = "bonsai2-server:<tag-at-install>"
+        cfg["image"]["pin"]["sha256"] = "<docker-content-digest-at-install>"
+        errors, warnings = self.validate(cfg)
+        self.assertEqual(errors, [], f"placeholder pin must not be an error: {errors}")
         self.assertTrue(any("image.pin" in w for w in warnings))
 
     def test_count_zero_is_valid_main_only(self):
@@ -397,27 +408,41 @@ class TestScalarLeaves(_Base):
 
 class TestRenderConfig(_Base):
     def test_render_with_fresh_pin(self):
-        # The MAP 1.4 flow: template (placeholder pin) + the build's
-        # digest -> a fully-pinned rendered config.
-        tmpl = _template_from_yaml()
-        if tmpl is None:
-            self.skipTest("PyYAML not available (template-render skipped)")
+        # The MAP 1.4 flow: template + the build's digest -> a fully-pinned
+        # rendered config. Driven with an in-memory placeholder template so
+        # the test is state-independent of whether the tracked file has
+        # already been stamped by a real MAP 1.4 build.
+        tmpl = _template_dict()
+        tmpl["image"]["pin"]["tag"] = "bonsai2-server:<tag-at-install>"
+        tmpl["image"]["pin"]["sha256"] = "<docker-content-digest-at-install>"
         rendered, errors = render.render_config(
             tmpl, {"tag": "bonsai2-server:1.0", "sha256": VALID_DIGEST}
         )
         self.assertEqual(errors, [], f"rendered config must be error-free: {errors}")
         self.assertEqual(rendered["image"]["pin"]["tag"], "bonsai2-server:1.0")
         self.assertEqual(rendered["image"]["pin"]["sha256"], VALID_DIGEST)
-        # the input is untouched (render produces a new dict)
-        self.assertIn("<", tmpl["image"]["pin"]["sha256"])
+
+    def test_render_overwrites_stamped_pin(self):
+        # Re-running install.sh with a new digest must overwrite an already
+        # stamped image pin (idempotency: S6.1 step 2 "digest re-recorded").
+        cfg = _template_dict()  # fully pinned, stamped form
+        new_digest = "sha256:" + "ab" * 32
+        rendered, errors = render.render_config(
+            cfg, {"tag": "bonsai2-server:1.1", "sha256": new_digest}
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(rendered["image"]["pin"]["sha256"], new_digest)
+        self.assertEqual(rendered["image"]["pin"]["tag"], "bonsai2-server:1.1")
 
     def test_render_without_pin_keeps_placeholders(self):
-        tmpl = _template_from_yaml()
-        if tmpl is None:
-            self.skipTest("PyYAML not available (template-render skipped)")
-        _, errors = render.render_config(tmpl)
-        # still the placeholder -> still warnings, no errors
+        # No pin override -> a placeholder pin is kept as-is (still a
+        # warning, never an error). In-memory so it is state-independent.
+        tmpl = _template_dict()
+        tmpl["image"]["pin"]["tag"] = "bonsai2-server:<tag-at-install>"
+        tmpl["image"]["pin"]["sha256"] = "<docker-content-digest-at-install>"
+        rendered, errors = render.render_config(tmpl)
         self.assertEqual(errors, [], f"rendered config must be error-free: {errors}")
+        self.assertIn("<", rendered["image"]["pin"]["sha256"])
 
     def test_render_deep_copies(self):
         out, _ = render.render_config(self.cfg)
