@@ -207,7 +207,8 @@ under the manager or the full stack).
       MAP 6.2 step 3.)
 - [x] 1.4 Build `bonsai2-server:<tag>` runtime image: binary + model files
       + CUDA runtime; record docker content digest as `image_pin`
-      (S1.6, S6.1). (2026-09-21, this session: `image/Dockerfile.runtime`
+      (S1.6, S6.1). (2026-09-21, PR #7 merged as `a203f79`, 4 review
+      rounds: `image/Dockerfile.runtime`
       + `bin/bonsai2_build_image.py` orchestrator; base =
       `nvidia/cuda:13.0.2-runtime-ubuntu24.04` digest-pinned; binary via
       `COPY --from=bonsai2-server-build:121a` (MAP 1.2 artifact; BuildKit
@@ -228,7 +229,8 @@ under the manager or the full stack).
       models at pinned sizes, S1.3 default CMD).)
 - [x] 1.5 `subagent-engine.yaml` writer + YAML schema validation: port
       math, ctx/parallel bounds, sampling ranges (S1.6, S1.7 unit half).
-      (2026-09-21, this session: `bin/bonsai2_render_config.py` —
+      (2026-09-21, PR #7 merged as `a203f79`, 4 review
+      rounds: `bin/bonsai2_render_config.py` —
       `validate_engine_config` (S1.6 shape + S1.7 bounds: presence, pin
       formats, port math incl. overflow + collision via optional
       per-instance `ports` overrides, ctx 8192..262144 multiple of 8192,
@@ -241,7 +243,8 @@ under the manager or the full stack).
       tracked template + the MAP 1.4 render flow).)
 - [x] 1.6 VRAM formula as a pure function: `instance_footprint_GB`,
       `N = floor(budget/11.5)` clamped [0,8], N=0 and N>8 cases (S1.4,
-      S1.7 unit half). (2026-09-21, this session: `bin/bonsai2_vram.py`
+      S1.7 unit half). (2026-09-21, PR #7 merged as `a203f79`, 4 review
+      rounds: `bin/bonsai2_vram.py`
       — `instance_footprint_gb` (S1.4 verbatim, 0.00000176 constant),
       `instance_count` (clamp [0,8]; total on all floats: N=0 on
       zero/negative budget, N=0 on non-positive footprint instead of a
@@ -508,6 +511,36 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 --->
+
+### 2026-09-21 — Phase 1: MAP 1.4/1.5/1.6 merged (PR #7, `a203f79`), 4-round review loop
+- agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `a203f79`)
+- phase(s): P1 (1.4 + 1.5 + 1.6 done; frontier now 1.7)
+- items checked: 1.4 (`image/Dockerfile.runtime` + `bin/bonsai2_build_image.py`
+  orchestrator + buildx timeout + `write_image_pin`), 1.5
+  (`bin/bonsai2_render_config.py` validator + writer, `copy.deepcopy`),
+  1.6 (`bin/bonsai2_vram.py`), hermetic suites 130 tests OK,
+  @gpu `tests/run_gpu.sh` 8/8 against `bonsai2-server:1.0`.
+- machine state: branch `phase1-runtime-image-vram` deleted local +
+  remote; `etc/subagent-engine.yaml` `image.pin` stamped with the live
+  digest (`sha256:0fff95f5…` = `docker image inspect
+  bonsai2-server:1.0 .Id`); /opt/bonsai2 still absent (install = Phase 6).
+- review loop (senior-git-1.0, PR #7 comments 506–521): round 1 → buildx
+  `subprocess.run` had no timeout (P1, fixed `f8b2d55`); round 2 →
+  collision map dropped out-of-range port overrides (P1, fixed
+  `3ca5fdc`) + 2 P2 documented; round 3 → `write_image_pin` hardcoded
+  4-space indent (P1, fixed `a85c9a2`) + exit routing substring match
+  (P1, fixed) + 3 P2 (2 fixed: `json` deep-copy → `copy.deepcopy`,
+  test_smoke import-walk module-scope; 1 noted); round 4 → P1
+  (`write_image_pin` target: tracked template vs deploy target) WAIVED on
+  user approval — design-level, deferred to the S6.4 install.sh item
+  (the rebuild-skip check must decide which file is the authoritative
+  `image.pin`; if the deploy-target write is preferred later, the change
+  is localized to `main()` via `write_image_pin(..., out_path=…)`).
+- next: 1.7 manual single-instance bring-up (`docker run` per S1.3,
+  `--gpus all`, `--port 30101`); the @gpu test covers artifacts +
+  library resolution only — inference is 1.7's job.
+- blockers/intricacies: none new. PR #7 G4 merge gate comment 520.
+- spec deltas: none new this session.
 
 ### 2026-09-21 — Phase 1: MAP 1.3 merged (PR #5, `ea87132`), 7-round review loop
 - agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `ea87132`)
