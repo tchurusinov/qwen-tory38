@@ -284,6 +284,20 @@ class TestInstancesBlock(_Base):
         self.cfg["instances"]["ports"] = {5: 30199}
         self.assert_invalid(needle="instances.ports[5]")
 
+    def test_out_of_range_override_duplicate_port_still_reports_collision(self):
+        # G3c round-2 P1 regression: the collision map must include
+        # out-of-range overrides — a stray index 5 duplicating index 0's
+        # base port (30101) is BOTH a shape error (ports[5]) AND a
+        # collision (the old guard swallowed index 5, hiding the dup).
+        self.cfg["instances"]["count"] = 3
+        self.cfg["instances"]["ports"] = {5: 30101}
+        errs, _ = self.validate()
+        self.assertTrue(any("instances.ports[5]" in e for e in errs), errs)
+        self.assertTrue(
+            any("port 30101 assigned to multiple instances" in e for e in errs),
+            errs,
+        )
+
     def test_override_bad_port_rejected(self):
         self.cfg["instances"]["ports"] = {0: 300000}
         self.assert_invalid(needle="instances.ports[0]")

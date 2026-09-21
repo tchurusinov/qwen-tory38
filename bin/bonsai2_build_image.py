@@ -331,7 +331,15 @@ def build(
     build_timeout_s: float = DEFAULT_BUILD_TIMEOUT_S,
     log=print,
 ) -> str:
-    """Full MAP 1.4 pipeline. Returns the written content digest."""
+    """Full MAP 1.4 pipeline. Returns the written content digest.
+
+    The pin itself is written into the YAML by the caller (`main` ->
+    `write_image_pin`) AFTER the build returns: an interrupted build
+    (SIGKILL between build success and pin write) leaves a built but
+    unpinned image — install.sh's rebuild-skip check (S6.1 step 2,
+    `image.pin` vs local image) rebuilds when the pin is missing, so
+    the interruption is recoverable, not silent.
+    """
     import yaml  # PyYAML: box dep (config read), same convention as MAP 1.3
 
     with open(config, "r", encoding="utf-8") as f:

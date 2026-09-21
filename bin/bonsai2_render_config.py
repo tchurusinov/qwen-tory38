@@ -109,7 +109,17 @@ def _num_range(errors: list[str], where: str, v, lo, hi):
 
 
 def _instance_ports(inst: dict, count: int) -> dict[int, int]:
-    """Effective port per instance index (base-derived, overrides applied)."""
+    """Effective port per instance index (base-derived, overrides applied).
+
+    Collision-check map: includes EVERY override with an int port value,
+    in-range or not — the shape check (the caller) reports out-of-range
+    indices, the collision check must still see their port (a stray
+    index 5 duplicating index 0's port is a collision the map would
+    otherwise miss). When `port_base` is missing/invalid the base
+    derives from 0: the shape check already reports the bad base, so
+    the collision map just needs a stable base and is gated on
+    `count > 0` by the caller.
+    """
     base = inst.get("port_base", 0) if _is_int(inst.get("port_base")) else 0
     ports: dict[int, int] = {}
     for i in range(max(0, count)):
@@ -117,7 +127,7 @@ def _instance_ports(inst: dict, count: int) -> dict[int, int]:
     overrides = inst.get("ports")
     if isinstance(overrides, dict):
         for k, v in overrides.items():
-            if not (isinstance(k, int) and 0 <= k < count and _is_int(v)):
+            if not (_is_int(k) and _is_int(v)):
                 continue  # shape errors are reported by the caller
             ports[k] = v
     return ports
