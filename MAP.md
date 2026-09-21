@@ -199,9 +199,12 @@ under the manager or the full stack).
       runtime image gets `--gpus all`. Build-image local tag:
       `bonsai2-server-build:121a` (build pipeline artifact, not the
       S1.6 image_pin — that is the runtime image, MAP 1.4).
-- [ ] 1.3 Model download + SHA256 verification: `PQ2_0` (default) +
+- [x] 1.3 Model download + SHA256 verification: `PQ2_0` (default) +
       `PTQ1_0` (fallback); retry ×3 / 10 s backoff; `ERR_HASH_MISMATCH`
-      exit 4 path (S1.1, S1.5).
+      exit 4 path (S1.1, S1.5). (2026-09-21, PR #5 merged as `ea87132`,
+      7 review rounds; tool = `bin/bonsai2_model_fetch.py`, hermetic
+      suite 20 tests; live 7.21 GB + 5.95 GB download runs at install,
+      MAP 6.2 step 3.)
 - [ ] 1.4 Build `bonsai2-server:<tag>` runtime image: binary + model files
       + CUDA runtime; record docker content digest as `image_pin`
       (S1.6, S6.1).
@@ -468,7 +471,30 @@ SPEC.md `status` → `active`.
 - blockers/intricacies: (what bit, spec refs, what the next agent should
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
--->
+--->
+
+### 2026-09-21 — Phase 1: MAP 1.3 merged (PR #5, `ea87132`), 7-round review loop
+- agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `ea87132`)
+- phase(s): P1 (1.3 done; frontier now 1.4)
+- items checked: 1.3 (tool + config + hermetic tests; live download deferred
+  to install, MAP 6.2 step 3)
+- machine state: `bin/bonsai2_model_fetch.py` (412 L, stdlib-only) +
+  `tests/test_model_fetch.py` (18 tests) + pinned `etc/subagent-engine.yaml`
+  model block on main; branch `phase1-model-fetch` deleted local + remote;
+  /opt/bonsai2 still absent (install = Phase 6).
+- next: 1.4 build `bonsai2-server:<tag>` runtime image (S1.6 image_pin) —
+  reuses the MAP 1.2 build pipeline (`image/Dockerfile`, local tag
+  `bonsai2-server-build:121a`); the runtime image bakes the fork binary
+  + model files + CUDA runtime and records its content digest.
+- blockers/intricacies: none new. Gitea 1.27.1 merge route quirk:
+  `POST /pulls/5` returns 405; the working route is
+  `POST /api/v1/repos/<o>/<r>/pulls/5/merge` with `{"do":"merge",
+  "merge_commit_message": ..., "delete_source_branch": false}` (422 with
+  "Required: do" was the discoverer). G3b/G3c round-7 comments were missed
+  in the round-7 post step; backfilled as PR #5 comments 500/501 alongside
+  the G4 record (502).
+- spec deltas: none new this session (S1.1/S1.6 object-name delta landed
+  on the branch with the PR).
 
 ### 2026-09-20 — Phase 1: build pipeline landed (item 1.2), fork binary built at pin
 - agent/model: Hermes qwen3.8-27b (session: Phase 1, branch `phase1-build-pipeline`)
