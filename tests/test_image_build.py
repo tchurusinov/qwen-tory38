@@ -11,6 +11,9 @@ tests/test_smoke.py):
   * write_image_pin: the surgical YAML pin writer (comment-preserving,
     round-trip asserts)
   * check_cache_file: the S1.1 "hash-verified before baking" pre-check
+  * the build() timeout path: a hung `docker buildx build` raises
+    subprocess.TimeoutExpired inside build() -> main() exits 5 with
+    ERR_TIMEOUT (subprocess.run is monkeypatched; no docker, no GPU)
 
 The docker-side of build() (staging, buildx, digest read-back) is
 exercised live in this session and by tests/gpu/test_runtime_image.py
@@ -251,6 +254,105 @@ def _rmtree(p: Path):
     import shutil
 
     shutil.rmtree(p, ignore_errors=True)
+
+
+class TestBuildTimeoutPath(unittest.TestCase):
+    """The hung-buildx path: subprocess.run times out -> main() exits 5
+    with ERR_TIMEOUT. subprocess.run is monkeypatched (no docker, no
+    GPU); the pipeline is short-circuited up to the buildx call with
+    patched pure helpers + a minimal valid YAML."""
+
+    def setUp(self):
+        self._tmp = _mkdtemp()
+        self.tmp = Path(self._tmp.name)
+        self.cfg = self.tmp / "subagent-engine.yaml"
+        self.cfg.write_text(
+            textwrap.dedent(
+                """\
+                engine:
+                  binary: /opt/bonsai2/bin/llama-server
+                  pin:
+                    repo: https://github.com/PrismML-Eng/llama.cpp
+                    commit: "9a9394a895b96003ca842a6041cb28ac49a108f7"
+                image:
+                  pin:
+                    tag: "bonsai2-server:<tag-at-install>"
+                    sha256: "<docker-content-digest-at-install>"
+                model:
+                  repo: prism-ml/Ternary-Bonsai-2-27B-gguf
+                  revision: main
+                  file: bonsai-2-27b-gguf-PQ2_0.gguf
+                  sha256: "3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1"
+                  size_bytes: 7206168928
+                  fallback_file: bonsai-2-27b-gguf-PTQ1_0.gguf
+                  fallback_sha256: "0007dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec"
+                  fallback_size_bytes: 5946648928
+                """
+            )
+        )
+        self._orig = {}
+        for name in (
+            "docker_image_exists",
+            "banner_check_build_image",
+            "check_cache_file",
+            "stage_context",
+            "rotate_build_logs",
+            "TEST_LOG_DIR",
+        ):
+            self._orig[name] = getattr(build, name)
+
+    def tearDown(self):
+        for name, val in self._orig.items():
+            setattr(build, name, val)
+        _rmtree(self.tmp)
+
+    def test_hung_buildx_is_exit_5_err_timeout(self):
+        import io
+        import subprocess
+        from contextlib import redirect_stderr
+
+        build.docker_image_exists = lambda image: True
+        build.banner_check_build_image = lambda image, pin8: pin8
+        build.check_cache_file = lambda path, sha, size: (True, "")
+        build.stage_context = lambda cache_dir, default_file, fallback_file, dest: None
+        build.rotate_build_logs = lambda keep=3: None
+        build.TEST_LOG_DIR = self.tmp
+
+        def _run_timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired(args[0] if args else kwargs.get("cmd"), 5.0)
+
+        orig_run = build.subprocess.run
+        build.subprocess.run = _run_timeout
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = build.main(
+                    [
+                        "--config",
+                        str(self.cfg),
+                        "--build-image",
+                        "bonsai2-server-build:121a",
+                        "--tag",
+                        "bonsai2-server:1.0",
+                        "--cache-dir",
+                        str(self.tmp),
+                        "--build-timeout",
+                        "5",
+                    ]
+                )
+        finally:
+            build.subprocess.run = orig_run
+        self.assertEqual(rc, build.EXIT_TIMEOUT, err.getvalue())
+        self.assertEqual(rc, 5, err.getvalue())
+        self.assertIn("ERR_TIMEOUT", err.getvalue())
+        self.assertIn("timed out", err.getvalue())
+
+    def test_default_build_timeout_is_two_hours(self):
+        import inspect
+
+        sig = inspect.signature(build.build)
+        self.assertEqual(sig.parameters["build_timeout_s"].default, 7200.0)
+        self.assertEqual(build.DEFAULT_BUILD_TIMEOUT_S, 7200.0)
 
 
 if __name__ == "__main__":

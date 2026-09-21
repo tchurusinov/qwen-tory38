@@ -36,6 +36,7 @@ Exit codes (S1.5 closed-set subset for this step):
   2 = ERR_CONFIG (YAML missing/malformed, docker missing, bad digest
       read-back)
   4 = ERR_HASH_MISMATCH (cache file or build image vs the YAML pins)
+  5 = ERR_TIMEOUT (docker buildx build exceeded --build-timeout)
 
 Stdlib + PyYAML (config read/write only — the same convention as
 bin/bonsai2_model_fetch.py; the hermetic test suite is stdlib-only and
@@ -46,6 +47,7 @@ Usage:
                                      [--build-image IMG]
                                      [--tag TAG]
                                      [--cache-dir DIR]
+                                     [--build-timeout SECONDS]
                                      [--keep-context]
 """
 
@@ -75,9 +77,16 @@ TEST_LOG_DIR = REPO_ROOT / "test-logs"
 
 EXIT_CONFIG = 2
 EXIT_HASH = 4
+EXIT_TIMEOUT = 5
+
+# A 13 GB layer build can legitimately take a long time — 2 h default;
+# a hung buildx (dockerd wedge, stuck pull) must not hang the
+# orchestrator forever like the other _docker() calls would.
+DEFAULT_BUILD_TIMEOUT_S = 7200.0
 
 ERR_CONFIG = "ERR_CONFIG"
 ERR_HASH_MISMATCH = "ERR_HASH_MISMATCH"
+ERR_TIMEOUT = "ERR_TIMEOUT"
 
 # The S1.1 on-disk names (S1.3 serving command paths), from the YAML.
 DEFAULT_MODEL_NAME = "bonsai-2-27b-gguf-PQ2_0.gguf"
@@ -319,6 +328,7 @@ def build(
     tag: str,
     cache_dir: str,
     keep_context: bool = False,
+    build_timeout_s: float = DEFAULT_BUILD_TIMEOUT_S,
     log=print,
 ) -> str:
     """Full MAP 1.4 pipeline. Returns the written content digest."""
@@ -398,12 +408,19 @@ def build(
         ]
         # mirror the build log to the console (tail) and the log file
         with open(log_path, "wb") as lf:
-            p = subprocess.run(
-                [*cmd, "--progress", "plain", ctx],
-                stdout=lf,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
+            try:
+                p = subprocess.run(
+                    [*cmd, "--progress", "plain", ctx],
+                    stdout=lf,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    timeout=build_timeout_s,
+                )
+            except subprocess.TimeoutExpired:
+                raise ValueError(
+                    f"{ERR_TIMEOUT}: docker buildx build timed out after "
+                    f"{build_timeout_s:.0f}s (log {log_path})"
+                )
         tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-15:])
         if p.returncode != 0:
             log(f"[build] FAILED (exit {p.returncode}), last lines:\n{tail}")
@@ -440,6 +457,12 @@ def main(argv: list[str] | None = None) -> int:
         help=f"model cache dir (default {DEFAULT_CACHE_DIR})",
     )
     ap.add_argument(
+        "--build-timeout",
+        type=float,
+        default=DEFAULT_BUILD_TIMEOUT_S,
+        help=f"docker buildx wall-clock budget in seconds (default {DEFAULT_BUILD_TIMEOUT_S:.0f})",
+    )
+    ap.add_argument(
         "--keep-context",
         action="store_true",
         help="keep the staged build context (debug)",
@@ -453,9 +476,12 @@ def main(argv: list[str] | None = None) -> int:
             tag=args.tag,
             cache_dir=args.cache_dir,
             keep_context=args.keep_context,
+            build_timeout_s=args.build_timeout,
         )
     except ValueError as exc:
         print(f"[build] {exc}", file=sys.stderr)
+        if "ERR_TIMEOUT" in str(exc):
+            return EXIT_TIMEOUT
         return EXIT_CONFIG if "ERR_CONFIG" in str(exc) else EXIT_HASH
     except subprocess.CalledProcessError as exc:
         print(f"[build] docker build failed: {exc}", file=sys.stderr)
