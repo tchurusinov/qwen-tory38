@@ -46,14 +46,18 @@ bench mode · kill-for-drift instance retirement · stateful subagents.
 
 <!-- maintained by agents; one line each: what is blocked, on what, since when.
      Move resolved lines into Decisions (or delete). Empty = no blockers. -->
-
-- PQ2_0 weights not on the box yet (since 2026-09-20): local copy is
-  PTQ1_0 (fallback quant, 5.95 GB) + mmproj only. SPEC default PQ2_0
-  (7.21 GB) downloads at install (MAP 1.3) — not a blocker, note for
-  VRAM audits and first-run expectations.
-- shellcheck + ruff not installed (since 2026-09-20): gate.sh +
-  pre-commit treat both as soft until installed (install in Phase 0,
-  provenance-checked, aarch64-safe).
+<!-- none as of 2026-09-21:
+- (was: PQ2_0 weights not on the box) resolved — both quants are in
+  /opt/bonsai2/cache, SHA256 + size match the YAML pins: PQ2_0
+  3907dc16… (7,206,168,928 B), PTQ1_0 53107f53… (5,946,648,928 B);
+  the MAP 1.4 build consumed them and the digest landed in
+  image.pin (PR #7).
+- (was: shellcheck + ruff not installed) resolved — ruff 0.16.8 via
+  uvx; shellcheck 0.9.0 candidate from noble/universe arm64 (Ubuntu
+  ports, provenance-checked; machine rule: no bare upgrade, install
+  the single package when running the gate). Gate's soft-skip stays
+  until they are on PATH.
+-->
 
 ## Phases
 
