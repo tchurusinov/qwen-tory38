@@ -34,6 +34,8 @@ E = external (pre-existing, consumed read-only).
 |---|---|---|---|
 | CUDA 13.0 build container (local image) | docker `nvidia/cuda:13.0.2-devel-ubuntu24.04` | `nvidia/cuda@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6` (multi-arch manifest; aarch64 verified) | MAP 0.3 (build stage for MAP 1.2; needs `apt-get install cmake ninja-build` inside — see MAP 0.3) |
 | bonsai2 fork build pipeline (local image) | docker `bonsai2-server-build:121a` (repo `image/Dockerfile`), binary at `/opt/bonsai2/bin/llama-server` inside | build inputs: fork pin `9a9394a8` + CUDA image digest above + `libnvidia-compute-580` (driver lib, NVIDIA apt repo); image ID recorded in the build log | MAP 1.2 (builds the S1.2 binary for the MAP 1.4 runtime image `bonsai2-server:<tag>`; rebuild on any pin change) |
+| bonsai2 model fetcher (repo source) | `bin/bonsai2_model_fetch.py` (deployed to `/opt/bonsai2/bin/` by install.sh) | stdlib-only + PyYAML config read; pins from `etc/subagent-engine.yaml` `model` block (SHA256 + size) | MAP 1.3 (S1.1 download + SHA256 verify; retry ×3 / 10 s backoff; `ERR_HASH_MISMATCH`/`ERR_DOWNLOAD` → exit 4; hermetic tests `tests/test_model_fetch.py`) |
+| bonsai2 PQ2_0 + PTQ1_0 weights (model cache) | `/opt/bonsai2/cache/bonsai-2-27b-gguf-PQ2_0.gguf` (7.21 GB) + `bonsai-2-27b-gguf-PTQ1_0.gguf` (5.95 GB) | pinned: PQ2_0 sha256 `3907dc16…ec1` (7206168928 B), PTQ1_0 sha256 `53107f53…3ee3` (5946648928 B); HF source objects `Ternary-Bonsai-2-27B-{PQ2_0,PTQ1_0}.gguf`, revision `main` @ `6ed5e12b` (2026-09-20) | MAP 1.3 (downloaded + SHA-verified; S1.3 serving command reads the on-disk names from here, not the HF object names) |
 
 Planned host locations (fixed by SPEC — do not relocate without a spec
 delta):
