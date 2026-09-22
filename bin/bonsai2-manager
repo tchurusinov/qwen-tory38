@@ -40,8 +40,23 @@ Exit codes (the manager PROCESS; S1.4 / S2.4 / S2.3):
       the S2.4 handoff, exit 0)
   4 = ERR_VRAM_OOM — the S2.3 planning tier granted N' >= 1 but the S1.4
       allocation tier failed at i = 0 (VRAM was lost *after* the budget
-      ran — "granted at plan time, short at allocation time")
-  2 = ERR_CONFIG — a YAML failed to parse / is malformed
+      ran — "granted at plan time, short at allocation time"). This is a
+      BOOT-TIME failure, handled BEFORE `READY=1` is sent: the health
+      document is written (0 instances, stack derived degraded), a
+      STATUS= is emitted, and the process exits 4 so systemd sees a
+      FAILED START under `Type=notify` and applies
+      `Restart=on-failure` / `RestartSec=5` (the S1.4 "the manager exits
+      4 before the instance's KV allocation" contract — S1.4's exit 4
+      IS the unit-level signal here).
+  2 = ERR_CONFIG — a YAML failed to parse / is malformed, OR a boot-tier
+      memory read (MemTotal / MemAvailable) failed (the /proc/meminfo
+      OSErr -> ERR_CONFIG mapping; see main())
+
+Under `Type=notify` the full/partial/main-only boots send `READY=1` and
+the process then STAYS ALIVE in the steady probe loop until systemd
+stops it (a stopped unit exits 0; the boot-time exit 4 above is the
+only exit code the unit ever observes without a prior READY).
+`--settle N` exits 0 after N seconds for the @gpu harness / manual runs.
 
 Usage:
   bonsai2-manager                 # systemd Type=notify daemon (run forever)
@@ -187,6 +202,18 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
     api_key = eng.get("api_key")
     if not isinstance(alias, str) or not isinstance(api_key, str):
         raise ValueError("ERR_CONFIG: subagent-engine.yaml: alias/api_key missing")  # noqa: TRY004
+    # The S2.4 N=0 PTQ1_0 fallback quant (S1.1). NOT a hard requirement
+    # of the MAP 2.1–2.5 skeleton — the fallback RETRY logic lands in
+    # MAP 2.7 — but it is surfaced now so a malformed/missing fallback
+    # quant is caught at config-load (ERR_CONFIG) or explicitly logged,
+    # not discovered mid-N=0-handoff.
+    fallback_size_bytes = model.get("fallback_size_bytes")
+    if fallback_size_bytes is not None and not (
+        isinstance(fallback_size_bytes, int) and fallback_size_bytes > 0
+    ):
+        raise ValueError(
+            "ERR_CONFIG: subagent-engine.yaml: model.fallback_size_bytes not a positive int"
+        )
 
     main_stack = srv.get("main_stack")
     if not isinstance(main_stack, dict):
@@ -220,6 +247,9 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
         "api_key": api_key,
         "weights_bytes": model["size_bytes"],
         "weights_gb": model["size_bytes"] / 1e9,  # decimal GB (S1.4 convention)
+        "fallback_size_bytes": (
+            fallback_size_bytes if fallback_size_bytes is not None else None
+        ),
         "count": inst["count"],
         "port_base": inst["port_base"],
         "ctx_size": inst["ctx_size"],
@@ -803,7 +833,15 @@ def main(argv: list[str] | None = None) -> int:
     budget_gb = float(cfg["budget_gb"])
 
     # --- S2.3 boot-time budget check -----------------------------------
-    total_gb = read_total_gb()
+    try:
+        total_gb = read_total_gb()
+    except OSError as exc:
+        # A boot-tier /proc/meminfo read failure is a config/boot-environment
+        # problem, not a transient one: map it to ERR_CONFIG (exit 2) instead
+        # of an uncaught traceback (exit 1), matching the load_config contract.
+        _log(f"ERR_CONFIG: MemTotal read failed: {exc}")
+        notify_sd(f"STATUS=bonsai2-manager: ERR_CONFIG: {exc}")
+        return EXIT_CONFIG
     main_used, source = main_used_gb(cfg["main_container"], cfg["main_footprint_gb"])
     _log(
         f"S2.3: total {total_gb:.2f} GB, main {main_used:.2f} GB ({source}), "
@@ -844,6 +882,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     _log(detail)
 
+    # --- i = 0 allocation OOM (exit 4): a BOOT-TIME failure -------------
+    # spawn_sequence returns (4, [], detail, {}) — nothing started, the
+    # manager exits BEFORE any READY=1 (the S1.4 "exits 4 before the
+    # instance's KV allocation" contract). Handle it here, explicitly, so
+    # the exit-4 path is not "falls through with an empty state":
+    #   * health.json is written with 0 instances. stack_summary returns
+    #     "main-only" for 0 instances (there really are no subagents
+    #     running), and main_only_reason names the CAUSE — here
+    #     "ERR_VRAM_OOM" so a reader of bonsai2-health can distinguish
+    #     "planning tier found nothing to run" (budget_zero / user_unloaded)
+    #     from "planning tier granted, allocation tier refused" (this path).
+    #     The S3.1 schema keeps main_only_reason free-form for 0-instance
+    #     documents (S2.4 amendment 2026-09-23 already opened it to new
+    #     reason values like the MAP 2.7 fallback_zero candidate).
+    #   * STATUS= is emitted so systemd's journal shows WHY the start
+    #     failed (without it, Type=notify + exit 4 = a bare "status=failed
+    #     reason=exit-code" with no context)
+    #   * then exit 4, which systemd under Type=notify treats as a FAILED
+    #     START -> Restart=on-failure + RestartSec=5 (the unit's policy).
+    if exit_code == EXIT_VRAM_OOM:
+        _log("S1.4: i=0 allocation OOM -> exit 4 (ERR_VRAM_OOM), no READY sent")
+        write_health(health_dir, build_health(cfg, [], main_ok, "ERR_VRAM_OOM"))
+        notify_sd(f"STATUS=bonsai2-manager: {detail}")
+        return EXIT_VRAM_OOM
+
     # --- S2.4 N=0 / main-only handoff (the PTQ1_0 / ctx-halve fallback is
     #     MAP 2.7; the skeleton hands off to main-only, exit 0) ----------
     main_only_reason: str | None = None
@@ -857,6 +920,15 @@ def main(argv: list[str] | None = None) -> int:
         _log(
             "S2.4: N'=0 -> main-only mode (reason=budget_zero). "
             "MAP 2.7 adds the PTQ1_0 / ctx-halve fallback before this handoff."
+            + (
+                f" Fallback quant validated at config-load: PTQ1_0 "
+                f"{cfg['fallback_size_bytes']} B "
+                f"(~{cfg['fallback_size_bytes'] / 1e9:.2f} GB vs PQ2_0 "
+                f"{cfg['weights_gb']:.2f} GB)."
+                if cfg.get("fallback_size_bytes")
+                else " No model.fallback_size_bytes in the YAML — MAP 2.7's "
+                "PTQ1_0 retry has no size to plan against (P1, G3 PR #10 r4)."
+            )
         )
         states: list[str] = []
         write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))

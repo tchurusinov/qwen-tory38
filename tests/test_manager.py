@@ -71,7 +71,9 @@ Run: `python3 -m unittest discover -s tests` from the repo root.
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -170,6 +172,26 @@ class TestConfigLoading(unittest.TestCase):
                 mgr.load_config(bad, SERVING_YAML)
             self.assertIn("ERR_CONFIG", str(ctx.exception))
 
+    def test_fallback_size_bytes_is_validated_and_surfaced(self):
+        """G3 round-4 P1: model.fallback_size_bytes (the S2.4 PTQ1_0
+        fallback quant, 5.95 GB vs PQ2_0 7.21 GB) must be validated at
+        config-load and carried into the normalized cfg, so MAP 2.7's
+        N=0 quant-fallback can plan against it."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        self.assertEqual(cfg["fallback_size_bytes"], 5946648928)
+
+    def test_bad_fallback_size_bytes_is_err_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            good = ENGINE_YAML.read_text().replace(
+                "fallback_size_bytes: 5946648928",
+                "fallback_size_bytes: notanumber",
+            )
+            bad = Path(td) / "subagent-engine.yaml"
+            bad.write_text(good)
+            with self.assertRaises(ValueError) as ctx:
+                mgr.load_config(bad, SERVING_YAML)
+            self.assertIn("ERR_CONFIG", str(ctx.exception))
+
 
 class TestHealthJson(unittest.TestCase):
     """2.1: /run/bonsai2/health.json in the S3.1 schema (S2.2)."""
@@ -229,6 +251,100 @@ class TestHealthJson(unittest.TestCase):
             doc = mgr.build_health(cfg, ["healthy", bad], main_ok=True)
             self.assertEqual(doc["stack"], "degraded")
             self.assertNotIn("main_only_reason", doc)
+
+    def test_oom_document_carries_err_vram_oom_reason(self):
+        """G3 round-4 P0: the i=0 OOM exit-4 path writes health.json with
+        main_only_reason = 'ERR_VRAM_OOM' (a 0-instance doc whose cause is
+        OOM, not budget_zero/user_unloaded). The S3.1 schema is open to
+        new reason values (S2.4 amendment 2026-09-23)."""
+        cfg = self._cfg()
+        doc = mgr.build_health(cfg, [], main_ok=True, main_only_reason="ERR_VRAM_OOM")
+        self.assertEqual(doc["stack"], "main-only")
+        self.assertEqual(doc["instances"], [])
+        self.assertEqual(doc["main_only_reason"], "ERR_VRAM_OOM")
+
+
+# --------------------------------------------------------------------------
+# MAP 2.1–2.5 — main() exit-code contract (boot-tier read failures + OOM)
+# --------------------------------------------------------------------------
+class TestMainExitCodes(unittest.TestCase):
+    """main() maps its boot-time failures to the documented exit codes:
+    2 = ERR_CONFIG (incl. a /proc/meminfo read failure), 4 = ERR_VRAM_OOM
+    (the i=0 allocation-tier defeat, no READY=1)."""
+
+    def _env(self, td):
+        env = {
+            "BONSAI2_ENGINE_YAML": str(ENGINE_YAML),
+            "BONSAI2_SERVING_YAML": str(SERVING_YAML),
+            "BONSAI2_HEALTH_DIR": td,
+        }
+        return env
+
+    def test_mem_total_read_failure_is_err_config_exit_2(self):
+        """G3 round-4 P2: read_total_gb() raising OSError (MemTotal absent)
+        maps to ERR_CONFIG exit 2, not an uncaught traceback (exit 1)."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                mock.patch.dict(os.environ, self._env(td), clear=False),
+                mock.patch.object(mgr, "load_config", return_value=cfg),
+                mock.patch.object(
+                    mgr, "read_total_gb", side_effect=OSError("MemTotal missing")
+                ),
+            ):
+                rc = mgr.main([])
+            self.assertEqual(rc, 2, "MemTotal read failure = ERR_CONFIG exit 2")
+
+    def test_i0_oom_exits_4_writes_health_no_ready(self):
+        """G3 round-4 P0: when spawn_sequence returns exit 4 (i=0
+        allocation OOM), main() writes health.json (reason ERR_VRAM_OOM),
+        does NOT send READY=1, and returns 4 — so systemd under
+        Type=notify sees a FAILED START -> Restart=on-failure."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        written: dict = {}
+        notified: list[str] = []
+
+        def fake_write_health(health_dir, doc):
+            written["doc"] = doc
+
+        def fake_notify(state):
+            notified.append(state)
+
+        td = tempfile.mkdtemp()
+        try:
+            with (
+                mock.patch.dict(os.environ, self._env(td), clear=False),
+                mock.patch.object(mgr, "load_config", return_value=cfg),
+                mock.patch.object(mgr, "read_total_gb", return_value=121.6),
+                mock.patch.object(
+                    mgr, "main_used_gb", return_value=(76.4, "recorded footprint")
+                ),
+                mock.patch.object(mgr, "main_healthy", return_value=True),
+                mock.patch.object(
+                    mgr,
+                    "spawn_sequence",
+                    return_value=(
+                        mgr.EXIT_VRAM_OOM,
+                        [],
+                        "ERR_VRAM_OOM: free 5.00 GB < need 15.08 GB",
+                        {},
+                    ),
+                ),
+                mock.patch.object(mgr, "write_health", side_effect=fake_write_health),
+                mock.patch.object(mgr, "notify_sd", side_effect=fake_notify),
+            ):
+                rc = mgr.main([])
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+        self.assertEqual(rc, mgr.EXIT_VRAM_OOM, "i=0 allocation OOM = exit 4")
+        self.assertEqual(written["doc"]["main_only_reason"], "ERR_VRAM_OOM")
+        self.assertEqual(written["doc"]["stack"], "main-only")
+        self.assertEqual(written["doc"]["instances"], [])
+        self.assertFalse(
+            any(s.startswith("READY=") for s in notified),
+            "exit-4 boot must NOT send READY=1",
+        )
 
 
 # --------------------------------------------------------------------------
