@@ -42,6 +42,21 @@ if ! git rev-parse --verify "origin/$BASE" >/dev/null 2>&1; then
   echo "review: origin/$BASE does not exist locally — cannot compute a diff base" >&2
   exit 1
 fi
+# Optional: REVIEW_EXCLUDE = colon-separated git pathspec patterns to keep
+# OUT of the reviewed diff (e.g. REVIEW_EXCLUDE="README.md" for a
+# docs-only file that is part of the PR but not the review target).
+# Each pattern becomes a ':!<pattern>' exclusion pathspec on the diff
+# command (a single unquoted token, so it word-splits into one arg).
+# Must be set BEFORE the diff below (set -u: an unset $EXCLUDE_SPECS
+# would abort at the word-split).
+EXCLUDE_SPECS=""
+if [ -n "${REVIEW_EXCLUDE:-}" ]; then
+  IFS=':' read -ra _excl in <<< "${REVIEW_EXCLUDE}"
+  for p in "${_excl[@]}"; do
+    [ -n "$p" ] || continue
+    EXCLUDE_SPECS="${EXCLUDE_SPECS} :!${p}"
+  done
+fi
 if ! DIFF="$(git diff "origin/$BASE...$BRANCH" $EXCLUDE_SPECS 2>/tmp/review-diff-err.txt)"; then
   echo "review: git diff origin/$BASE...$BRANCH failed:" >&2
   cat /tmp/review-diff-err.txt >&2
@@ -58,20 +73,6 @@ fi
 SAFE_BRANCH="${BRANCH//\//_}"
 OUT="/tmp/review-$SAFE_BRANCH.txt"
 ERR="/tmp/review-err-$SAFE_BRANCH.txt"
-
-# Optional: REVIEW_EXCLUDE = colon-separated git pathspec patterns to keep
-# OUT of the reviewed diff (e.g. REVIEW_EXCLUDE="README.md" for a
-# docs-only file that is part of the PR but not the review target).
-# Each pattern becomes a ':!<pattern>' exclusion pathspec on the diff
-# command (a single unquoted token, so it word-splits into one arg).
-EXCLUDE_SPECS=""
-if [ -n "${REVIEW_EXCLUDE:-}" ]; then
-  IFS=':' read -ra _excl in <<< "${REVIEW_EXCLUDE}"
-  for p in "${_excl[@]}"; do
-    [ -n "$p" ] || continue
-    EXCLUDE_SPECS="${EXCLUDE_SPECS} :!${p}"
-  done
-fi
 
 # Gather whatever repo context files exist. Do NOT invent any.
 # (list adapted at bootstrap 2026-09-19 to this repo's actual planning docs)
