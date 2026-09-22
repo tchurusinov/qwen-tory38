@@ -66,12 +66,13 @@ def _template_dict() -> dict:
                 "fallback_size_bytes": 5946648928,
             },
             "instances": {
-                "count": 3,
+                "count": 2,
                 "port_base": 30101,
                 "ctx_size": 262144,
                 "max_num_seqs": 8,
-                "per_instance_budget_gb": 11.5,
+                "per_instance_budget_gb": 14.78,
             },
+            "kv_cache": "q4_0",
             "sampling": {
                 "temperature": 1.0,
                 "top_p": 0.9,
@@ -81,7 +82,7 @@ def _template_dict() -> dict:
                 "repeat_last_n": 512,
                 "stop_token_ids": [248046, 248044],
             },
-            "reasoning_format": "deepseek_r1",
+            "reasoning_format": "deepseek",
             "alias": "qwen38-27b-subagent",
             "api_key": "bonsai2-local",
         }
@@ -419,6 +420,25 @@ class TestScalarLeaves(_Base):
         del self.cfg["api_key"]
         self.assert_invalid(needle="api_key")
 
+    def test_kv_cache_q4_0_valid(self):
+        # The spec's pin (the S1.4 re-anchor, MAP 1.7).
+        self.cfg["kv_cache"] = "q4_0"
+        self.assert_valid()
+
+    def test_kv_cache_missing(self):
+        del self.cfg["kv_cache"]
+        self.assert_invalid(needle="kv_cache")
+
+    def test_kv_cache_unsupported_dtype(self):
+        # e.g. f8_e5m2 is a ggml type but not a pin-supported KV cache dtype
+        # (the fork's kv_cache_types list, S1.3).
+        self.cfg["kv_cache"] = "f8_e5m2"
+        self.assert_invalid(needle="kv_cache")
+
+    def test_kv_cache_case_insensitive(self):
+        self.cfg["kv_cache"] = "Q4_0"
+        self.assert_valid()
+
 
 class TestRenderConfig(_Base):
     def test_render_with_fresh_pin(self):
@@ -461,7 +481,7 @@ class TestRenderConfig(_Base):
     def test_render_deep_copies(self):
         out, _ = render.render_config(self.cfg)
         out["instances"]["count"] = 7
-        self.assertEqual(self.cfg["instances"]["count"], 3)
+        self.assertEqual(self.cfg["instances"]["count"], 2)
 
     def test_render_preserves_non_json_yaml_values(self):
         # G3c round-3 P2 regression: render_config must deep-copy, not

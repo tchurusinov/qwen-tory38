@@ -214,9 +214,13 @@ class TestRuntimeImage(unittest.TestCase):
                 check=False,
             )
             cmd = json.loads(insp.stdout)
-            # S1.3: the full flag set must be the image default (the S2.2
-            # unit supplies port_base+i at docker-run time; the default
-            # here is instance 0's port, 30101).
+            # S1.3 (re-anchored 2026-09-21, MAP 1.7): the full flag set
+            # must be the image default (the S2.2 unit supplies
+            # port_base+i at docker-run time; the default here is
+            # instance 0's port, 30101). Delta vs the pre-2026-09-21
+            # command: --no-prompt dropped (invalid at the pin),
+            # --reasoning-format deepseek_r1 -> deepseek, and
+            # --cache-type-k/v q4_0 added (the S1.4 re-anchor).
             expected_flags = [
                 "--model",
                 DEFAULT_MODEL,
@@ -226,13 +230,16 @@ class TestRuntimeImage(unittest.TestCase):
                 "8",
                 "--batch-size",
                 "2048",
-                "--no-prompt",
+                "--cache-type-k",
+                "q4_0",
+                "--cache-type-v",
+                "q4_0",
                 "--port",
                 "30101",
                 "--api-key",
                 "bonsai2-local",
                 "--reasoning-format",
-                "deepseek_r1",
+                "deepseek",
                 "--alias",
                 "qwen38-27b-subagent",
             ]

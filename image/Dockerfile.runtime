@@ -212,13 +212,18 @@ RUN set -eu; \
     echo "    ok: both models match the YAML pins"
 
 # S1.3 verbatim (instance 0 port; the S2.2 unit overrides per instance).
+# Delta 2026-09-21 (S1.4 re-anchor, MAP 1.7): --no-prompt removed (not a
+# valid flag at the pin), --reasoning-format deepseek_r1 -> deepseek
+# (the pin's allowed set), --cache-type-k/v q4_0 added (the measured
+# q4_0-KV footprint the S1.4 constant is re-anchored on).
 CMD ["/opt/bonsai2/bin/llama-server", \
      "--model", "/opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf", \
      "--ctx-size", "262144", \
      "--parallel", "8", \
      "--batch-size", "2048", \
-     "--no-prompt", \
+     "--cache-type-k", "q4_0", \
+     "--cache-type-v", "q4_0", \
      "--port", "30101", \
      "--api-key", "bonsai2-local", \
-     "--reasoning-format", "deepseek_r1", \
+     "--reasoning-format", "deepseek", \
      "--alias", "qwen38-27b-subagent"]
