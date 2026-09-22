@@ -383,6 +383,20 @@ api_key: bonsai2-local
 - **Edge:** port collision (start a dummy listener on 30101 → boot →
   expect instance 0 `ERR_PORT_IN_USE`, instance 1 up).
 
+> Pin reality (delta 2026-09-22, S1.7 edge test, spec follows code): at
+> the pinned fork commit a bind collision makes the engine exit **1** in
+> ~0.2 s ("couldn't bind HTTP server socket … exiting due to HTTP server
+> error"), and the bind attempt happens BEFORE `load_model` — a collided
+> instance costs no VRAM and never reaches the KV allocation. The S1.5
+> `ERR_PORT_IN_USE` exit 3 is the UNIT-LAYER contract: `bonsai2-server@i`'s
+> ExecStart is the `docker run` wrapper, and the manager's skip logic
+> (S1.5 "instance skipped, others proceed") keys off the unit's reported
+> failure, not the engine's raw code. The @gpu edge test
+> (`tests/gpu/test_port_collision_1_10.py`, MAP 1.10) asserts the
+> container-level half (fast clean exit, no OOMKilled, bind line in the
+> log, instance 1 up); the exit-3 mapping itself lands with the S2
+> units.
+
 ### 1.8 Acceptance criteria (runnable)
 
 1. `install.sh` produces a `subagent-engine.yaml` with a valid model
