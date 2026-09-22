@@ -1,0 +1,412 @@
+# qwen-tory38
+
+A two-model agent stack for a single GB10-class box (Blackwell, aarch64,
+~120 GB unified LPDDR5X):
+
+- **main agent** — qwen3.8-27b NVFP4, served by the pre-existing SGLang
+  stack at `:30001`. External infrastructure: consumed, never modified.
+- **subagents** — Ternary-Bonsai-2-27B (ternary weights, GGUF), served as
+  N instances of the prism-ml llama.cpp fork (`bonsai2-server:<tag>`
+  image, one container per instance under systemd) in the VRAM the main
+  stack leaves behind.
+
+The main agent drives subagents **only** through deterministic bash
+control scripts (`bonsai2-*`, the S3.2 command surface) governed by a
+harness skill (`bonsai2-harness`) that encodes work-allocation doctrine.
+A bench framework measures where the subagents actually win. Everything
+installs by one command (`install.sh`).
+
+> **Status:** implementation in progress. Sections marked
+> `<!-- PENDING (MAP n.n) -->` are structural placeholders for work that
+> lands in a later phase — settle them as the referenced MAP items close.
+> The authoritative design is `SPEC.md` (locked); the authoritative
+> progress is `MAP.md` (the ledger). This README must not contradict
+> either; if it does, the spec/map wins and the README gets fixed.
+
+## Doc map
+
+| doc | role |
+|---|---|
+| `SPEC.md` | master design — locked; if code and spec disagree, fix the spec and record the delta |
+| `MAP.md` | implementation ledger — phased checkboxes + session log; the first unchecked item is the frontier |
+| `ARTIFACTS.md` | trackability ledger for everything that lives outside the repo (weights, images, units, pins) |
+| `AGENTS.md` | guidance for coding agents working in this repo (workflow, VRAM audit rule, machine rules) |
+| `idea.txt` | original intent — history, not requirements |
+
+## Architecture at a glance
+
+<!-- PENDING (MAP P2/P3 + 7.5 closeout): add the diagram (scripts/diagram_qwen38_stack.py
+     generates one) and the container/instance topology figure here once the
+     manager + harness scripts exist and the topology is real, not designed. -->
+
+```
+        main stack (external, :30001)
+        qwen38-sglang ── qwen38-27b NVFP4 @ SGLang
+                         │
+                         │  deterministic bash only (S3.2)
+                         │  + bonsai2-harness skill (S4)
+                         ▼
+             bonsai2-sglang.service
+             (instance manager)
+                │            │
+                ▼            ▼
+        bonsai2-server@0   bonsai2-server@i   (… up to N)
+        :30101             :30101+i
+        llama-server, OpenAI-compatible
+```
+
+Division of labor (locked): main = smarter, longer horizon, longer
+context, planning, review, verification, tool chains, cross-file
+coherence. Subagents = cheap parallel bulk work: code-gen chunks,
+per-file/section analysis, data transformation, draft writing, test
+execution, diff summarization. Subagent output is a **self-report** —
+main verifies before use, always.
+
+## VRAM budget (this box — recompute at install)
+
+<!-- Settled at MAP 1.7 (the 2026-09-21 S1.4 re-anchor). N = 2 default;
+     was 3 under the original FP16-era estimate. The install recomputes
+     from live state on other boxes. -->
+
+| component | footprint |
+|---|---|
+| main stack (qwen3.8-27b NVFP4, SGLang, fresh load) | ~76.4 GB |
+| OS + other containers reserved | 8.0 GB |
+| subagent pool | 121.6 − 76.4 − 8.0 = ~37.2 GB |
+| per-instance (PQ2_0, 262K ctx, 8 slots, q4_0 KV) | ~14.08 GB formula → 14.44 GB measured; 14.78 GB budget (+5%) |
+
+`N = floor(37.2 / 14.78) = 2` default (two instances load ~28.8 GB,
+~8.4 GB headroom). N=0 is a valid result (main-only mode, SPEC S2.4).
+N is raised only on evidence: full M1–M8 bench pass with the M8 main-
+guardrail green, plus headroom to spare.
+
+**MVP safety rule (standing):** the code is written for N instances,
+but load/test/orchestrate with exactly **1** instance
+(`install.sh --instances 1`) until the end-to-end MVP is proven. The
+1 is a load-time condition, not a code limit. After MVP e2e, load up to
+N by re-running the installer.
+
+**Fresh-load vs idle:** the main stack runs SGLang with
+`sleep_on_idle` — at idle it releases weights/KV to RAM, so a dashboard
+may show it at 8–15 GB. That is *not* the budgeting state. Budgeting is
+always from the fresh-load footprint (recorded at install from the
+SGLang startup log).
+
+## The model + engine
+
+Settled (MAP 1.1–1.6):
+
+- **Engine:** `PrismML-Eng/llama.cpp`, branch `prism`, pinned at
+  `9a9394a8` (recorded in `etc/subagent-engine.yaml` `engine_pin`).
+  Vendored in-repo as the `third_party/llama.cpp` submodule. Upstream
+  llama.cpp has no ternary Bonsai kernels — the fork is the v1 path;
+  the pin moves only via a PR + quick bench.
+- **Weights:** `prism-ml/Ternary-Bonsai-2-27B-gguf` (HF):
+  - `PQ2_0` — 7.21 GB, **v1 default** (fastest decode on Blackwell),
+    sha256 `3907dc16…ec1`, verified in `/opt/bonsai2/cache`.
+  - `PTQ1_0` — 5.95 GB, lower-memory fallback (~18% smaller),
+    sha256 `53107f53…3ee3`, verified in `/opt/bonsai2/cache`.
+  - `mmproj-Q8_0` — 0.63 GB, optional, **not loaded in v1** (text-only).
+- **Images:** `bonsai2-server-build:121a` (build pipeline, MAP 1.2) and
+  `bonsai2-server:1.0` (runtime image, MAP 1.4 — binary + both model
+  files + CUDA 13.0 runtime; content digest pinned as `image.pin`).
+  Full provenance in `ARTIFACTS.md`.
+- **Measured on this box (MAP 1.7/1.8):** cold-load bring-up healthy,
+  16-token completion round-trip ~0.8 s; 8 concurrent completions ×
+  120 s → ~60 t/s aggregate (target ≥ 26.2), zero 5xx.
+
+Per-instance serving command (locked, S1.3 — the container's CMD):
+
+```
+/opt/bonsai2/bin/llama-server \
+  --model /opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf \
+  --ctx-size 262144 \
+  --parallel 8 \
+  --batch-size 2048 \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  --port {port} \
+  --api-key bonsai2-local \
+  --reasoning-format deepseek \
+  --alias "qwen38-27b-subagent"
+```
+
+All instances share the alias; the harness routes by port
+(`30101 + i`, overridable per instance in `subagent-engine.yaml`).
+
+## Prerequisites (supported matrix, verified on this box)
+
+| prereq | requirement | this box |
+|---|---|---|
+| OS | DGXOS / Ubuntu 24.04.4 LTS | 24.04.4, kernel 6.17.0-1021-nvidia |
+| arch | aarch64 | aarch64 |
+| NVIDIA driver | ≥ 580 | 580.159.03 |
+| nvidia-container-toolkit | present | 1.19.1 |
+| docker | runtime + build | 29.2.1 (BuildKit) |
+| unified memory | ≥ 96 GiB (warn below, install continues) | 121.6 GiB |
+| python | ≥ 3.10 (bench runner) | 3.12.3 |
+| free disk on /opt | ≥ 20 GB | ~350 GB |
+
+Hard-fail row → named ERR, exit ≠ 0, nothing installed. The
+unified-memory row is warn-only: `WARN_MEMORY_BELOW_MATRIX`, N
+recomputed, install continues (SPEC S6.2).
+
+## Repository layout
+
+The repo mirrors the host `/opt/bonsai2/` layout 1:1 so source and
+deploy paths never diverge; `install.sh` (Phase 6) is the deployer.
+
+```
+install.sh                  # S6.3 one-command installer (Phase 6) — PENDING
+bin/                        # -> /opt/bonsai2/bin/  (source tree)
+    bonsai2_model_fetch.py  #   model download + SHA256 verify (MAP 1.3, done)
+    bonsai2_build_image.py  #   runtime-image build orchestrator (MAP 1.4, done)
+    bonsai2_render_config.py#   subagent-engine.yaml writer + validator (MAP 1.5, done)
+    bonsai2_vram.py         #   S1.4 VRAM formula, pure functions (MAP 1.6, done)
+    (manager + S3.2 control scripts land in MAP P2/P3)
+etc/                        # -> /opt/bonsai2/etc/ TEMPLATES; install.sh
+    subagent-engine.yaml    #   renders the four runtime YAMLs from detected
+    serving.yaml            #   box state (pins, hashes, N) — never hand-edit
+    harness.yaml            #   the rendered files
+    bench.yaml
+units/                      # -> /etc/systemd/system/ (S2.2; MAP 2.4) — PENDING
+    bonsai2-sglang.service
+    bonsai2-server@.service
+image/                      # Dockerfiles: build pipeline + runtime image
+bench/                      # S5 bench framework source (run.py, score/,
+    goldens/                #   goldens + M4 seeded-bug fixture) — PENDING (MAP P4)
+tests/                      # hermetic default: python3 -m unittest discover -s tests
+    gpu/                    # @gpu tests ONLY, via tests/run_gpu.sh
+third_party/llama.cpp/      # fork submodule, pinned (MAP 1.1)
+scripts/                    # repo workflow tooling (gate.sh, review.sh,
+                            #   install-hooks.sh; not host-installed)
+.githooks/pre-commit        # pre-commit tripwire (bash -n/shellcheck, ruff,
+                            #   secret scan, then the full gate)
+```
+
+## Configuration
+
+Four YAMLs, all **templates in-repo** — `install.sh` writes the real
+files to `/opt/bonsai2/etc/` with computed pins, hashes, and N. Never
+hand-edit the deployed files; re-run the installer instead.
+
+- `etc/subagent-engine.yaml` (S1.6) — engine pin, image pin, model
+  files + SHA256, instance count/ports/ctx/slots, per-instance budget,
+  `kv_cache: q4_0`, sampling, alias, api key.
+- `etc/serving.yaml` (S2.6) — main-stack container/endpoint/footprint,
+  OS reserve, manager settings, `boot_target_s` (written back from the
+  measured cold-boot test).
+- `etc/harness.yaml` (S3.6) — main endpoint + probe, results/dedup dirs,
+  `queue_wait_max_s`, deadlines, main-t/s guardrail.
+- `etc/bench.yaml` (S5.7) — scenario matrix, quick set, repetitions,
+  regression threshold, goldens dir.
+
+<!-- PENDING (MAP 1.5 done, but fill when install.sh lands, MAP 6.2): show a
+     snippet of the RE-NDERED (deployed) subagent-engine.yaml from a real
+     install, so readers see the difference between template and rendered. -->
+
+## Installation
+
+<!-- PENDING (MAP P6 / SPEC S6): this is the one-command install, the Phase 6
+     deliverable. Fill in when install.sh exists. Settled shape (S6.3, S6.4):
+
+       sudo ./install.sh            # idempotent; see S6.4
+       sudo ./install.sh --instances 1   # MVP single-instance rollout
+       sudo ./install.sh --instances N'  # load to N after MVP e2e
+       sudo ./install.sh --force-config  # regenerate YAMLs regardless of drift
+       sudo ./install.sh --refresh-main  # after a main-stack upgrade (S6.5)
+       sudo ./install.sh --rollback state-<ts>.yaml
+
+     Ordered steps: prereq checks → build-or-verify image + record digest →
+     download model (skip on SHA match) → detect main-stack fresh-load
+     footprint (SGLang log, read-only; fallbacks: live cgroup, then the
+     76.4 default + WARN_MAIN_STACK_DEAD) → compute N (S1.4, with S2.4
+     PTQ1_0/ctx-halve fallbacks) → write the four YAMLs → install units →
+     start manager → health checks (180 s budget) → stack-ready report.
+     Exit codes: 0 (full or main-only), 4 (live-margin OOM), 3 (arch
+     mismatch), 2 (config). Idempotent re-run with no drift reports
+     "unchanged" (zero restarts, zero downloads).
+-->
+
+## The main-agent API (S3.2 control scripts)
+
+<!-- PENDING (MAP P3 / SPEC S3): the scripts land in Phase 3. Until then this
+     section is the LOCKED design. Command surface (S3.2, all under
+     /opt/bonsai2/bin/, config from /opt/bonsai2/etc/harness.yaml, env
+     overrides BONSAI2_CONFIG / BONSAI2_RESULTS_DIR):
+
+     bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
+                    [--ctx N] [--deadline SECS] [--out FILE]
+                    [--priority low|normal|high]
+                    -> JSON. Submits to the least-loaded healthy instance.
+     bonsai2-steer  <TASK_ID> -m MESSAGE [--wait SECS]
+     bonsai2-cancel <TASK_ID> [--graceful]
+     bonsai2-status
+     bonsai2-list-instances
+     bonsai2-collect <TASK_ID>  (task JSON + answer / reasoning / usage)
+     bonsai2-bench    [--scenario NAME] [--quick]
+     bonsai2-unload   [--all | --instances i[,i,...]]
+     bonsai2-reload   [--all | --instances i[,i,...]]
+     bonsai2-health   (raw /run/bonsai2/health.json, pretty)
+
+     Output contract: stdout = one JSON object (machine); stderr = human
+     text, never parsed. Status schema:
+
+       {"stack": "healthy|degraded|main-only",
+        "instances": [{"i": 0, "port": 30101,
+                       "state": "healthy|degraded|bdown|bfailed|bunloaded",
+                       "ctx": 262144, "ctx_reduced": false,
+                       "slots_in_use": 3, "slots_total": 8}],
+        "main_endpoint": "http://localhost:30001",
+        "main_healthy": true,
+        "main_only_reason": "budget_zero"}
+
+     Exit-code closed set (12 codes, S3.2): 0 success/queued · 2
+     malformed args · 3 port conflict · 4 engine-level failure · 5 ctx
+     too long · 8 deadline/queue wait · 20 task done · 21 task failed ·
+     22 task timed out · 80 no subagent instances (main-only) · 82 main
+     endpoint unhealthy · 84 manager down. Any other code is a harness
+     bug — the hermetic suite asserts exactly this set.
+
+     Routing: least-loaded, deadline-aware (fewest slots in use, tie-
+     break lowest i); queue FIFO with priority preemption up to
+     queue_wait_max_s; one slot per task for its whole lifetime; spawn
+     dedup on prompt hash + flags, 24 h TTL.
+-->
+
+## The harness skill (`bonsai2-harness`)
+
+<!-- PENDING (MAP P5 / SPEC S4): the doctrine skill lands in Phase 5. Until
+     then the locked design:
+
+     - A standard SKILL.md text skill, installable into Hermes / pi / any
+       agent runtime that loads text skills and runs bash. Loaded on
+       demand, in any session where the main agent may offload work.
+     - Its command reference is exactly the S3.2 surface (it never
+       invents commands).
+     - Work-allocation doctrine (S4.2): main = multi-step plans,
+       architecture, cross-file coherence, long-context reading, live
+       tool-feedback loops, and ALL verification of subagent claims.
+       Subagents = bounded code-gen, per-file analysis fan-out, test
+       execution, drafts, diff-review drafts. Every doctrine row cites
+       a bench scenario id [M#] — no citation, no claim.
+     - Session economy (S4.3): ≤ 6 of 8 slots busy per instance; batch
+       spawns in one turn then one collect loop; short main turns while
+       subagents run; steer instead of cancel+respawn past 50 %.
+     - Cost doctrine (S4.4): dispatch iff estimated dispatch cost (
+       prefill + decode + main-side verification) beats the same task
+       on main; two consecutive bench-confirmed losses on a task shape
+       flip that row to main until re-benched.
+     - Failure doctrine (S4.5): one paragraph per S3.2 exit code.
+     - A doctrine-audit script keeps skill claims ↔ bench rows ↔ script
+       exit codes consistent; a failing audit blocks the skill PR.
+-->
+
+## Bench framework
+
+<!-- PENDING (MAP P4 / SPEC S5): runner + scorers + goldens land in Phase 4.
+     Settled scope (S5):
+
+     - Measures BOTH axes, t/s-primary: raw throughput (decode/prefill
+       t/s, wall time) and task success with a named rubric per task
+       type. No LLM-judge in v1.
+     - Scenario matrix M1–M8 (S5.2): M1 single-file code-gen · M2 test
+       execution batch · M3 fan-out doc analysis · M4 diff review
+       (seeded 10-bug fixture) · M5 long-context doc read (60K tokens)
+       · M6 main-only control of M1–M5 · M7 all-instances saturation ·
+       M8 contention (main at working load + subagents at working load;
+       main-t/s guardrail ≤ main_guardrail_pct regression).
+     - Runner: bench/run.py (Python, stdlib + requests only), box-state
+       snapshot per run, JSON rows + committed markdown summary in
+       bench-results/, 7-day rotation + 1 GB cap, a flock so two benches
+       never overlap. Exit 0 even on scenario-level failure (the
+       verdict is data); exit 2 on bad config.
+     - Re-bench policy (S5.5): quick bench (M1+M2+M7) gates every
+       engine-pin bump and model re-download (> 10 % t/s or auto-rubric
+       regression blocks the PR); full M1–M8 on quant/revision changes
+       and when a doctrine row flips.
+-->
+
+## Lifecycle & operations
+
+<!-- PENDING (MAP P2 + P6 / SPEC S2, S6): manager + units land in Phase 2,
+     one-command ops in Phase 6. Settled design:
+
+     - units: bonsai2-sglang.service (the instance manager, Type=notify,
+       sd_notify) + bonsai2-server@i.service template — one container
+       per instance, verbatim the main stack's configuration shape
+       (docker run under systemd, host networking, --memory = per-
+       instance budget, CPUQuota=64%, Restart=on-failure ×3 → bfailed,
+       ExecStartPre= docker rm -f). Wants= (not Requires=) on the main
+       stack.
+     - boot order: main stack first (pre-existing units), then the
+       manager starts the granted instances in order, each healthy
+       before the next. Target: all healthy ≤ 180 s after multi-user.
+     - two-tier VRAM gate at boot: the planning tier (S2.3) decides N'
+       from the live main-container cgroup; the allocation tier (S1.4)
+       is a stricter per-instance pre-spawn gate (free ≥ footprint +
+       1.0 GB). i > 0 shortfall → partial load, exit 0; i = 0 shortfall
+       after a granted N' ≥ 1 → exit 4 ERR_VRAM_OOM.
+     - N=0 / main-only mode (S2.4): PTQ1_0 quant retry, then ctx-halve
+       retry, then main-only — health.json reports
+       {"instances": 0, "mode": "main-only",
+        "reason": "budget_zero" | "user_unloaded"}; install still exits 0.
+     - health probe: every 10 s, /v1/models (200 + alias) AND a
+       16-token completion < 10 s; two consecutive fails → degraded,
+       five → restart attempt.
+     - VRAM drift watch (S2.5): 5-min recheck; an instance's cgroup
+       sustained > 30 s over its cap → that instance's ctx halves
+       (multiple of 8192, floor 8192), container restarted in place,
+       ctx_reduced: true in health.json. No context-grow, no instance
+       retirement in v1; explicitly unloaded (bunloaded) instances are
+       never re-spawned by the drift watch.
+     - state files /opt/bonsai2/etc/state-<ts>.yaml (last 5 kept) for
+       --rollback; upgrade procedure in S6.5.
+-->
+
+### VRAM audit rule (before ANY agent/model loads)
+
+Before spawning, loading, or running anything that touches the GPU — a
+review, a subagent instance, a bench run, an `@gpu` test — audit
+resources **at this moment**:
+
+```bash
+nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
+free -h | sed -n '1,2p'
+docker stats --no-stream --format 'table {{.Name}}\t{{.MemUsage}}'
+```
+
+Free pool = 121.6 GiB − main-stack live usage (the main container may be
+asleep via sleep_on_idle — read its cgroup, don't assume 76.4) − other
+containers − 8.0 reserved. A load needs `instance_footprint + 1.0 GB`
+margin. Short on margin → don't load, don't start the agent. And: no
+uncommitted changes on the box you are about to stress — commit or
+stash first, so a crash never eats work.
+
+### Testing
+
+- Hermetic default: `python3 -m unittest discover -s tests` (no GPU, no
+  network, stdlib only).
+- `@gpu` tests live only in `tests/gpu/`, run via `tests/run_gpu.sh`
+  (which snapshots nvidia-smi into `test-logs/gpu-<ts>.log` first).
+  Never run in parallel with a live review/subagent session (one-box
+  constraint — the VRAM audit rule above).
+- Every test asserts a named acceptance criterion from SPEC.md; no
+  vibes.
+
+## Workflow (how changes land in this repo)
+
+All code changes follow `senior-git-1.0` end to end: G0 orient → G1
+plan → G2 implement + `./scripts/gate.sh` → G3 Gitea PR +
+`./scripts/review.sh` (isolated reviewer) + disposition loop → G4 human
+merge gate. Gitea remote: `blckwell/qwen-tory38` (ssh `gitea-local:2222`).
+Pre-commit hook (`./scripts/install-hooks.sh` once per clone) runs the
+lint/secret-scan tripwire on every commit; the G2 gate is the formal
+check.
+
+## Out of scope (locked)
+
+LLM-to-LLM subagent orchestration · main-stack changes (consume
+:30001, never modify) · vision / mmproj · multi-box v1 · fine-tuning ·
+LLM-judge bench mode · kill-for-drift instance retirement · stateful
+subagents.
