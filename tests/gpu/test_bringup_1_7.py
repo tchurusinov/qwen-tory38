@@ -44,7 +44,9 @@ CONTAINER = "bonsai2-test-i0"
 PORT = 30101  # S1.3 instance 0 (the image's baked default)
 API_KEY = "bonsai2-local"  # S1.3 --api-key (local-only)
 ALIAS = "qwen38-27b-subagent"  # S1.3 --alias
-MEMORY_CAP_GB = 14.78  # S2.2 --memory = S1.4 per_instance_budget_gb (re-anchored)
+# S2.2 --memory = S1.4 per_instance_budget_gb — read from the YAML at
+# test time (the same source as the VRAM band, so the two can't drift
+# if the template is edited; the re-anchored value is 14.78).
 SHM_SIZE = "4g"  # S2.2 shape
 READY_TIMEOUT_S = 180
 READY_POLL_S = 2.0
@@ -119,9 +121,15 @@ def _gpu_compute_apps_mib() -> dict:
     out = {}
     for line in r.stdout.splitlines():
         line = line.strip()
-        if line.endswith(" MiB") and "," in line:
-            pid, mib = line.split(",")
-            out[int(pid.strip())] = int(mib.split()[0])
+        if not line.endswith(" MiB") or "," not in line:
+            continue
+        parts = line.split(",", 1)
+        if len(parts) != 2:
+            continue
+        pid_s, mib_s = parts[0].strip(), parts[1].strip()
+        if not (pid_s.isdigit() and mib_s.endswith(" MiB")):
+            continue  # header row / unexpected shape — skip, don't die
+        out[int(pid_s)] = int(mib_s.split()[0])
     return out
 
 
@@ -144,6 +152,7 @@ class TestBringUp(unittest.TestCase):
         # Pre-launch baseline: the main-stack PIDs are subtracted out so
         # the delta is this instance only.
         baseline = _gpu_compute_apps_mib()
+        memory_cap_gb = _instance_budget_gb()
         # S2.2 shape: host net, memory cap, gpus, ipc, shm. The image's
         # baked CMD carries the S1.3 serving flags (no --entrypoint: a
         # bare `docker run img --flag` breaks under the nvidia
@@ -157,9 +166,9 @@ class TestBringUp(unittest.TestCase):
             "--network",
             "host",
             "--memory",
-            f"{MEMORY_CAP_GB}g",
+            f"{memory_cap_gb}g",
             "--memory-swap",
-            f"{MEMORY_CAP_GB}g",
+            f"{memory_cap_gb}g",
             "--shm-size",
             SHM_SIZE,
             "--gpus",
