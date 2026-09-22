@@ -120,6 +120,13 @@ def _load_vram():
 
 
 vram = _load_vram()
+# G3 PR #10 round-5 P2 (note-only): loading the manager here runs its
+# module-level `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))`
+# (bin/), so `import bonsai2_vram` inside the manager resolves against the
+# DEPLOY bin/ dir — which is the deploy layout by design (the manager is
+# deployed to /opt/bonsai2/bin/, next to bonsai2_vram.py). A future
+# `bin/bonsai2_vram.py` shadow in the test CWD would silently win; accepted
+# because bin/ is the single source of truth and tests read from it.
 mgr = _load_manager()
 
 
@@ -345,6 +352,53 @@ class TestMainExitCodes(unittest.TestCase):
             any(s.startswith("READY=") for s in notified),
             "exit-4 boot must NOT send READY=1",
         )
+
+    def test_settle_run_sends_ready_1_before_settle_window(self):
+        """G3 round-5 P1: a --settle boot (instances or main-only) exits 0
+        after the settle window — but it still sends READY=1 BEFORE the
+        window. Under a user-scope Type=notify start an exit-0 with no
+        prior READY=1 is a FAILED START in systemd notify semantics."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        notified: list[str] = []
+
+        def fake_notify(state):
+            notified.append(state)
+
+        td = tempfile.mkdtemp()
+        try:
+            with (
+                mock.patch.dict(os.environ, self._env(td), clear=False),
+                mock.patch.object(mgr, "load_config", return_value=cfg),
+                mock.patch.object(mgr, "read_total_gb", return_value=121.6),
+                mock.patch.object(
+                    mgr, "main_used_gb", return_value=(76.4, "recorded footprint")
+                ),
+                mock.patch.object(mgr, "main_healthy", return_value=True),
+                mock.patch.object(
+                    mgr,
+                    "spawn_sequence",
+                    return_value=(
+                        mgr.EXIT_OK,
+                        [0],
+                        "full load: 1 instance(s) spawned",
+                        {0: 0},
+                    ),
+                ),
+                mock.patch.object(mgr, "instance_healthy", return_value=True),
+                mock.patch.object(mgr, "write_health"),
+                mock.patch.object(mgr, "notify_sd", side_effect=fake_notify),
+                mock.patch.object(mgr, "run_probe_loop", return_value=0),
+            ):
+                rc = mgr.main(["--settle", "0.1"])
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+        self.assertEqual(rc, 0, "settle run exits 0 after the window")
+        self.assertIn("READY=1", notified, "settle boot must send READY=1")
+        # READY=1 must come AFTER the spawn/booted status, not before it.
+        ready_idx = notified.index("READY=1")
+        booted_idx = next(i for i, s in enumerate(notified) if "booted" in s)
+        self.assertGreater(ready_idx, booted_idx, "READY=1 after the booted STATUS=")
 
 
 # --------------------------------------------------------------------------

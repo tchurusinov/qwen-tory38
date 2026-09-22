@@ -504,11 +504,19 @@ def instance_healthy(port: int, alias: str, api_key: str) -> bool:
 
 
 def main_healthy(endpoint: str, timeout: float = 5.0) -> bool:
-    """The main endpoint is UP. `GET /v1/models` on the main stack returns
-    401 (up, demanding the main's api key) or 200 — both mean 'the engine
-    is answering'. Connection refused / timeout / non-HTTP error = down.
-    (The manager is a probe of liveness, not an auth check — it does not
-    hold the main stack's key, so 401 is the healthy shape here.)"""
+    """The main endpoint is UP (liveness probe, S2.1). `GET /v1/models`
+    on the main stack returns 401 (up, demanding the main's api key) or
+    200 — both mean 'the engine is answering'. Any other 4xx is also
+    treated as UP (the server answered; a 404/409 there means the route
+    moved, not that the engine is down — liveness, not auth/route check,
+    is all S2.1 requires of this probe; a strict 401-only shape would
+    misreport a healthy main whose /v1/models moved). 5xx, connection
+    refused, timeout, non-HTTP error = down. The manager does not hold
+    the main stack's key, so 401 is the expected healthy shape here.
+    Timeout: a single hard 5 s urlopen cap (no separate read/connect
+    split) — noted in the docstring only; the probe-loop blocking cost
+    of a black-holed main is accepted in the skeleton (G3 PR #10 r5 P2,
+    revisit if MAP 2.6 adds concurrent probes)."""
     req = urllib.request.Request(endpoint.rstrip("/") + "/v1/models", method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -934,6 +942,13 @@ def main(argv: list[str] | None = None) -> int:
         write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
         notify_sd("STATUS=bonsai2-manager: main-only (budget_zero)")
         if args.settle > 0:
+            # The settle path exits 0 after settle_s, but still marks
+            # readiness FIRST: under a user-scope Type=notify start (the
+            # @gpu harness shape) an exit-0 with no prior READY=1 is a
+            # FAILED START in systemd notify semantics — consistent with
+            # the non-settle path below and the instances settle path
+            # (G3 PR #10 round 5 P1).
+            notify_sd("READY=1")
             return run_probe_loop(
                 cfg,
                 [],
@@ -968,6 +983,10 @@ def main(argv: list[str] | None = None) -> int:
     notify_sd(f"STATUS=bonsai2-manager: booted {len(spawned)} instance(s)")
 
     if args.settle > 0:
+        # Readiness before the settle window: same user-scope Type=notify
+        # FAILED-START rationale as the main-only settle branch above
+        # (G3 PR #10 round 5 P1) — a settle run is a normal, ready boot.
+        notify_sd("READY=1")
         return run_probe_loop(
             cfg,
             spawned,
