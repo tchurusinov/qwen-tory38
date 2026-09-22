@@ -82,14 +82,16 @@ bench results (S5), not from vibes.
 | flash draft (qwen3.8-0.8B-NVFP4-dflash) | ~1.5 GB | image config (draft model) |
 | CUDA ctx / runtime / cuda-graph overhead | ~11.7 GB | derived residual so rows sum to the observed total (76.4 − 27.9 − 17.9 − 17.4 − 1.5) |
 | **main stack total** | **~76.4 GB** | SGLang log at fresh load: 124.546 GB pool − 48.18 GB `available_gpu_mem` (authoritative for the budget) |
-| per bonsai2 instance (PQ2_0, 262K ctx, 8 slots) | ~11.0–11.5 GB | 7.21 GB weights + 3.7–4.2 GB KV (community GB10 bench, same arch) |
+| per bonsai2 instance (PQ2_0, 262K ctx, 8 slots, q4_0 KV) | ~14.0–14.5 GB | 7.21 GB weights + ~6.9 GB q4_0 KV + CUDA overhead (measured 14.44 GB on this box, MAP 1.7) |
 | OS + system reserved | 8.0 GB | install-time policy, overridable (host OS, the other resident containers ~2 GB, Xorg, page-cache floor) |
 | **install-time budget for bonsai** | **~37.2 GB** | 121.6 − 76.4 − 8.0 |
 
 `N = floor(budget_for_bonsai / per_instance_footprint)` with the worked
-example: `floor(37.2 / 11.5) = 3` instances, ~32.7 GB loaded (3 × 10.91),
-~4.5 GB headroom. N=0 is a valid result (main-only mode; see S2.4).
-Default N = 3 (safe start, user decision 2026-09-20); whether N is raised
+example: `floor(37.2 / 14.78) = 2` instances, ~28.8 GB loaded (2 × 14.44),
+~8.4 GB headroom. N=0 is a valid result (main-only mode; see S2.4).
+Default N = 2 (safe start; the 2026-09-21 S1.4 re-anchor dropped it from
+3 — the measured q4_0 footprint is 14.44 GB, not the original 10.91 GB
+estimate); whether N is raised
 later is decided by evidence: M8 guardrail passes at full load (S5.9 #3)
 + headroom to spare (S6.5).
 
@@ -116,7 +118,7 @@ on other boxes the install recomputes from live `nvidia-smi`/
 
 **Subagent-pool floor + rollout (locked, from idea.txt):** idea.txt
 sets the floor "at least 40 gbs vram for bonsai subagents"; the
-measured fresh-load headroom here is 37.2 GB, so N = 3 loads ~32.7 GB —
+measured fresh-load headroom here is 37.2 GB, so N = 2 loads ~28.8 GB —
 deliberately *below* the floor line, a safe start; N is raised only on
 evidence (see the line above). Rollout is phased: build and verify with
 **1 instance** (`install.sh --instances 1`, S6.3), then load up to N by
@@ -208,10 +210,11 @@ v1, re-pinned on re-bench (S5.5).
   --ctx-size 262144 \
   --parallel 8 \
   --batch-size 2048 \
-  --no-prompt \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
   --port {port} \
   --api-key bonsai2-local \
-  --reasoning-format deepseek_r1 \
+  --reasoning-format deepseek \
   --alias "qwen38-27b-subagent"
 ```
 
@@ -221,6 +224,24 @@ main stack's `--network host`), the model baked into the image at
 `/opt/bonsai2/models/`, the S2.2 memory cap applied at the container
 level (`--memory` + cgroup `MemoryHigh`).
 
+> Pin reality (delta 2026-09-21, S1.7 bring-up, spec follows code):
+> at the pinned fork commit the two earlier flags do not exist.
+> `--no-prompt` is not a valid `llama-server` argument (the server is
+> stateless per request; the demo's launcher never sets it) and
+> `--reasoning-format` accepts only `none | auto | deepseek |
+> deepseek-legacy` — `deepseek_r1` is rejected at arg-parse. This
+> command was measured live on the box and is the working set.
+>
+> `--cache-type-k/v q4_0` (delta 2026-09-21, S1.4 re-anchor): the KV
+> cache dtype is not part of the weights. The default (FP16) KV at
+> 8×262144 reserves ~16 GiB, giving a measured footprint of ~24 GiB —
+> far above the S1.4 per-instance budget and infeasible at N ≥ 2 on the
+> 37.2 GB pool. q4_0 KV (the demo's documented long-context-on-tight-
+> memory path, `BONSAI_KV4=1`) measures ~6.4 GiB KV and a total
+> footprint of 13.45 GiB (14.44 GB), which is what the re-anchored S1.4
+> constant and the N computation are built on. Decode is marginally
+> slower than FP16 KV (a memory choice, not a speed one).
+
 - `--ctx-size 262144`: matches the model's 262K hybrid-attention ceiling
   (131072 effective per HF card; 262144 verified to work in the demo —
   the demo's `server.env` uses exactly `LLAMA_ARG_CTX_SIZE=262144`).
@@ -229,9 +250,13 @@ level (`--memory` + cgroup `MemoryHigh`).
 - `--parallel 8`: 8 concurrent slots per instance, matching the demo's
   `LLAMA_ARG_PARALLEL=8`. `max_num_seqs` in `subagent-engine.yaml` is the
   override (1–64, default 8).
-- `--reasoning-format deepseek_r1`: content/reasoning split, so the main
-  agent can consume `reasoning_content` separately (the demo's exact
-  choice).
+- `--cache-type-k/v q4_0`: 4-bit KV cache (the S1.4 re-anchor; see the
+  pin-reality note). Without it the KV defaults to FP16 and the instance
+  footprint doubles.
+- `--reasoning-format deepseek`: content/reasoning split, so the main
+  agent can consume `reasoning_content` separately (the pin's
+  content/reasoning value; `deepseek-legacy` would instead leave raw
+  `think` tags in `message.content`).
 - `--alias`: the OpenAI model id. All instances share the alias
   `qwen38-27b-subagent`; harness routes by port (S3.3).
 - Ports: `30101 + i` for instance i (0-indexed), overridable per instance
@@ -243,25 +268,29 @@ level (`--memory` + cgroup `MemoryHigh`).
 ```
 instance_footprint_GB = weights_GB + kv_GB
 kv_GB = slots * ctx_size * per_slot_per_token_GB
-per_slot_per_token_GB = 0.00000176   # derived from the community GB10 bench
-                                      # anchor: 3.7 GB KV at 8 slots x 262144 ctx
-                                      # (8 x 262144 x 0.00000176 = 3.69 GB)
+per_slot_per_token_GB = 0.000003277  # measured q4_0 KV on this box (MAP 1.7):
+                                     # 6.87 GB KV at 8 slots x 262144 ctx
+                                     # (8 x 262144 x 0.000003277 = 6.87 GB).
+                                     # S1.3 pins --cache-type-k/v q4_0; the old
+                                     # 0.00000176 (3.7 GB KV) was the FP16 /
+                                     # community-bench anchor and under-predicted
+                                     # the full-ctx footprint on this box.
 ```
 
-Sanity: 7.21 + 3.7 = 10.91 GB ≈ measured 10.8 GB in the community GB10
-bench (bench reports 29.16 t/s decode @ ~4800 t/s prefill, same box
-class, CUDA arch 121a). Per-instance budget in install: `11.5 GB`
-(10.91 + 5% margin). `N = floor(budget_for_bonsai / 11.5)`, clamped to
-[0, 8] (8 = 64 slots total, the demo's tested ceiling for one model);
-S0's default on this box is N = 3 (worked example:
-`floor(37.2 / 11.5) = 3`).
+Sanity: 7.21 + 6.87 = 14.08 GB formula footprint ≈ **measured 14.44 GB
+(13.45 GiB)** total (incl. ~0.36 GB CUDA ctx/runtime overhead) for the
+q4_0 instance, MAP 1.7 @gpu on this box. Per-instance budget in install:
+`14.78 GB` (14.08 + 5% margin). `N = floor(budget_for_bonsai / 14.78)`,
+clamped to [0, 8] (8 = 64 slots total, the demo's tested ceiling for one
+model); S0's default on this box is N = 2 (worked example:
+`floor(37.2 / 14.78) = 2`).
 
 **Boot-time OOM policy (two-tier check, actor = the instance manager):**
 S2.3's budget (`floor(free_gb / per_instance_budget_gb)`) is a *planning*
 tier that decides N' before anything boots. On top of it, before the
 manager actually spawns instance i, it runs a *stricter allocation* tier:
 `nvidia-smi`/cgroup free ≥ `instance_footprint_GB + 1.0 GB` (the true
-footprint + a 1.0 GB spike margin, not the 11.5 GB planning budget).
+footprint + a 1.0 GB spike margin, not the 14.78 GB planning budget).
 The free-memory read is bounded: 5 s timeout per probe, one retry; on
 a second timeout the tier treats free as 0 for that spawn (the i > 0
 partial-load rule applies; the value is re-read on the S2.5 5-min
@@ -319,11 +348,12 @@ model:
   fallback_sha256: <pinned-at-install>
   fallback_size_bytes: <bytes>
 instances:
-  count: 3                  # S0 default on this box (worked example: floor(37.2/11.5) = 3)
+  count: 2                  # S0 default on this box (worked example: floor(37.2/14.78) = 2; the 2026-09-21 S1.4 re-anchor dropped N from 3)
   port_base: 30101
   ctx_size: 262144
   max_num_seqs: 8
-  per_instance_budget_gb: 11.5
+  per_instance_budget_gb: 14.78   # S1.4: 14.08 GB measured q4_0 footprint + 5% margin
+kv_cache: q4_0                   # S1.3 --cache-type-k/v (the S1.4 re-anchor; FP16 default doubles the footprint)
 sampling:                          # locked from model card
   temperature: 1.0
   top_p: 0.9
@@ -332,7 +362,7 @@ sampling:                          # locked from model card
   repeat_penalty: 1.0
   repeat_last_n: 512
   stop_token_ids: [248046, 248044]
-reasoning_format: deepseek_r1
+reasoning_format: deepseek
 alias: qwen38-27b-subagent
 api_key: bonsai2-local
 ```
@@ -364,7 +394,8 @@ api_key: bonsai2-local
    pin only exists on the fork's prism branch; the fork has no
    separate ternary banner line) plus the CUDA backend linked
    (`libggml-cuda` resolvable from the binary, S1.2 `GGML_CUDA=ON`).
-2. N instances (N per S0 table = 3 on this box) all healthy within
+2. N instances (N per S0 table = 2 on this box; the 2026-09-21 S1.4
+   re-anchor dropped it from 3) all healthy within
    120 s of boot; `/v1/models` on each port returns the alias.
 3. Concurrent load test passes (t/s ≥ 26.2, zero 5xx, VRAM delta ±10%).
 4. Kill of one instance → auto-restart < 15 s; others unaffected.
@@ -474,8 +505,8 @@ and on drift (S2.5/S6.4).
 When the S2.3 formula yields N' = 0 at the PQ2_0 budget, install
 retries once with the PTQ1_0
 fallback (S1.1, ~18% smaller): recompute S1.4 with its footprint
-(5.95 GB weights + the unchanged 3.7 GB KV at the same ctx/slots →
-9.65 GB footprint; +5% margin → ~10.2 GB budget) and
+(5.95 GB weights + the unchanged 6.87 GB q4_0 KV at the same ctx/slots →
+12.82 GB formula footprint; +5% margin → ~13.46 GB budget) and
 record the quant in use in `subagent-engine.yaml`. Still 0 → main-only.
 In main-only mode the
 manager stays up, health.json reports `{"instances": 0, "mode":
@@ -1167,7 +1198,7 @@ proceed); exit 2 on config.
   regenerated only if detected state changed (N changed, main fresh-load
   footprint (the recorded `main_stack.footprint_gb`, S6.3 step 4)
   drifted > 5 GB — a policy constant, set below the per-instance budget
-  of 11.5 GB so a drift this size can already change N; the S6.7
+  of 14.78 GB so a drift this size can already change N; the S6.7
   +10 GB test exercises it) — else `--force-config` to regenerate; units
   re-installed without restart if unchanged (`systemctl daemon-reload`
   only on diff).
@@ -1193,7 +1224,7 @@ the main agent or subagent model engine is released")
 - **Subagent model (revision/quant):** same PR flow; full bench (S5.5)
   when the quant or revision changes; the doctrine audit (S4.6) re-runs
   in the same PR.
-- **Raising N (pool expansion, S0 default N = 3 is a safe start):**
+- **Raising N (pool expansion, S0 default N = 2 is a safe start):**
   after a full M1–M8 bench pass with M8 guardrail green (S5.9 #3) and
   headroom to spare, re-run `install.sh --instances N'` (S6.3 step 4)
   with N' recomputed from the live S1.4 budget; the new instances boot

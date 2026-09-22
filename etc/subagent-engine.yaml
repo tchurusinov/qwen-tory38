@@ -20,7 +20,7 @@ engine:
 image:
   pin:
     tag: "bonsai2-server:1.0"
-    sha256: "sha256:0fff95f5a12c03bfb4ad71c5edabbe312bd9d9b090bc5984edfec47c40b849ac"
+    sha256: "sha256:ed6068ae74f67b93b74f80efbcdf642a0f133c4e502103d161b6dcaff65b3cad"
 
 model:
   repo: prism-ml/Ternary-Bonsai-2-27B-gguf
@@ -38,11 +38,12 @@ model:
   fallback_size_bytes: 5946648928
 
 instances:
-  count: 3                  # S0 default on this box (worked example: floor(37.2/11.5) = 3); N recomputed at install (S1.4)
+  count: 2                  # S0 default on this box (worked example: floor(37.2/14.78) = 2; the 2026-09-21 S1.4 re-anchor dropped N from 3)
   port_base: 30101          # instance i -> port 30101+i (S1.3); per-instance override allowed
   ctx_size: 262144          # S1.3 default; drift/drift-watch halves it to a multiple of 8192, floor 8192 (S2.5)
   max_num_seqs: 8           # S1.3 --parallel; bounds 1-64
-  per_instance_budget_gb: 11.5   # S1.4: 10.91 GB footprint + 5% margin
+  per_instance_budget_gb: 14.78   # S1.4 re-anchor (MAP 1.7): 14.08 GB measured q4_0 footprint + 5% margin
+kv_cache: q4_0              # S1.3 --cache-type-k/v (the S1.4 re-anchor, MAP 1.7: measured q4_0 KV on this box; FP16 default doubles the footprint)
 
 sampling:                          # locked from model card (S1.6)
   temperature: 1.0
@@ -53,6 +54,6 @@ sampling:                          # locked from model card (S1.6)
   repeat_last_n: 512
   stop_token_ids: [248046, 248044]
 
-reasoning_format: deepseek_r1   # S1.3: content/reasoning split
+reasoning_format: deepseek      # S1.3: content/reasoning split (the pin's value; was deepseek_r1 pre-2026-09-21, rejected at arg-parse at the pin)
 alias: qwen38-27b-subagent      # S1.3: all instances share the alias; harness routes by port
 api_key: bonsai2-local          # S1.3 --api-key (local-only, not a secret)

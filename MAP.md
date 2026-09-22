@@ -255,7 +255,11 @@ under the manager or the full stack).
       ZeroDivision, N=8 clamp on over-budget), `subagent_budget_gb`
       (S0 table: 121.6 − 76.4 − 8.0 = 37.2) + CLI; hermetic:
       tests/test_vram.py incl. both spec worked examples (10.91 GB
-      footprint; N=3 at 37.2/11.5).)
+      footprint; N=3 at 37.2/11.5).) <!-- 2026-09-22 delta (MAP 1.7): the
+      S1.4 constant re-anchored to 0.000003277 (measured q4_0 KV) and the
+      budget to 14.78 GB; the worked example is now 14.08 GB footprint,
+      N=2 at 37.2/14.78. The body text above is the PR #7 historical
+      record at the original FP16-era 0.00000176 / 11.5 GB values. -->
 - [ ] 1.7 Manual single-instance bring-up: `docker run` per S1.3
       (verbatim flags, `--port 30101`), host networking, memory cap;
       `/v1/models` returns `qwen38-27b-subagent`; 16-token completion
@@ -514,7 +518,257 @@ SPEC.md `status` → `active`.
 - blockers/intricacies: (what bit, spec refs, what the next agent should
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
---->
+-->
+
+### 2026-09-22 — PR #8 G3 loop continued: round-3 disposition posted + round-4 review posted (pending disposition)
+- agent/model: Hermes qwen3.8-27b (session: PR #8 review-loop continuation)
+- phase(s): P1 (1.7/1.8 review loop; no new items)
+- items checked: none (1.7/1.8 still open until G4 merge)
+- machine state:
+  * branch `phase1-bringup-load` head `03521ac` (pushed): `399163c`
+    (G3c r3: P0 review.sh EXCLUDE_SPECS word-split -> EXCLUDE_ARGS array;
+    P1 load-test footprint helpers) + `03521ac` (P1 #214 wiring: the
+    meter helpers are now CALLED in test_load_1_8.py — pre-launch
+    baseline before docker run, post-window delta asserted in the S1.4
+    band [13.30, 15.88] GB, same convention as test_bringup_1_7)
+  * PR #8 comment sequence: 527 R1-raw, 530 R1-disposition, 532 R2-raw,
+    534 R2-disposition, 535 R3-raw, 539 R4-raw (head 399163c,
+    AGENTS.md+README.md excluded via REVIEW_EXCLUDE), 542 R3-disposition
+    (posted post-hoc with a sequencing note; covers all 6 R3 findings)
+  * hermetic 134/134 OK; gate PASS on 03521ac; image
+    bonsai2-server:1.0 unchanged (digest ed6068ae…)
+- R3 dispositions (comment 542): P0 review.sh word-split FIXED
+  (399163c, live pathspec probe); P1 #214 FIXED in two commits
+  (helpers 399163c + call sites 03521ac); P1 #260 WAIVED (probe: the
+  3s settling sleep was already in the tree at the reviewed head —
+  reviewer read past it; band = user-approved); P2 thread-locks NOTED
+  (GIL-atomic, deferred); P2 _completion HTTPError NOTED (real,
+  deferred to @gpu hardening); P2 kv_cache flag-set consistency NOTED
+  (belongs at S6.3/S2.2 install cross-check, deferred)
+- R4 findings (comment 539, head 399163c): 0 P0, 1 P1, 2 P2. All three
+  are re-statements of round-2 user-approved items (P1 = band floor
+  budget-anchored, already waived-by-user R2; P2 wall-time denominator,
+  already fixed+documented R2; P2 = existing-PID growth skew in
+  _gpu_delta_gb — a genuinely new note, P2, follow-up candidate).
+  R4 disposition PENDING. Note: R4 ran on 399163c, BEFORE the 03521ac
+  wiring commit; the P1 #214 class of finding is closed in 03521ac
+  regardless.
+- next (exact order, on `phase1-bringup-load`):
+  1. post the G3c round-4 disposition (comment 539's 3 findings: P1
+     waived-by-user band anchor + cite comment 534; P2 wall-time
+     waived-by-user + cite 534; P2 existing-PID-growth NOTED/deferred
+     — check whether the user wants it wired: _gpu_delta_gb could
+     instead sum new-total minus baseline-total, but that would count
+     main-stack growth against the instance; document or change at
+     user call)
+  2. if clean: G4-comment + human merge gate; then flip MAP 1.7/1.8
+     with the measurement numbers, re-run tests/run_gpu.sh once for the
+     full 10-test green including the new delta assert
+- blockers/intricacies:
+  * the two footprint helpers landed in 399163c DEFINED but not CALLED
+    (half of R3 P1 #214) — the @gpu load test would have passed without
+    ever asserting the VRAM half. Fixed in 03521ac. Lesson: when a
+    review finding says "test X doesn't assert Y", verify the assert
+    CALL SITE, not just that the helpers exist.
+  * PR comment ordering: R3-disposition (542) landed after R4-raw (539)
+    because the round-4 review was posted before the R3 disposition;
+    542 carries an explicit sequencing note so the G4 reader knows the
+    timeline.
+- spec deltas: none (this session is review-loop mechanics + one test
+  assert; no SPEC.md change)
+
+### 2026-09-22 — Phase 1: MAP 1.7/1.8 implemented + measured, S1.3 image re-baked (branch `phase1-bringup-load`, G3 pending)
+- agent/model: Hermes qwen3.8-27b (session: continue of 2026-09-21
+  mid-flight 1.7/1.8 session)
+- phase(s): P1 (1.7 + 1.8 measured + automated; G3 review pending)
+- items checked: NONE yet (1.7/1.8 measured green, code on branch;
+  flip at G4 merge)
+- machine state:
+  * branch `phase1-bringup-load` (off `main` @ `c5ccecf`); the previous
+    session's 7 uncommitted re-anchor files + this session's image
+    re-bake + 2 new @gpu tests, all committed
+  * image `bonsai2-server:1.0` RE-BAKED with the corrected S1.3 CMD
+    (q4_0 KV, deepseek reasoning, no --no-prompt); new digest
+    `sha256:ed6068ae…` stamped in `etc/subagent-engine.yaml` image.pin
+    via `bin/bonsai2_build_image.py` (build log
+    test-logs/build-runtime-20260922-112836.log)
+  * hermetic 134/134 OK; @gpu 10/10 OK (test-logs/gpu-20260922-114519.log)
+  * gate PASS; no probe containers left; main stack untouched
+- LIVE MEASUREMENTS (acceptance evidence, re-run under the new tests):
+  * 1.7 bring-up (test_bringup_1_7.py): `/v1/models` 200 + alias
+    `qwen38-27b-subagent` (cold load, host net, --memory 14.78g,
+    --gpus all, --ipc=host, --shm-size 4g); 16-token completion
+    round-trip < 10 s (measured ~0.8 s); nvidia-smi baseline-subtracted
+    footprint delta in the S1.4 ±10 % band (this run: ~13.4 GiB pid
+    delta — the known 14.44 GB measurement; the ±10 % band is
+    [13.3, 15.88] GB around the 14.78 budget / 14.44 measured)
+  * 1.8 load (test_load_1_8.py): 8 concurrent x 120 s -> 59.7-61.9 t/s
+    aggregate (two runs: 7168/7424 tokens), 0x 5xx, 224-232 ok
+    (target >= 26.2 = 0.9 x 29.16) -> PASS, ~2.3x headroom
+- KEY FINDINGS (why the test asserts what it asserts):
+  1. `--reasoning-format deepseek` + `max_tokens=16` on a trivial
+     prompt ("Say hello") puts ALL 16 tokens in `reasoning_content`
+     (`content: ""`, `finish_reason: length`). The S1.7 16-token
+     acceptance is the ROUND-TRIP (< 10 s), not the text; the test
+     accepts content OR reasoning_content populated (probe 2026-09-22:
+     "What color is the sky?" -> `content: 'Blue'`, finish_reason
+     stop, 32 tokens split across both fields).
+  2. VRAM meter on this GB10 = `nvidia-smi
+     --query-compute-apps=pid,used_memory` MINUS the main-stack
+     baseline (PIDs 5581 + 12262). The `--query-gpu` memory fields are
+     N/A; the cgroup under-charges device KV. The delta function must
+     convert MiB -> GB correctly (first run had a /1048576 MiB->TiB
+     bug — caught by the band assert, 0.013 GB vs the 13.3 floor).
+  3. The image's baked CMD is now the S1.3 verbatim (re-anchored)
+     command; the S2.2 unit will override `--port` per instance at
+     docker-run time.
+- next (exact order, on `phase1-bringup-load`):
+  1. commit (done this session), `./scripts/gate.sh` (PASS), Gitea PR,
+     `./scripts/review.sh` loop (G3), G4 human merge
+  2. after G4: flip MAP 1.7/1.8 checkboxes with the numbers above;
+     add the S1.4 re-anchor note to the stale MAP 1.6 body text
+     (0.00000176 -> 0.000003277, 10.91 -> 14.08, N=3 -> N=2); copy
+     /tmp measurement artifacts into test-logs/ (gitignored) if not
+     already there
+- blockers/intricacies:
+  * nvidia-smi on this GB10: `--query-gpu` memory fields N/A;
+    `--query-compute-apps=pid,used_memory` is the working meter
+    (baseline-subtracted).
+  * Under `--reasoning-format deepseek`, short prompts can be
+    reasoning-only; don't assert on `content` alone for a small
+    max_tokens cap.
+  * Probe containers must be torn down before @gpu re-runs (port
+    30101 collision).
+- spec deltas (on this branch, uncommitted -> commit this session):
+  * S1.3: dropped `--no-prompt`, `deepseek_r1` -> `deepseek`, added
+    `--cache-type-k q4_0 --cache-type-v q4_0` + a "pin reality" delta
+    note (all in the image re-bake commit)
+  * S1.4: `per_slot_per_token_GB` 0.00000176 -> 0.000003277 (measured
+    q4_0 KV); S0 table row ~14.0-14.5 GB measured 14.44 GB; worked
+    example floor(37.2/14.78)=2; S2.4 PTQ1_0 fallback recompute; S6.4
+    drift-threshold budget 11.5 -> 14.78
+  * etc/subagent-engine.yaml: count 3->2, per_instance_budget_gb
+    11.5->14.78, new `kv_cache: q4_0` top-level key,
+    reasoning_format deepseek_r1->deepseek, image.pin re-stamped to
+    sha256:ed6068ae…
+  * bin/bonsai2_vram.py: PER_SLOT_PER_TOKEN_GB 0.000003277,
+    DEFAULT_BUDGET_GB 14.78, docstrings re-anchored
+  * bin/bonsai2_render_config.py: new `kv_cache` validation (pin-
+    supported --cache-type-k/v allowlist)
+  * tests: test_vram.py + test_render_config.py re-anchored (134 total);
+    tests/gpu/test_bringup_1_7.py + test_load_1_8.py NEW;
+    test_runtime_image.py CMD assertion updated to the re-anchored flags
+
+### 2026-09-21 — Phase 1: MAP 1.7/1.8 measured live + S1.3/S1.4 re-anchored (branch `phase1-bringup-load`, mid-flight)
+- agent/model: Hermes qwen3.8-27b (session id 20260921_201742_4d9b75)
+- phase(s): P1 (1.7 + 1.8 measured; implementation mid-flight, uncommitted)
+- items checked: NONE yet (1.7/1.8 still open — measurements done,
+  code/tests not committed; see next)
+- machine state:
+  * branch `phase1-bringup-load` (created off `main` @ `c5ccecf`), 6 files
+    modified UNCOMMITTED: SPEC.md, bin/bonsai2_vram.py,
+    bin/bonsai2_render_config.py, etc/subagent-engine.yaml,
+    tests/test_vram.py, tests/test_render_config.py
+  * hermetic suite 134/134 OK (was 130; +4 kv_cache validator tests)
+  * image `bonsai2-server:1.0` STILL BAKES THE OLD S1.3 CMD (`--no-prompt`
+    + `deepseek_r1`, no `--cache-type-k/v`) — needs re-bake; the probe
+    runs used the corrected flags via CMD override
+  * probe containers all removed; main stack only (PIDs 5581 ~1.4 GiB +
+    12262 ~64.5 GiB sglang); MemAvailable ~44 GiB baseline; port 30101 free
+- LIVE MEASUREMENTS (the acceptance evidence; artifacts in /tmp, not yet
+  copied to test-logs/):
+  * 1.7 bring-up: probe `bonsai2-probe-i0` (corrected flags, `--memory
+    11.5g` era, host net, :30101) → `/v1/models` 200 `qwen38-27b-subagent`
+    in ~10–15 s; 16-token completion round-trip **0.83 s** (< 10 s
+    acceptance), single-stream decode 27.8 t/s, `reasoning_content`
+    populated under `--reasoning-format deepseek`
+  * 1.7 VRAM delta (meter: `nvidia-smi
+    --query-compute-apps=pid,used_memory`, baseline-subtracted): FP16 KV
+    (literal old S1.3) **24.59 GiB**; q4_0 KV (`--cache-type-k/v q4_0`)
+    **13.45 GiB = 14.44 GB** (stable across 2 runs); weights+overhead
+    only 7.05 GiB → KV component ≈ 6.40 GiB; cgroup scope peak only
+    ~7.6 GiB (device KV not fully cgroup-charged — do NOT meter via cgroup)
+  * 1.8 load (8 concurrent × 120 s on the q4_0 instance): **50.7 t/s
+    aggregate, 384 ok, 0× 5xx** (target ≥ 26.2 = 0.9 × 29.16) → PASS,
+    2× headroom
+- KEY FINDINGS (why the spec moved — "spec follows code"):
+  1. The literal S1.3 command CANNOT BOOT at pin 9a9394a8:
+     `--no-prompt` is rejected at arg-parse (absent in the fork's
+     `common/arg.cpp`; also absent in upstream + the Bonsai-demo
+     launcher); `--reasoning-format deepseek_r1` rejected (the pin's
+     `common_reasoning_format_from_name` in `common/chat.cpp` accepts
+     `none|auto|deepseek|deepseek-legacy`).
+  2. The old S1.4 constant (0.00000176, "3.7 GB KV") corresponds to
+     q4_0-class KV; the old S1.3 had no `--cache-type-k/v` flags, so the
+     server ran FP16 KV (24.59 GiB measured) — the 10.91 GB/11.5 GB
+     budget was never achievable with the literal S1.3 command.
+  3. User-approved Option A ("a, go ahead"): lock S1.3 to q4_0 KV and
+     re-anchor S1.4 to the live q4_0 measurement. Consequence: default
+     N = floor(37.2 / 14.78) = **2** (was 3); measured instance
+     footprint 14.44 GB; budget figure 14.78 GB (14.08 + ~5% margin);
+     2 instances load ~28.8 GB, ~8.4 GB headroom; idea.txt 40 GB floor
+     still respected as a safe start.
+- next (exact order, all on `phase1-bringup-load`):
+  1. re-bake the runtime image: `image/Dockerfile.runtime` CMD (line
+     ~215–223) still has `--no-prompt` + `deepseek_r1` and lacks
+     `--cache-type-k q4_0 --cache-type-v q4_0` → update CMD, re-run
+     `bin/bonsai2_build_image.py`, stamp the new digest into
+     `etc/subagent-engine.yaml` image.pin (write_image_pin flow)
+  2. `tests/gpu/test_runtime_image.py::test_default_cmd_is_s1_3_verbatim`
+     (line ~199–239) asserts the OLD flags — update expected list
+  3. write the two new @gpu tests:
+     * tests/gpu/test_bringup_1_7.py — launch instance 0 from the image
+       per S1.3 (host net, `--memory {per_instance_budget_gb}g` → now
+       14.78, `--memory-swap` same, `--shm-size 4g --gpus all --ipc=host`),
+       readiness poll `/v1/models` → 200 + `qwen38-27b-subagent`, 16-token
+       completion RT < 10 s, nvidia-smi delta vs S1.4 formula ±10%
+       (band ~13.3–15.5 GB around the 14.44 GB measured)
+     * tests/gpu/test_load_1_8.py — 8 concurrent completions × 120 s →
+       aggregate ≥ 26.2 t/s, zero 5xx; follow tests/gpu/README.md
+       conventions; run hermetic + @gpu sequentially (one GPU rule)
+  4. run `python3 -m unittest discover -s tests` (expect 134 OK) +
+     `tests/run_gpu.sh` (expect old 8 + new tests OK)
+  5. commit, `./scripts/gate.sh`, Gitea PR, `./scripts/review.sh` loop,
+     G4 human merge; then flip MAP 1.7/1.8 checkboxes with the
+     measurement numbers above + copy /tmp artifacts into test-logs/
+     (gitignored)
+  6. refresh the stale 1.6 body text in MAP.md (says "0.00000176
+     constant", "10.91 GB footprint; N=3 at 37.2/11.5") — historical
+     record, low priority
+- blockers/intricacies:
+  * VRAM meter on this GB10 = `nvidia-smi --query-compute-apps=pid,used_memory`
+    MINUS the main-stack baseline (cgroup under-charges device memory:
+    scope peak ~7.6 GiB vs ~13.45 GiB true footprint). `--query-gpu`
+    memory fields are N/A on unified memory.
+  * bare `docker run img --flag v` with the nvidia entrypoint breaks
+    (`exec "$@"` treats the first `--` token as an exec option) — use
+    the image's baked CMD (binary path first) or `--entrypoint` with the
+    full command.
+  * `--memory` cap: S1.7's "memory cap" = S2.2's `--memory` =
+    per_instance_budget_gb, which is now **14.78** (the 11.5g probes
+    predate the re-anchor).
+  * /tmp helpers: measure_17_18.py, measure_kv4.py, bonsai-start.sh,
+    base.txt (baseline PIDs). Baseline taken at session start; re-take
+    before new measurements (PIDs change across reboots).
+- spec deltas (all UNCOMMITTED, on `phase1-bringup-load`):
+  * S1.3: dropped `--no-prompt`, `deepseek_r1` → `deepseek`, added
+    `--cache-type-k q4_0 --cache-type-v q4_0` + a "pin reality" delta note
+  * S1.4: `per_slot_per_token_GB` 0.00000176 → 0.000003277 (measured
+    q4_0 KV, MAP 1.7); S0 table row → ~14.0–14.5 GB measured 14.44 GB;
+    worked example → floor(37.2 / 14.78) = 2, ~28.8 GB loaded, ~8.4 GB
+    headroom; S2.4 PTQ1_0 fallback recompute (12.82 GB / ~13.46 budget);
+    S6.4 drift-threshold note budget 11.5 → 14.78
+  * etc/subagent-engine.yaml: count 3→2, per_instance_budget_gb 11.5→14.78,
+    new `kv_cache: q4_0` top-level key, reasoning_format deepseek_r1→deepseek
+  * bin/bonsai2_vram.py: PER_SLOT_PER_TOKEN_GB 0.000003277,
+    DEFAULT_BUDGET_GB 14.78, docstrings re-anchored
+  * bin/bonsai2_render_config.py: new `kv_cache` validation — allowlist
+    taken from the pinned fork's `kv_cache_types` list
+    (third_party/llama.cpp/common/arg.cpp:304: f32, f16, bf16, q8_0,
+    q4_0, q4_1, iq4_nl, q5_0, q5_1), case-insensitive
+  * tests: test_vram.py re-anchored (constant, N=2, 14.78 budget, 6.87 GB
+    KV worked example); test_render_config.py fixture (count 2, 14.78,
+    deepseek, kv_cache q4_0) + 4 new kv_cache cases → 134 tests
 
 ### 2026-09-21 — Phase 1: MAP 1.4/1.5/1.6 merged (PR #7, `a203f79`), 4-round review loop
 - agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `a203f79`)

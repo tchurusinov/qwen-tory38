@@ -16,7 +16,7 @@ Two responsibilities:
        instances{count,port_base,ctx_size,max_num_seqs,
        per_instance_budget_gb}, sampling{temperature,top_p,top_k,
        min_p,repeat_penalty,repeat_last_n,stop_token_ids},
-       reasoning_format, alias, api_key
+       reasoning_format, alias, api_key, kv_cache
    formats:
      * engine.pin.commit = 40 hex
      * model sha fields = 64 hex; size fields = int > 0; revision
@@ -42,6 +42,8 @@ Two responsibilities:
        [0.5, 2.0], repeat_last_n int >= 0, stop_token_ids a non-empty
        list of ints
      * reasoning_format / alias / api_key: non-empty strings
+     * kv_cache: a pin-supported --cache-type-k/v dtype (S1.3/S1.4
+       re-anchor; the spec pins q4_0)
 
 2. rendering — `render_config(data, overrides)`: fill remaining
    `<placeholder>` values (the image pin from `--image-pin-json`
@@ -87,6 +89,14 @@ PARALLEL_MIN = 1
 PARALLEL_MAX = 64  # S1.3: max_num_seqs bounds
 COUNT_MIN = 0  # S2.4 main-only is a valid state
 COUNT_MAX = 8  # S1.4 clamp
+# S1.3/S1.4 re-anchor: the allowed --cache-type-k/v values at the pinned
+# fork (the fork's kv_cache_types list, third_party/llama.cpp/common/
+# arg.cpp:304). The spec pins q4_0 (the S1.4 re-anchor, MAP 1.7); the
+# validator accepts the full pin-supported set so an S1.4 re-anchor to a
+# different KV quant does not require a validator change.
+KV_CACHE_TYPES = frozenset(
+    {"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}
+)
 
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -365,6 +375,15 @@ def validate_engine_config(data) -> tuple[list[str], list[str]]:
     for k in ("reasoning_format", "alias", "api_key"):
         if not (isinstance(data.get(k), str) and data.get(k).strip()):
             errors.append(f"{ERR_CONFIG}: {k}: missing/empty")
+    # --- kv_cache (S1.3/S1.4 re-anchor): must be a pin-supported dtype ---
+    kvc = data.get("kv_cache")
+    if not (isinstance(kvc, str) and kvc.strip()):
+        errors.append(f"{ERR_CONFIG}: kv_cache: missing/empty")
+    elif kvc.strip().lower() not in KV_CACHE_TYPES:
+        errors.append(
+            f"{ERR_CONFIG}: kv_cache: {kvc!r} not a supported --cache-type-k/v "
+            f"value ({', '.join(sorted(KV_CACHE_TYPES))})"
+        )
     return errors, warnings
 
 
