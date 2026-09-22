@@ -320,6 +320,13 @@ class TestPortCollision(unittest.TestCase):
             # While the listener held 30101, instance 0's own port never
             # served the alias (its engine had already exited; the
             # listener answered on 30101, and it has no /v1/models).
+            # G3c round-2 P2: the 10 s window is a negative check whose
+            # soundness rests on the exit proven ABOVE (the exited
+            # container's engine no longer serves the alias; the dummy
+            # listener's accept-and-close drain never returns a
+            # /v1/models payload) — so no fresh serving engine could
+            # appear in this window, and a single alias miss at the end
+            # is conclusive for the "skipped, not serving" half.
             self.assertFalse(
                 _wait_ready(PORT_BASE + 0, time.monotonic() + 10.0),
                 "instance 0's port served the alias while the collision "

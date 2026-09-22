@@ -559,6 +559,20 @@ class TestOomCeiling(unittest.TestCase):
                         f"(reclaimed {cut - (free_unheld - free_settled):.1f} GB)",
                         flush=True,
                     )
+            # G3c round-2 P2: if the 3-round cap was exhausted and free
+            # is STILL above the target, the holder-sizing hypothesis
+            # failed (reclamation absorbed the touched memory). The tier
+            # re-eval below still asserts the loud-fail (free < need is
+            # required for ERR_VRAM_OOM), but make the signal explicit
+            # here so it is not confused with the tier check.
+            if len(holders) == 3 and _mem_available_gb() >= target_free_gb:
+                print(
+                    f"[1.9] i=2 holder sizing: all 3 rounds used and free "
+                    f"still above target {target_free_gb:.2f} GB — "
+                    f"reclamation defeated the holder; the tier re-eval "
+                    f"below is the loud-fail",
+                    flush=True,
+                )
             free_at_i2 = _mem_available_gb()
             ok, line = _allocation_tier(free_at_i2, footprint_gb)
             print(
@@ -660,15 +674,6 @@ class TestOomCeiling(unittest.TestCase):
                     served = True
                     break
                 time.sleep(READY_POLL_S)
-            state = _container_state(i2)
-            print(
-                f"[1.9] i=2 path-2 outcome after "
-                f"{time.monotonic() - t_outcome:.0f}s: "
-                f"OOMKilled={state['oom_killed']}, "
-                f"running={state['running']}, exit={state['exit_code']}, "
-                f"served={served}",
-                flush=True,
-            )
             for n in (i0, i1, i2):
                 st_n = _container_state(n)
                 logs = _container_logs(n)
@@ -691,6 +696,22 @@ class TestOomCeiling(unittest.TestCase):
                         f"SIGBUS/SIGSEGV signal death, not "
                         f"ERR_VRAM_OOM",
                     )
+            # G3c round-2 P1: the outcome can still settle in the gap
+            # after the poll loop (i2 could exit cleanly right after
+            # its last probe). The branch decision + clean-exit-0
+            # rejection use a FINAL re-read, not the poll's: a clean
+            # exit 0 means the spawn "succeeded" under the cap — not
+            # the path-2 failure — regardless of whether it served
+            # along the way.
+            state = _container_state(i2)
+            print(
+                f"[1.9] i=2 path-2 final state after "
+                f"{time.monotonic() - t_outcome:.0f}s: "
+                f"OOMKilled={state['oom_killed']}, "
+                f"running={state['running']}, exit={state['exit_code']}, "
+                f"served={served}",
+                flush=True,
+            )
             if not state["running"]:
                 # Exited: either the kernel's cgroup OOM-kill
                 # (OOMKilled=True, exit 137) or the engine's own

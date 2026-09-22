@@ -242,11 +242,13 @@ class TestKillRestart(unittest.TestCase):
             # ExecStart shape. ExecStartPre's `docker rm -f` is folded
             # into the rm below (a dead container has no PID left to
             # collide with, so the fresh run is the restart). A
-            # SIGKILL'd container exits in milliseconds, but `rm -f`
-            # racing the exit propagation can return non-zero (G3c
-            # round-1 P2) — poll the exit first (bounded), then remove
-            # and assert the removal.
-            rm_deadline = time.monotonic() + 10.0
+            # SIGKILL'd container exits in milliseconds; the exit poll
+            # below is the rm -f race guard (G3c round-1 P2) and the
+            # 0.2 s rhythm + 5 s bound keep this teardown guard out of
+            # the S1.8 #4 budget (G3c round-2 P1: the restart window
+            # must not include a slow teardown poll — on the clean
+            # re-run the guard itself was < 1 s).
+            rm_deadline = time.monotonic() + 5.0
             while time.monotonic() < rm_deadline:
                 q = subprocess.run(
                     [
@@ -262,7 +264,7 @@ class TestKillRestart(unittest.TestCase):
                 )
                 if q.returncode != 0 or q.stdout.strip() == "false":
                     break
-                time.sleep(0.5)
+                time.sleep(0.2)
             r = subprocess.run(
                 ["docker", "rm", "-f", CONTAINER],
                 capture_output=True,
