@@ -23,19 +23,23 @@ loop, this test reproduces it from live free memory):
     catches it before the instance's KV allocation
   * "not a segfault": the recorded failure is the NAMED gate condition
     (a clean, deterministic reject with free/need in the log), and no
-    spawned container's log contains SIGSEGV/SIGBUS/core-dump markers
+    spawned container's log contains SIGSEGV/SIGBUS/core-dump markers.
+    The failure is forced with a host-side memory holder (a touched
+    bytearray cutting MemAvailable to ~4 GB below the requirement),
+    because MemAvailable counts reclaimable page cache and the pool is
+    not guaranteed below the requirement after two loads on its own
   * a path-2 demonstration spawn follows at i = 2 with its cgroup cap
-    set BELOW the tier requirement (6.0 GB < 15.08 GB) and a host-side
-    memory holder cutting MemAvailable by ~10 GB — S1.5 path 2's "the
-    tier passed and free memory moved in the gap" shape, forced to be
-    deterministic. If the kernel OOM-kills the load (OOMKilled,
-    exit 137-class) that's clean; if the warm page cache lets the load
-    split across host/CUDA instead (probed 2026-09-22: file-backed
-    mmap'd weights are reclaimable, so a sub-requirement cap does NOT
-    guarantee an OOM kill on this box — the engine logs "layer 0 is
-    assigned to device CPU" and serves) that is the path-2 "kernel
-    manages it" shape and is accepted. Both outcomes assert the
-    segfault-marker check.
+    set BELOW the tier requirement (6.0 GB < 15.08 GB) while the
+    holder still holds free down — S1.5 path 2's "the tier passed and
+    free memory moved in the gap" shape, forced to be deterministic.
+    If the kernel OOM-kills the load (OOMKilled, exit 137-class)
+    that's clean; if the warm page cache lets the load split across
+    host/CUDA instead (probed 2026-09-22: file-backed mmap'd weights
+    are reclaimable, so a sub-requirement cap does NOT guarantee an
+    OOM kill on this box — the engine logs "layer 0 is assigned to
+    device CPU" and serves) that is the path-2 "kernel manages it"
+    shape and is accepted. Both outcomes assert the segfault-marker
+    check.
   * prior instances 0/1 stay HEALTHY afterwards: containers Up,
     /v1/models still returns the alias on both ports, and a
     16-token completion round-trips on both (the S1.7 "stay healthy"
@@ -46,18 +50,19 @@ loop, this test reproduces it from live free memory):
 Measurement notes (box-specific, probed 2026-09-22):
   * /proc/meminfo MemAvailable is the free-memory read on this GB10
     (the MAP 1.7 convention: nvidia-smi `--query-gpu` memory fields are
-    N/A on unified memory). Probe numbers (~GiB as read from
-    /proc/meminfo): ~43.7 base; ~29.2 after one 14.78 g-capped
-    instance; ~14.8 after two (each load nets ~14.44, the MAP 1.7
-    measured total incl. overhead). The S1.4 formula itself is
-    decimal-GB (the spec's 7.21 GB = 7206168928 / 1e9): the tier
+    N/A on unified memory), read as decimal GB like the S1.4 formula
+    (kB / 1e6). Probe numbers: ~45.9 base; ~31.5 after one 14.78 g
+    capped instance; ~16.8 after two (each load nets ~14.44, the MAP
+    1.7 measured total incl. overhead). The S1.4 formula is decimal-GB
+    throughout (the spec's 7.21 GB = 7206168928 / 1e9): the tier
     requirement 15.08 GB = instance_footprint_GB(7.206 GB, 8 slots,
     262144) + 1.0 GB = 14.08 + 1.0 — the weights are read from the
     template's pinned size_bytes in decimal GB so the tier and the
     formula can't drift in units.
-  * The tier fails at i=2 by only ~0.27 GB — the test asserts the pool
-    state (free in a sane band [5 GB, need) at i=2) so a drift in
-    main-stack usage fails it loudly instead of changing its meaning.
+  * The tier fails at i=2 by ~0.27 GB when the pool is in its probe
+    state — the test asserts the pool state (free in a sane band
+    [5 GB, need) at i=2) so a drift in main-stack usage fails it
+    loudly instead of changing its meaning.
   * A cgroup cap below the S1.4 requirement does NOT by itself force an
     OOM kill here: the engine's GGUF weights are mmap'd file pages
     (reclaimable under cgroup pressure; probe: a 6.0 g cap still
@@ -108,11 +113,12 @@ SPIKE_MARGIN_GB = 1.0
 # Path-2 demonstration cap at i=2 (probe 2026-09-22: sub-requirement
 # cap -> the kernel manages the split; OOM-kill or not, no segfault).
 PATH2_CAP_G = "6.0g"
-# Sane-band assertions on the live pool (the probe numbers above):
-# before the two full-cap loads free must cover them plus headroom;
-# at i=2 the tier must read low but not absurdly (0 GB free would
-# mean something else ate the pool and the test is invalid).
-MIN_FREE_BEFORE_LOADS_GB = 37.0
+# Sane-band assertions on the live pool (the probe numbers above,
+# decimal GB): before the two full-cap loads free must cover them
+# plus headroom; at i=2 the tier must read low but not absurdly
+# (0 GB free would mean something else ate the pool and the test is
+# invalid).
+MIN_FREE_BEFORE_LOADS_GB = 40.0
 TIER_FREE_BAND_LO_GB = 5.0
 # S1.4's bounded free read: 5 s timeout per probe, one retry, then
 # treat free as 0 (S1.4 verbatim; /proc/meminfo reads are instant —
@@ -161,10 +167,12 @@ def _ctx_size() -> int:
 
 
 def _mem_available_gb() -> float:
-    """The S1.4 tier's free-memory read on this GB10 (see module doc)."""
+    """The S1.4 tier's free-memory read on this GB10, in DECIMAL GB
+    (kB / 1e6) so it is directly comparable with the S1.4 formula's
+    decimal-GB requirement (see module doc)."""
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith("MemAvailable:"):
-            return int(line.split()[1]) / (1024 * 1024)
+            return int(line.split()[1]) / 1e6
     raise AssertionError("MemAvailable not in /proc/meminfo")
 
 
@@ -380,7 +388,7 @@ def _start_memory_holder(size_gb: float):
                 "b = bytearray(int(sys.argv[1])); "
                 "print(len(b), flush=True); time.sleep(3600)"
             ),
-            str(int(size_gb * 1024**3)),
+            str(int(size_gb * 1e9)),  # decimal GB, matching _mem_available_gb
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -467,17 +475,42 @@ class TestOomCeiling(unittest.TestCase):
                     f"healthy-before-next gate, S2.5 shape)",
                 )
 
-            # Phase 2: i=2 — the tier runs on LIVE free memory (two
-            # instances now loaded) and FAILS: the recorded last
-            # failure is the S1.4 ERR_VRAM_OOM named condition.
+            # Phase 2: i=2 — the tier runs on LIVE free memory and
+            # FAILS: the recorded last failure is the S1.4 ERR_VRAM_OOM
+            # named condition. The failure is DETERMINISTIC, not
+            # pool-state luck: MemAvailable on this box counts
+            # reclaimable page cache (probe 2026-09-22: ~19.9 still
+            # "available" after two 14.44 GB loads), so the pool is not
+            # guaranteed below the requirement on its own — a host-side
+            # memory holder cuts free to ~4 GB below it (the S1.5
+            # path-2 "free memory moved in the gap" condition, forced).
+            free_unheld = _mem_available_gb()
+            # Holder size so that free lands ~4 GB below the tier need:
+            # holder = free_unheld - (need - 4). (free_unheld > need is
+            # normal here — MemAvailable still counts reclaimable cache
+            # after the two loads; the holder is what cuts it.)
+            holder_gb = free_unheld - (need_gb - 4.0)
+            holder_gb = max(holder_gb, 4.0)
+            assert holder_gb < 14.0, (
+                f"holder {holder_gb:.1f} GB unexpectedly large (need "
+                f"{need_gb:.2f}, free {free_unheld:.1f}) — the pool "
+                f"drifted; re-run with it clear"
+            )
+            holder = _start_memory_holder(holder_gb)
+            time.sleep(3.0)  # let the holder's pages touch
             free_at_i2 = _mem_available_gb()
             ok, line = _allocation_tier(free_at_i2, footprint_gb)
-            print(f"[1.9] i=2: {line}", flush=True)
+            print(
+                f"[1.9] i=2 (holder {holder_gb:.1f} GB up): {line} "
+                f"(free unheld {free_unheld:.2f} GB)",
+                flush=True,
+            )
             self.assertFalse(
                 ok,
                 f"allocation tier unexpectedly PASSES at i=2 "
                 f"(free {free_at_i2:.2f} GB >= need {need_gb:.2f} GB) — "
-                f"the pool changed mid-run; re-run with it clear",
+                f"the holder did not cut free as computed; pool "
+                f"state changed, re-run",
             )
             self.assertGreaterEqual(
                 free_at_i2,
@@ -490,13 +523,12 @@ class TestOomCeiling(unittest.TestCase):
             self.assertIn("ERR_VRAM_OOM", line)  # the named condition
 
             # Phase 3: the path-2 demonstration spawn at i=2 — the tier
-            # was bypassed (S1.5 path 2: "the tier passed and free
-            # memory moved in the gap"), with a cgroup cap below the
-            # requirement. The "free memory moved in the gap" is made
-            # DETERMINISTIC with a host-side memory holder (a ~10 GB
-            # touched bytearray cutting MemAvailable), so the path-2
-            # condition holds instead of relying on pool drift. Two
-            # acceptable outcomes, one rejected one:
+            # just failed, but the manager's stricter gate only holds
+            # until the next recheck (S1.4: "the value is re-read on
+            # the S2.5 5-min recheck") — so the spawn in the gap is
+            # S1.5 path 2, with a cgroup cap below the requirement
+            # while the holder still holds free down. Two acceptable
+            # outcomes, one rejected one:
             #   * OOMKilled=True  -> the kernel OOM-kill (exit
             #     137-class): clean
             #   * still running   -> the kernel managed the split
@@ -507,10 +539,8 @@ class TestOomCeiling(unittest.TestCase):
             #     from passing silently
             # "Not a segfault" = no SIGSEGV/SIGBUS/core-dump markers in
             # any spawned container's log, in either outcome.
-            holder = _start_memory_holder(10.0)
-            time.sleep(3.0)  # let the holder's pages touch before the spawn
             print(
-                f"[1.9] i=2 path-2: memory holder up (MemAvailable "
+                f"[1.9] i=2 path-2: holder still up (MemAvailable "
                 f"{_mem_available_gb():.1f} GB), spawning at {PATH2_CAP_G}",
                 flush=True,
             )
