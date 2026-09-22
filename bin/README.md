@@ -6,8 +6,13 @@ the host layout 1:1 so source and deploy paths never diverge in naming.
 
 Lands here (later MAP phases):
 
-- `bonsai2-manager` — the instance manager (MAP 2.1, S2.1/S2.2); runs
-  from the `bonsai2-sglang.service` unit.
+- `bonsai2-manager` — the instance manager (MAP 2.1–2.5, S2.1–S2.5); runs
+  from the `bonsai2-sglang.service` unit (Type=notify via its own
+  sd_notify). Lands MAP 2.1–2.5 (2026-09-22, branch
+  `phase2-manager-skeleton`): config load, S2.3 boot tier, S1.4
+  allocation tier, S2.5 ordered spawn, S3.1 health.json; the S2.2
+  health-probe escalation (MAP 2.6) and S2.4 PTQ1_0/ctx-halve fallback
+  (MAP 2.7) are marked hooks inside it.
 - `bonsai2-spawn`, `bonsai2-steer`, `bonsai2-cancel`,
   `bonsai2-status`, `bonsai2-list-instances`, `bonsai2-collect`,
   `bonsai2-bench`, `bonsai2-unload`, `bonsai2-reload`,

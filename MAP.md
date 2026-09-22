@@ -312,25 +312,77 @@ under the manager or the full stack).
 
 Exit: S2.8 acceptance (all five, runnable on this box).
 
-- [ ] 2.1 `bonsai2-manager` skeleton: Type=notify via sd_notify; reads
+- [x] 2.1 `bonsai2-manager` skeleton: Type=notify via sd_notify; reads
       `subagent-engine.yaml` + `serving.yaml`; writes
       `/run/bonsai2/health.json` in the S3.1 schema (S2.2).
-- [ ] 2.2 Boot-time budget check (S2.3): `free_gb` from the main
+      (2026-09-22, branch `phase2-manager-skeleton`:
+      `bin/bonsai2-manager` — hand-rolled sd_notify (AF_UNIX datagram,
+      no systemd-python dep), the two-YAML loader (ERR_CONFIG exit 2),
+      atomic `health.json` write (tmp+rename), the S3.1 document builder
+      (stack/instances/main_endpoint/main_healthy + `main_only_reason`
+      ONLY at 0 instances, S2.4). Hermetic: `tests/test_manager.py`
+      (config load + ERR_CONFIG paths, S3.1 schema + atomicity, stack
+      derivation, main-only reason echo). @gpu:
+      `tests/gpu/test_manager_spawn_2_5.py`.)
+- [x] 2.2 Boot-time budget check (S2.3): `free_gb` from the main
       container's live cgroup `memory.current` (sleep-accurate) else the
       recorded fresh-load `footprint_gb`; `N' = max(0, min(N, floor(...)))`;
       `WARN_VRAM_SHORTFALL` on 0 < N' < N.
-- [ ] 2.3 Allocation tier (S1.4, manager-run): stricter pre-spawn gate
+      (2026-09-22, same branch: `planning_tier` (the S2.3 formula verbatim,
+      pure + total: full grant, shortfall->warn+proceed, negative free ->
+      `max(0,...)` clamp to 0, min(N,...) clamp) + `main_used_gb`
+      (live cgroup `memory.current` via the `system.slice/docker-<id>.scope`
+      shape this box uses — probed 2026-09-22; falls back to
+      `main_stack.footprint_gb` when the container/cgroup is gone). Live:
+      the @gpu test read the main cgroup at ~1.97 GB (sleep-accurate —
+      SGLang asleep, device KV not cgroup-charged, the known MAP 1.7
+      finding) and computed N'=2 off the live pool.)
+- [x] 2.3 Allocation tier (S1.4, manager-run): stricter pre-spawn gate
       `free ≥ instance_footprint_GB + 1.0`; probe timeout 5 s + one
       retry, then treat free as 0; i > 0 → partial load exit 0; i = 0
       with granted N' ≥ 1 → exit 4 `ERR_VRAM_OOM`; N' = 0 → S2.4 handoff.
-- [ ] 2.4 Unit files: `bonsai2-sglang.service` + `bonsai2-server@i.service`
+      (2026-09-22, same branch: `allocation_tier` (need = `bonsai2_vram.
+      instance_footprint_gb` + 1.0 — the formula module is the source, no
+      hardcoded need) + `read_free_gb` (one probe + one retry, then 0 —
+      the bounded shape the hermetic test drives with a failing reader:
+      exactly 2 calls, then 0.0). Hermetic: grant-at-need / reject-below /
+      the 1.0 GB margin / retry-then-zero. Live: @gpu tier ran at need
+      15.08 GB — i=0 PASS @47.4 GB, i=1 PASS @34.6 GB.)
+- [x] 2.4 Unit files: `bonsai2-sglang.service` + `bonsai2-server@i.service`
       verbatim main-stack shape — `docker run` flags per S2.2,
       `ExecStartPre= docker rm -f`, `Restart=on-failure`, `RestartSec=5`,
       `StartLimitBurst=3` → `bfailed`, `CPUQuota=64 %`; `Wants=` (not
       `Requires=`) on the main stack (S2.1, S2.2).
-- [ ] 2.5 Spawn path: manager starts granted instances in order via
+      (2026-09-22, same branch: both `units/*.service` templates carry the
+      S2.1/S2.2 shape — manager: `Type=notify` + `Wants=qwen38-sglang`
+      (not `Requires=`) + `After=` incl. the main stack; server:
+      `Requires=docker.service` + `ExecStartPre= docker rm -f` +
+      `Restart=on-failure`/`RestartSec=5`/`StartLimitBurst=3`/`CPUQuota=
+      64%` — hermetic-asserted in `tests/test_manager.py::TestUnitFiles`;
+      the server template's comment now names the full-command docker-run
+      (probed 2026-09-22: bare `docker run img --flag` dies under the
+      nvidia entrypoint) + that the S1.4 tier is what admits a start.
+      `docker rm -f` on an absent container returns rc=0 (probed), so
+      `ExecStartPre` is safe on first start.)
+- [x] 2.5 Spawn path: manager starts granted instances in order via
       `systemctl start bonsai2-server@i`; waits each to healthy before the
       next; boot order: main stack first (S2.1).
+      (2026-09-22, same branch: `spawn_sequence` — tier gate ->
+      `systemctl start bonsai2-server@i` -> S2.2 health probe wait
+      (models + 16-token RT, `boot_target_s`) BEFORE the next index;
+      i>0 tier fail -> WARN_VRAM_SHORTFALL + exit 0 partial; i=0 tier
+      fail -> exit 4 ERR_VRAM_OOM with no start issued; a failed unit
+      start is recorded, loop continues (S2.1 independent engines).
+      Hermetic: the ordering (i=1's start only after i=0's wait returns
+      True), all four exit/outcome branches. Live (@gpu
+      `test_manager_spawn_2_5.py`, 2026-09-22): the manager booted from
+      the tracked templates, read the live pool, and spawned BOTH real
+      27B instances in order — 46.9 s boot+spawn+settle, both healthy,
+      health.json `stack=healthy`, main PIDs unchanged; teardown left no
+      containers. NOTE for install.sh (6.2): the unit's `Requires=
+      docker.service` is system-scope only (user scope has no docker
+      unit — the @gpu test's documented deviation; `BONSAI2_USER_SYSTEMCTL`
+      is the manager's user-scope hook).)
 - [ ] 2.6 Health probe loop: every 10 s, `GET /v1/models` (200 + alias)
       AND 16-token completion < 10 s; two consecutive fails → `degraded`,
       five → restart attempt (S2.2).
@@ -536,7 +588,8 @@ SPEC.md `status` → `active`.
 
 ## Session log
 
-<!-- Newest entry on top. One entry per implementation session, appended by
+<!-- Newest entry on top.
+ One entry per implementation session, appended by
      the agent BEFORE ending the session. Template:
 
 ### <YYYY-MM-DD> — <one-line title>
@@ -552,6 +605,61 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-22 — Phase 2: MAP 2.1–2.5 implemented + green (branch `phase2-manager-skeleton`, G3 pending)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2, branch `phase2-manager-skeleton`)
+- phase(s): P2 (2.1 manager skeleton + 2.2 boot-tier + 2.3 allocation tier + 2.4 units + 2.5 spawn path; G3 review pending)
+- items checked: 2.1, 2.2, 2.3, 2.4, 2.5 (flipped to [x] in this entry;
+  hermetic 165/165 OK + @gpu live spawn PASS)
+- machine state:
+  * branch `phase2-manager-skeleton` off `origin/main` @ `ecb895a`
+  * NEW: `bin/bonsai2-manager` (the S2 manager: hand-rolled sd_notify,
+    two-YAML loader, S2.3 planning tier + live cgroup read, S1.4
+    allocation tier, S2.5 ordered spawn, S3.1 health.json writer,
+    steady probe loop) + `tests/test_manager.py` (31 hermetic cases)
+    + `tests/gpu/test_manager_spawn_2_5.py` (@gpu live spawn) +
+    SPEC S2.2 pin-reality delta + units/bonsai2-server@.service comment
+  * hermetic `Ran 165 tests OK` (was 134; +31 manager cases); gate PASS;
+    ruff clean on all three new files (the manager is extensionless,
+    outside the gate's `*.py` glob — linted manually)
+  * @gpu live run (pool 46.2 GB free, box quiet, main stack asleep):
+    manager boot+spawn+settle 46.9 s — S2.3 read the main cgroup LIVE
+    (1.97 GB, sleep-accurate) -> N'=2; S1.4 tier need 15.08 GB, i=0
+    PASS @47.4 GB -> start -> healthy, i=1 PASS @34.6 GB -> start ->
+    healthy; both 27B instances up under the S2.2 `--memory 14.78g` cap
+    (docker parses g as GiB + truncates -> 15869904158 B, the spec
+    delta); health.json `stack=healthy`, 2 instances healthy,
+    main PIDs unchanged; teardown left zero containers
+  * no /opt/bonsai2 yet (install = Phase 6); main stack untouched
+- next (exact order, on `phase2-manager-skeleton`):
+  1. `./scripts/gate.sh` (PASS), commit, Gitea PR, `./scripts/review.sh`
+     loop (G3), G4 human merge
+  2. after G4: next MAP item = 2.6 (health probe loop: the skeleton has
+     the re-probe + health.json refresh; MAP 2.6 owns the
+     two-fail->degraded / five-fail->restart escalation — the marked
+     hooks are in `_refresh_states`)
+- blockers/intricacies:
+  * cgroup v2 on this box: docker containers live at
+    `/sys/fs/cgroup/system.slice/docker-<id>.scope/` (NOT
+    `/sys/fs/cgroup/docker/<id>/`) — `main_used_gb` tries both; the
+    cgroup only counts HOST memory (device KV is not cgroup-charged,
+    the MAP 1.7 finding) — sleep-accurate means "the main container's
+    cgroup is small when SGLang sleeps", exactly what S2.3 wants.
+  * user-scope systemd: `Requires=docker.service` is fatal there ("Unit
+    docker.service not found") — the @gpu test installs USER units with
+    `After=` only (documented deviation; system units keep the S2.2
+    verbatim shape). blckwll has Linger=yes so `systemctl --user` works.
+  * docker `--memory 14.78g` = GiB + truncation (15869904158 B), ~0.91%
+    looser than the decimal-GB budget — SPEC S2.2 delta recorded.
+  * main endpoint probe: `GET /v1/models` on the main stack returns 401
+    (up, wants its api key) — the manager treats 2xx/4xx as healthy,
+    5xx/refused as down (it does not hold the main's key).
+- spec deltas:
+  * S2.2 pin-reality delta (2026-09-22): docker's `g` suffix = GiB
+    (2^30) + float truncation; the S1.4 formula + tier stay decimal-GB;
+    no budget value moved.
+  * (no other SPEC changes; the S2.3/S1.4 behavior was implemented
+    verbatim, no amendment needed)
 
 ### 2026-09-22 — G4 merge: PR #9 merged as `deb16fa`, MAP 1.9/1.10/1.11 done
 - agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `deb16fa`)

@@ -465,6 +465,17 @@ that a main-stack fix might need.
   unified-memory driver charges the instance's GPU allocations to its
   cgroup, so this bounds the instance's total footprint; `--memory-swap`
   = same value, no swap escape, matching the main stack's pattern).
+
+  > Pin reality (delta 2026-09-22, S2.5 live spawn test, spec follows
+  > code): docker parses the `g` suffix as **GiB (2^30)**, not decimal
+  > GB, and truncates the float parse to bytes — so
+  > `--memory 14.78g --memory-swap 14.78g` caps at
+  > `int(14.78 * 2^30)` = 15,869,904,158 B, ~0.91% above the S1.4
+  > decimal-GB budget. The S1.4 formula and the allocation tier stay
+  > decimal-GB end-to-end; the container cap is a hair looser than the
+  > budget, which can only help the tier (never hurt it). No change to
+  > the budget value — the `g` flag is verbatim the main-stack pattern
+  > (`--memory 100g` is 100 GiB there too).
 - Per-instance unit hardening (same class as the main unit's
   `Requires=docker.service`): `ExecStartPre=` `docker rm -f
   bonsai2-server-i` (clean stale container, verbatim the main unit's
