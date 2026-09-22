@@ -17,8 +17,9 @@ disagree, fix the spec and record the delta). `MAP.md` = the
 implementation ledger — resume protocol, phased checkboxes, session log;
 the first unchecked item is the frontier. `ARTIFACTS.md` = where every
 external thing lives (weights, binaries, images, units, tools) — keep it
-current, full trackability. `idea.txt` = original intent (history, not
-requirements).
+current, full trackability. `README.md` = the public-facing overview
+(skeleton as of 2026-09-22; sections marked `PENDING` fill in as MAP
+phases land). `idea.txt` = original intent (history, not requirements).
 
 ## The target box (what we are building for)
 
@@ -62,11 +63,39 @@ Repo state: Gitea remote `blckwell/qwen-tory38` (ssh `gitea-local:2222`),
 **Gate baseline (2026-09-20, untouched repo): PASS, exit 0** — bash -n
 ok on both scripts, shellcheck soft-skipped (not installed), secret scan
 clean. Only NEW failures block gates. PR body must record exact checks
-run + skipped + residual risk.
+run + skipped + residual risk (the full PR-body contract: the
+"PR-body contract" section below).
 
 One SGLang engine on this box: the builder's own model, the pi reviewer,
 and any subagent experiments share it or its VRAM — reviews run
 sequentially, and see the VRAM audit rule below.
+
+## Spec-amendment rule (spec follows code, expected — not a failure)
+
+SPEC.md is written by the agent and implemented by the agent — so it is
+**expected** that a spec section stops working against the real world at
+some point: a flag that doesn't exist at the pin, a measurement that
+under-predicts, a path that is infeasible. When that happens:
+
+- Find the working approach, implement it, **amend SPEC.md in the same
+  change** (the document conventions already require it: "implementation
+  findings that contradict this spec get backported HERE, never the
+  other way around"). This rule just names the norm explicitly:
+  spec-break-then-repair is a *normal part of the flow*, not a
+  one-shot-failure.
+- Do it by the design itself: complex work is broken into small,
+  independently-testable chunks, each with robust tests; the chunk that
+  breaks gets the spec amendment, the rest stay untouched. Never let a
+  broken chunk accumulate silently.
+- The amendment records **what was expected, what was real, and what
+  the spec now says** (a short delta note at the amended site — the
+  same pattern as the S1.3/S1.4 pin-reality and re-anchor notes in
+  SPEC.md).
+- Record the delta in the MAP session log too (spec deltas field).
+- If the amendment changes a **locked** value (an acceptance number, a
+  formula constant, a default), say so explicitly in the PR body under
+  `## Spec amendments` with before/after — the reviewer and the human
+  merge gate must see spec moves the way they see code moves.
 
 ## VRAM audit rule (before ANY agent/model loads)
 
@@ -88,20 +117,66 @@ Short on margin → don't load, don't start the agent; note it in the MAP
 session log. And: **no uncommitted changes on the box you are about to
 stress** — commit or stash first, so a crash never eats work.
 
-## Uncertainty rule (flag, don't guess)
+## Uncertainty rule (implement → test → report; don't stall)
 
 When a design fork comes up during implementation:
 
-- Record it in the PR body under `## Open decisions (needs user)` —
-  one line each: the decision taken, the top alternative(s), the
-  question for the user.
-- Where the choice is cheap, **implement the top 2 possibilities**
-  behind a config flag or clearly-marked branch (`UNRESOLVED: <id>`
-  comment at the site), so the user decides against working code, not
+- **Implement, don't stall.** The loop is: implement the option(s) →
+  test them → report in the PR. It is better to produce working options
+  with the information that led to them than to stop and not do anything
+  while burning compute. Where a choice is cheap, implement the top 2
+  possibilities behind a config flag or a clearly-marked branch
+  (`UNRESOLVED: <id>` comment at the site), with a test per option, so
+  the user decides against working code + observed results, not
   descriptions.
-- Never silently pick the 3rd option; never leave an `UNRESOLVED` marker
-  past G4 without a disposition (taken / merged / dropped, and which
-  path won).
+- **Report the PR section in this exact order** — a fixed-shape
+  `## Uncertainties & decisions` section (supersedes the old
+  `## Open decisions (needs user)`; that header is gone):
+  1. **Uncertainties** — what was unknown, one line each.
+  2. **Possible decisions** — the options considered, and the
+     information that led to each (measurement, pin behavior, doc
+     finding, cost).
+  3. **Decisions taken** — which option was implemented and why
+     (default = the recommended one; "take" is the top pick, not a
+     coin flip).
+  4. **Results** — what the tests/measurements on the taken option
+     returned (numbers, exit codes, observed behavior).
+  5. **Further options** — what remains open, what would change the
+     decision, and what the next step is.
+- Never silently pick a 3rd option not named under "possible
+  decisions". Never leave an `UNRESOLVED` marker past G4 without a
+  disposition (taken / merged / dropped, and which path won) —
+  disposition lands in the same PR section, in a follow-up entry.
+
+## PR-body contract (written when the PR opens — DOD, amendments, uncertainties)
+
+Every PR body carries these sections, written **when the PR opens**, not
+retrofitted at merge time:
+
+- **`## Definition of Done (acceptance for THIS PR)`** — the concrete,
+  checkable conditions that, when all true, mean this PR is *done and
+  no more review rounds are needed* — i.e. it can go straight to the
+  human merge gate (G4). Scope it to the task at hand, in the scope of
+  this PR only: name the spec acceptance items it claims (S1.8 #3,
+  S3.8 #5 …), the tests that prove them (suite + case names), the
+  observed exit codes / numbers, and what is explicitly NOT claimed
+  (left to a later PR / phase). The reviewer uses this section to know
+  when to stop finding nits: the DOD met = the loop is done. If a
+  review round surfaces work outside this DOD, it is split into a new
+  PR, not silently absorbed. No DOD = the PR is not openable.
+- **`## Spec amendments`** (when SPEC.md changed in this PR) — per the
+  spec-amendment rule above: what was expected vs real, before/after
+  for any locked value, the MAP session-log delta entry.
+- **`## Uncertainties & decisions`** (when a fork was hit) — the
+  fixed 5-subsection shape from the uncertainty rule (uncertainties →
+  possible decisions → decisions taken → results → further options).
+- **Checks + residual risk** — exact gate/`review.sh` checks run, any
+  soft-skipped ones, and what that leaves open (the gate-baseline
+  paragraph in the Workflow section above).
+
+The G3 reviewer loop ends when the DOD section is fully met and the
+reviewer's disposition says so; G4 (human merge) then reviews against
+the DOD, not against open-ended "is this good enough".
 
 ## Code quality + pre-commit
 
@@ -197,3 +272,39 @@ CI/CD, tuned to what actually hurt during the run:
 LLM-to-LLM subagent orchestration · main-stack changes · vision/mmproj ·
 multi-box v1 · fine-tuning · LLM-judge bench mode · kill-for-drift ·
 stateful subagents.
+
+## POST-IMPLEMENTATION (reminder — do this AFTER the corresponding work lands)
+
+Standing reminder section: tasks below are deliberately NOT in the
+senior-git G2 path because their payoff only becomes real and
+measurable once the work they depend on has shipped. When the listed
+trigger happens, pick the item up (as its own PR with its own DOD, not
+slipped into an unrelated one).
+
+- **senior-git-1.0 & senior-git-2 from the e2e runs (in the works).**
+  Trigger: the qwen-tory38 MVP e2e run finishes (global acceptance #1–#5
+  pass, MAP P7). Work up both flows from what the run actually hit
+  (failure points, review rounds, slow spots) — the post-MVP CI/CD
+  proposal in this file is their input, not their output. senior-git-2
+  is the next revision; don't design it before the e2e evidence exists.
+- **Uniformity of approaches + cleanup of autoskills and memories.**
+  Trigger: after the `bonsai2-harness` subagent skill lands (MAP P5) —
+  that skill adds enough new context that the current sprawl is visible.
+  Problem: directions currently arrive from ~15 different places
+  (system prompt, per-project AGENTS.md, skills, memories, cron,
+  machine docs). Some system tells you to do X and another Y; they
+  stack and somehow work, at the cost of a lot of context + tokens.
+  Deliverable: (a) a single **authoritative on/off + direction source**
+  for skills — the way authoritative inference / authoritative skill /
+  authoritative capabilities already exist, one place decides what is
+  active; (b) convergence of the ~15 direction points into fewer, with
+  the hard rules that actually matter surviving verbatim and the rest
+  demoted or deleted.
+- **Universal docs log/ledger + auto-curation of .md docs.**
+  Trigger: with the above — once one authoritative direction source
+  exists, docs become a medium, not a source. Build the universal
+  ledger (one index of which doc is authoritative for what, when,
+  why) + an auto-curation mechanism that prunes/consolidates .md files
+  against it. Rule for the curation: only hard rules that actually
+  matter survive as text; everything else is re-derived, linked, or
+  deleted.
