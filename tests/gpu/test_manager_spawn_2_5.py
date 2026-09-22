@@ -228,6 +228,14 @@ class TestManagerSpawnLive(unittest.TestCase):
             "ports 30101/30102 busy — leftover container?",
         )
         self.assertTrue(_no_bonsai_containers(), "stale bonsai2-server containers")
+        # A stray USER-scope bonsai2-sglang.service (e.g. left by a manual
+        # run) would re-run the manager on boot and race the units this
+        # test installs — assert it is absent and remove it in finally.
+        stray_manager_unit = Path.home() / ".config/systemd/user/bonsai2-sglang.service"
+        self.assertFalse(
+            stray_manager_unit.exists(),
+            "stray user-scope bonsai2-sglang.service — stop/disable it and re-run",
+        )
         baseline_pids = set(_gpu_compute_apps_mib())
 
         ctx, kv, par = _ctx_kv_from_template()
@@ -375,6 +383,12 @@ class TestManagerSpawnLive(unittest.TestCase):
                 )
             for uf in unit_files:
                 uf.unlink(missing_ok=True)
+            # Best-effort: remove a user-scope manager unit this test may
+            # have installed (the @gpu harness shape) or a prior manual
+            # run left behind (the P1 stray-unit case — a user-scope
+            # bonsai2-sglang.service would re-run the manager on boot).
+            stray = Path.home() / ".config/systemd/user/bonsai2-sglang.service"
+            stray.unlink(missing_ok=True)
             subprocess.run(
                 ["systemctl", "--user", "daemon-reload"],
                 capture_output=True,

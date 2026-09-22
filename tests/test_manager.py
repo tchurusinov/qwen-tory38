@@ -338,20 +338,43 @@ class TestAllocationTier(unittest.TestCase):
         self.assertIn("need 15.08", detail)
 
     def test_margin_is_one_gb(self):
-        # The need for the default config IS footprint + 1.0 (S1.4
-        # verbatim): 7.206168928 weights + 6.87 KV = 14.076... + 1.0.
-        # `vram` = bin/bonsai2_vram.py loaded at module level above
-        # (the manager's own S1.4 source).
+        # The need for the default config IS footprint + 1.0 floored at
+        # the S2.2 cap (S1.4 as amended 2026-09-23): 7.206168928
+        # weights + 6.872367104 KV = 14.078536032 footprint + 1.0, and
+        # max(_, 14.78) keeps the margin term (15.08 > 14.78). `vram` =
+        # bin/bonsai2_vram.py loaded at module level above (the manager's
+        # own S1.4 source).
 
         footprint = vram.instance_footprint_gb(7206168928 / 1e9, 8, 262144)
         need = footprint + TIER_MARGIN_GB
         self.assertAlmostEqual(need, footprint + 1.0)
-        # and the manager's default need matches that (the spec formula,
-        # one-to-one — no drift between the formula module and the tier).
+        # and the manager's gate term matches that (allocation_need_gb —
+        # the max() floor is a no-op on this box, no drift between the
+        # formula module and the tier).
+        gate = mgr.allocation_need_gb(7206168928 / 1e9, 8, 262144, 14.78)
+        self.assertAlmostEqual(gate, need)
         granted, _, _ = mgr.allocation_tier(need, lambda: need)
         self.assertTrue(granted)
         granted2, _, _ = mgr.allocation_tier(need, lambda: need - 0.5)
         self.assertFalse(granted2)
+
+    def test_need_floors_at_the_s2_2_cap(self):
+        """S1.4/S2.2 reconciliation (2026-09-23): when the per-instance
+        cap (footprint + 5% margin) exceeds footprint + 1.0, the gate
+        term is the cap — a free pool between the two must be rejected
+        (it would pass the margin term but not fit the container)."""
+        # Synthetic: footprint 10.0, margin term 11.0, cap 12.0 ->
+        # gate = 12.0 (the cap binds, not the margin term).
+        gate = mgr.allocation_need_gb(
+            10.0, 0, 0, 12.0
+        )  # slots=0 -> kv = 0, footprint = weights
+        self.assertAlmostEqual(gate, 12.0)
+        # And the tier rejects free = 11.5 (between margin and cap).
+        granted, _, _ = mgr.allocation_tier(gate, lambda: 11.5)
+        self.assertFalse(granted)
+        # ... but grants free = 12.0.
+        granted, _, _ = mgr.allocation_tier(gate, lambda: 12.0)
+        self.assertTrue(granted)
 
     def test_read_free_gb_retries_once_then_zero(self):
         """S1.4: '5 s timeout per probe, one retry; on a second timeout
@@ -518,12 +541,19 @@ class TestSpawnSequence(unittest.TestCase):
     def test_failed_unit_start_is_recorded_and_loop_continues(self):
         """A unit that fails to start (docker gone, un-clearable port
         collision) is recorded, and i+1 still attempts (S2.1: the
-        instances are independent engines)."""
+        instances are independent engines). The failed index's healthy
+        wait is SKIPPED (S1.5 bfailed — polling a dead engine's port
+        for up to boot_target_s is wasted time)."""
         order = []
+        waits = []
 
         def fake_start(i, base=None):
             order.append(f"start-{i}")
             return 1 if i == 0 else 0
+
+        def fake_wait(i, cfg, base=None):
+            waits.append(i)
+            return True
 
         exit_code, spawned, _, start_rc = mgr.spawn_sequence(
             self._cfg(),
@@ -531,7 +561,7 @@ class TestSpawnSequence(unittest.TestCase):
             15.08,
             free_reader=lambda: 100.0,
             systemctl_start=fake_start,
-            wait_healthy=lambda i, cfg, base=None: True,
+            wait_healthy=fake_wait,
             log=lambda *_: None,
         )
         self.assertEqual(exit_code, 0)
@@ -540,6 +570,8 @@ class TestSpawnSequence(unittest.TestCase):
         # The failed start surfaces its rc so main() can reflect bfailed in
         # health.json directly (S1.5 routing — no re-derivation by probe).
         self.assertEqual(start_rc, {0: 1, 1: 0})
+        # i=0's wait is skipped (bfailed), i=1's still happens.
+        self.assertEqual(waits, [1], "failed-start index must not be waited on")
 
     def test_needs_use_vram_formula_not_a_hardcoded_number(self):
         """The need the main() computes must equal the S1.4 formula
@@ -556,8 +588,11 @@ class TestSpawnSequence(unittest.TestCase):
         # KV 8 x 262144 x 0.000003277 GB = 14.078536032 GB + 1.0 margin
         # = 15.078536032 GB need (decimal GB end-to-end, the S1.4
         # convention — see the MAP 1.9 finding: a GiB mix-up was the
-        # first live-run bug that class).
-        self.assertAlmostEqual(need, 15.078536032, places=9)
+        # first live-run bug that class). places=6 (not 9): the guard is
+        # against formula DRIFT (a constant change), not float noise —
+        # 1e-6 GB = ~1 MiB of slack, still 3+ orders of magnitude below
+        # any realistic constant change.
+        self.assertAlmostEqual(need, 15.078536032, places=6)
 
 
 if __name__ == "__main__":

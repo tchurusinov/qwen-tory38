@@ -363,15 +363,40 @@ def planning_tier(
 # --------------------------------------------------------------------------
 # S1.4 allocation tier (the per-spawn stricter gate)
 # --------------------------------------------------------------------------
+def allocation_need_gb(
+    weights_gb: float, slots: int, ctx_size: int, budget_gb: float
+) -> float:
+    """The S1.4 allocation-tier gate term:
+    `max(instance_footprint_GB + 1.0, per_instance_budget_gb)`.
+
+    The `+ 1.0` GB spike margin is S1.4's gate; the `max(..., budget)`
+    floor is the S1.4-vs-S2.2 reconciliation (pin-reality delta
+    2026-09-23): S2.2 caps each container at `per_instance_budget_gb`
+    (= footprint + 5% margin), so on a box where the 5% margin > 1.0 GB
+    the cap is the larger term and the tier must gate on the cap — a
+    free pool between the two would pass `footprint + 1.0` but not fit
+    the container. On this box the margin term is the max
+    (need 15.08 > cap 14.78), so the floor is a no-op here; it binds on
+    any box where budget > footprint + 1.0.
+    """
+    return max(
+        bonsai2_vram.instance_footprint_gb(weights_gb, slots, ctx_size)
+        + TIER_MARGIN_GB,
+        budget_gb,
+    )
+
+
 def allocation_tier(need_gb: float, free_reader) -> tuple[bool, float, str]:
-    """S1.4: `free >= instance_footprint_GB + 1.0`. `free_reader` is
-    injectable (the hermetic test drives the bounded-read retry); the
+    """S1.4: `free >= allocation_need_gb` (the gate term is
+    `max(footprint + 1.0, cap)` — see `allocation_need_gb`). `free_reader`
+    is injectable (the hermetic test drives the bounded-read retry); the
     real reader is `read_free_gb`. Returns (granted, free_gb, detail)."""
     free_gb = free_reader()
     granted = free_gb >= need_gb
     detail = (
         f"S1.4 allocation tier: free {free_gb:.2f} GB "
-        f"{'<=' if granted else '<'} need {need_gb:.2f} GB (footprint + 1.0 GB margin)"
+        f"{'<=' if granted else '<'} need {need_gb:.2f} GB "
+        f"(max(footprint + 1.0 GB margin, per-instance cap))"
     )
     return granted, free_gb, detail
 
@@ -651,6 +676,17 @@ def spawn_sequence(
             # but keep going: later instances are independent (S2.1).
             log(f"i={i} systemctl start rc={rc} (recorded, continuing to next)")
         spawned.append(i)
+        if start_rc.get(i, 0) != 0:
+            # A failed start is already `bfailed` in health.json (S1.5
+            # routing) — polling its port for up to boot_target_s is
+            # wasted time (the engine is not up; the S2.5 "wait each to
+            # healthy before the next" guarantee is still met because the
+            # NEXT start is gated on this index's bookkeeping, not on a
+            # healthy probe). The MAP 2.6 escalation will restart it.
+            log(
+                f"i={i} start failed (rc={start_rc[i]}), skipping healthy wait (S1.5 bfailed)"
+            )
+            continue
         ok = wait_healthy(i, cfg, sysctl_base)
         log(f"i={i} healthy={ok} (S2.5: wait before next)")
         # S2.5: 'waits each to healthy BEFORE the next' — the wait happens
@@ -780,16 +816,17 @@ def main(argv: list[str] | None = None) -> int:
         _log(w)
     _log(f"S2.3: free {free_gb:.2f} GB -> N'={n_prime}")
 
-    # --- S1.4 allocation-tier need (footprint + 1.0 GB spike margin) ----
-    need_gb = (
-        bonsai2_vram.instance_footprint_gb(
-            cfg["weights_gb"], int(cfg["slots"]), int(cfg["ctx_size"])
-        )
-        + TIER_MARGIN_GB
+    # --- S1.4 allocation-tier need (max(footprint + 1.0, cap)) --------
+    footprint = bonsai2_vram.instance_footprint_gb(
+        cfg["weights_gb"], int(cfg["slots"]), int(cfg["ctx_size"])
+    )
+    need_gb = allocation_need_gb(
+        cfg["weights_gb"], int(cfg["slots"]), int(cfg["ctx_size"]), budget_gb
     )
     _log(
         f"S1.4 allocation tier need: {need_gb:.2f} GB "
-        f"(footprint {need_gb - TIER_MARGIN_GB:.2f} + {TIER_MARGIN_GB:.1f} GB margin)"
+        f"(max(footprint {footprint:.2f} + {TIER_MARGIN_GB:.1f} GB margin, "
+        f"cap {budget_gb:.2f} GB))"
     )
 
     # --- S2.1 boot order: main stack first -----------------------------
@@ -811,6 +848,11 @@ def main(argv: list[str] | None = None) -> int:
     #     MAP 2.7; the skeleton hands off to main-only, exit 0) ----------
     main_only_reason: str | None = None
     if n_prime == 0:
+        # S2.4: the planning-tier N'=0 reason is `budget_zero` (the
+        # spec shares it with the post-PTQ1_0-retry zero; a distinct
+        # `fallback_zero` is a MAP 2.7 candidate — S2.4 amendment
+        # 2026-09-23, G3 PR #10 round 2). Distinct from S3.2's
+        # `user_unloaded` (explicit unload).
         main_only_reason = "budget_zero"
         _log(
             "S2.4: N'=0 -> main-only mode (reason=budget_zero). "
