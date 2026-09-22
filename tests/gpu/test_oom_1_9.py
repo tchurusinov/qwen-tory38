@@ -25,15 +25,17 @@ loop, this test reproduces it from live free memory):
     (a clean, deterministic reject with free/need in the log), and no
     spawned container's log contains SIGSEGV/SIGBUS/core-dump markers
   * a path-2 demonstration spawn follows at i = 2 with its cgroup cap
-    set BELOW the tier requirement (6.0 GB < 15.08 GB — S1.5 path 2's
-    "the tier passed and free memory moved in the gap" shape, forced):
-    if the kernel OOM-kills the load (OOMKilled, exit 137-class) that's
-    clean; if the warm page cache lets the load split across host/CUDA
-    instead (probed 2026-09-22: file-backed mmap'd weights are
-    reclaimable, so a sub-requirement cap does NOT guarantee an OOM
-    kill on this box — the engine logs "layer 0 is assigned to device
-    CPU" and serves) that is the path-2 "kernel manages it" shape and
-    is accepted. Both outcomes assert the segfault-marker check.
+    set BELOW the tier requirement (6.0 GB < 15.08 GB) and a host-side
+    memory holder cutting MemAvailable by ~10 GB — S1.5 path 2's "the
+    tier passed and free memory moved in the gap" shape, forced to be
+    deterministic. If the kernel OOM-kills the load (OOMKilled,
+    exit 137-class) that's clean; if the warm page cache lets the load
+    split across host/CUDA instead (probed 2026-09-22: file-backed
+    mmap'd weights are reclaimable, so a sub-requirement cap does NOT
+    guarantee an OOM kill on this box — the engine logs "layer 0 is
+    assigned to device CPU" and serves) that is the path-2 "kernel
+    manages it" shape and is accepted. Both outcomes assert the
+    segfault-marker check.
   * prior instances 0/1 stay HEALTHY afterwards: containers Up,
     /v1/models still returns the alias on both ports, and a
     16-token completion round-trips on both (the S1.7 "stay healthy"
@@ -44,11 +46,15 @@ loop, this test reproduces it from live free memory):
 Measurement notes (box-specific, probed 2026-09-22):
   * /proc/meminfo MemAvailable is the free-memory read on this GB10
     (the MAP 1.7 convention: nvidia-smi `--query-gpu` memory fields are
-    N/A on unified memory). Probe numbers: ~43.7 GB base; ~29.2 GB
-    after one 14.78 g-capped instance; ~14.8 GB after two (each load
-    nets ~14.44 GB, the MAP 1.7 measured total incl. overhead). The
-    tier requirement 15.08 GB = instance_footprint_GB(7.21 GB,
-    8 slots, 262144) + 1.0 GB = 14.08 + 1.0.
+    N/A on unified memory). Probe numbers (~GiB as read from
+    /proc/meminfo): ~43.7 base; ~29.2 after one 14.78 g-capped
+    instance; ~14.8 after two (each load nets ~14.44, the MAP 1.7
+    measured total incl. overhead). The S1.4 formula itself is
+    decimal-GB (the spec's 7.21 GB = 7206168928 / 1e9): the tier
+    requirement 15.08 GB = instance_footprint_GB(7.206 GB, 8 slots,
+    262144) + 1.0 GB = 14.08 + 1.0 — the weights are read from the
+    template's pinned size_bytes in decimal GB so the tier and the
+    formula can't drift in units.
   * The tier fails at i=2 by only ~0.27 GB — the test asserts the pool
     state (free in a sane band [5 GB, need) at i=2) so a drift in
     main-stack usage fails it loudly instead of changing its meaning.
@@ -79,6 +85,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 import unittest
 import urllib.error
@@ -142,10 +149,11 @@ def _instance_budget_gb() -> float:
 
 
 def _weights_gb() -> float:
-    # S1.1: the default quant (PQ2_0) byte size pinned in the template.
-    return _yaml_value("size_bytes", r"(?m)^[ \t]*size_bytes:[ \t]*([0-9.]+)") / (
-        1024**3
-    )
+    # S1.1: the default quant (PQ2_0) byte size pinned in the template,
+    # in DECIMAL GB (1e9) — the S1.4 formula is decimal-GB throughout
+    # (its worked example: 7.21 GB weights = 7206168928 / 1e9; 14.08 =
+    # 7.21 + 6.87). A GiB division would under-size the footprint.
+    return _yaml_value("size_bytes", r"(?m)^[ \t]*size_bytes:[ \t]*([0-9.]+)") / 1e9
 
 
 def _ctx_size() -> int:
@@ -355,6 +363,30 @@ def _allocation_tier(free_gb: float, footprint_gb: float) -> tuple[bool, str]:
 SEGFAULT_MARKERS = ("SIGSEGV", "SIGBUS", "core dumped", "Segmentation fault")
 
 
+def _start_memory_holder(size_gb: float):
+    """S1.5 path 2's "free memory moved in the gap", made deterministic:
+    a host-side process that allocates + touches `size_gb` GB of
+    anonymous memory (bytearray zero-fill touches every page) and holds
+    it. It reduces /proc/meminfo MemAvailable the way a concurrent
+    allocation would — the exact condition the S1.4 tier protects
+    against — and is killed after the path-2 demonstration. Returns the
+    Popen handle."""
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import time, sys; "
+                "b = bytearray(int(sys.argv[1])); "
+                "print(len(b), flush=True); time.sleep(3600)"
+            ),
+            str(int(size_gb * 1024**3)),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 class TestOomCeiling(unittest.TestCase):
     """S1.7 VRAM ceiling: load until the S1.4 allocation tier fails ->
     ERR_VRAM_OOM, not a segfault; prior instances stay healthy."""
@@ -460,7 +492,11 @@ class TestOomCeiling(unittest.TestCase):
             # Phase 3: the path-2 demonstration spawn at i=2 — the tier
             # was bypassed (S1.5 path 2: "the tier passed and free
             # memory moved in the gap"), with a cgroup cap below the
-            # requirement. Two acceptable outcomes, one rejected one:
+            # requirement. The "free memory moved in the gap" is made
+            # DETERMINISTIC with a host-side memory holder (a ~10 GB
+            # touched bytearray cutting MemAvailable), so the path-2
+            # condition holds instead of relying on pool drift. Two
+            # acceptable outcomes, one rejected one:
             #   * OOMKilled=True  -> the kernel OOM-kill (exit
             #     137-class): clean
             #   * still running   -> the kernel managed the split
@@ -471,20 +507,32 @@ class TestOomCeiling(unittest.TestCase):
             #     from passing silently
             # "Not a segfault" = no SIGSEGV/SIGBUS/core-dump markers in
             # any spawned container's log, in either outcome.
-            _spawn(i2, PORT_BASE + 2, PATH2_CAP_G)
-            deadline = time.monotonic() + READY_TIMEOUT_S
-            state = None
-            while time.monotonic() < deadline:
-                st = _container_state(i2)
-                if not st["running"]:
-                    state = st
-                    break
-                time.sleep(READY_POLL_S)
-            if state is None:
-                state = _container_state(i2)  # still running: the split shape
+            holder = _start_memory_holder(10.0)
+            time.sleep(3.0)  # let the holder's pages touch before the spawn
+            print(
+                f"[1.9] i=2 path-2: memory holder up (MemAvailable "
+                f"{_mem_available_gb():.1f} GB), spawning at {PATH2_CAP_G}",
+                flush=True,
+            )
+            try:
+                _spawn(i2, PORT_BASE + 2, PATH2_CAP_G)
+                deadline = time.monotonic() + READY_TIMEOUT_S
+                state = None
+                while time.monotonic() < deadline:
+                    st = _container_state(i2)
+                    if not st["running"]:
+                        state = st
+                        break
+                    time.sleep(READY_POLL_S)
+                if state is None:
+                    state = _container_state(i2)  # still running: the split shape
+            finally:
+                holder.terminate()
+                holder.wait(timeout=30)
             print(
                 f"[1.9] i=2 path-2 spawn: OOMKilled={state['oom_killed']}, "
-                f"running={state['running']}, exit={state['exit_code']}",
+                f"running={state['running']}, exit={state['exit_code']} "
+                f"(holder released, MemAvailable {_mem_available_gb():.1f} GB)",
                 flush=True,
             )
             for n in (i0, i1, i2):

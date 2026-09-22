@@ -124,7 +124,7 @@ def _wait_ready(deadline: float) -> bool:
 
 def _engine_pid_in_container() -> int:
     """The llama-server PID inside the container (PID 1 — the nvidia
-    entrypoint execs it, probed 2026-09-22)."""
+    entrypoint execs it, probed 2026-09-22). The kill -9 target."""
     r = subprocess.run(
         ["docker", "exec", CONTAINER, "pgrep", "-x", "llama-server"],
         capture_output=True,
@@ -134,6 +134,21 @@ def _engine_pid_in_container() -> int:
     pids = [p for p in r.stdout.split() if p.isdigit()]
     assert pids, f"llama-server PID not found in container: {r.stdout!r} {r.stderr!r}"
     return int(pids[0])
+
+
+def _container_host_pid() -> int:
+    """The container's init PID in the HOST pid namespace (0 when not
+    running). Because llama-server IS the container's init (the
+    in-container PID is always 1, so it can never witness a restart),
+    the HOST pid is the restart witness: a re-run container gets a new
+    host pid."""
+    r = subprocess.run(
+        ["docker", "inspect", CONTAINER, "--format", "{{.State.Pid}}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(r.stdout.strip())
 
 
 def _gpu_compute_apps_mib() -> dict:
@@ -197,8 +212,10 @@ class TestKillRestart(unittest.TestCase):
                 f"instance never healthy within {READY_TIMEOUT_S}s before the kill",
             )
             pid_before = _engine_pid_in_container()
+            host_pid_before = _container_host_pid()  # restart witness, pre-kill
             print(
-                f"\n[1.11] healthy (alias on :{PORT}, engine pid {pid_before}); "
+                f"\n[1.11] healthy (alias on :{PORT}, engine pid {pid_before}, "
+                f"host pid {host_pid_before}); "
                 f"kill -9 -> restart window follows (budget {RESTART_BUDGET_S:.0f}s)",
                 flush=True,
             )
@@ -255,17 +272,28 @@ class TestKillRestart(unittest.TestCase):
                 f"this at boot scale",
             )
 
-            # A real process restart: the engine's in-container PID
-            # differs from the pre-kill one (PID 1 of a fresh container
-            # is a fresh process — if the image ever gains a
-            # supervisor that re-forks in place, this assertion is what
-            # keeps the test honest).
-            pid_after = _engine_pid_in_container()
+            # A real process restart, witnessed by the HOST pid: the
+            # in-container PID is 1 in BOTH containers (llama-server is
+            # the container init — the nvidia entrypoint execs it), so
+            # it can never differ across a container re-run; the host
+            # pid (docker .State.Pid) is allocated fresh per container
+            # and is the restart witness.
+            host_pid_after = _container_host_pid()
+            self.assertGreater(
+                host_pid_after,
+                0,
+                "post-restart container has no host pid — it is not running",
+            )
             self.assertNotEqual(
-                pid_after,
-                pid_before,
-                f"post-restart engine PID {pid_after} == pre-kill PID — "
-                f"not a process restart",
+                host_pid_after,
+                host_pid_before,
+                f"post-restart host pid {host_pid_after} == pre-kill host "
+                f"pid {host_pid_before} — not a process restart",
+            )
+            print(
+                f"[1.11] restart witnessed: host pid "
+                f"{host_pid_before} -> {host_pid_after}",
+                flush=True,
             )
 
             # Others unaffected (the half this single-instance test can
