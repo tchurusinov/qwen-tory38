@@ -567,7 +567,11 @@ SPEC.md `status` → `active`.
   * image `bonsai2-server:1.0` unchanged (re-baked in PR #8, digest
     sha256:ed6068ae…)
   * hermetic 134/134 OK; @gpu 13/13 OK
-    (test-logs/gpu-20260922-175630.log); gate PASS on branch tip
+    (test-logs/gpu-20260922-175630.log; per-module: 1.7 bring-up 1,
+    1.8 sustained 1, 1.9 OOM-ceiling 1, 1.10 port-collision 1,
+    1.11 kill-9/restart 1 — 5 @gpu integration cases; the other 8 are
+    the hermetic image checks that run in the same suite: build-banner
+    3, runtime-image 5); gate PASS on branch tip
   * no probe/test containers left; ports 30101–30103 free; main stack
     untouched (PIDs 5581 + 12262 baseline unchanged)
 - LIVE MEASUREMENTS (acceptance evidence, final green run
