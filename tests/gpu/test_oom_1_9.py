@@ -568,9 +568,12 @@ class TestOomCeiling(unittest.TestCase):
             #   * OOMKilled=True (exit 137, free ~11.0 GB) -> the
             #     kernel's cgroup OOM-kill: the clean ERR_VRAM_OOM
             #     kernel path
-            #   * still running (free ~14.1 GB)            -> the
+            #   * still running (observed at free ~14.1 GB and, holder-
+            #     driven, at ~12.1 GB)                   -> the
             #     kernel managed the split (file-backed weights
-            #     reclaimable): clean, serves at reduced placement
+            #     reclaimable): clean, serves at reduced placement;
+            #     its cold 6.0 g load is slow, so the ready check
+            #     gets the full 180 s spawn budget, not a short tick
             #   * exited without OOMKilled (exit 133
             #     SIGTRAP, free ~10.6 GB)                  -> the
             #     engine's own clean error on the under-budget
@@ -645,15 +648,28 @@ class TestOomCeiling(unittest.TestCase):
                     flush=True,
                 )
             else:
-                # The split shape: the path-2 instance still serves
-                # (that is the point of the demonstration — the kernel
-                # managed the under-budget load, it did not crash).
-                self.assertTrue(
-                    _wait_ready(PORT_BASE + 2, time.monotonic() + 60.0),
-                    "i=2 running but its port never served the alias "
-                    "(the split shape should still be a serving engine)",
+                # The split shape: the path-2 instance survived the gap
+                # (the kernel managed the under-budget load — it did
+                # not crash), and is now finishing its COLD load. A
+                # cold 6.0 g load at a tight pool is slow (probe
+                # 2026-09-22: ~114 s to load at the looser ~14 GB pool),
+                # so the ready window is load-appropriate — the same
+                # 180 s budget the spawn used, not a 60 s tick.
+                t_ready = time.monotonic()
+                served = _wait_ready(PORT_BASE + 2, time.monotonic() + READY_TIMEOUT_S)
+                print(
+                    f"[1.9] i=2 split shape: "
+                    f"{'serving' if served else 'not yet serving'} at the "
+                    f"6.0 g cap after {time.monotonic() - t_ready:.0f}s",
+                    flush=True,
                 )
-                print("[1.9] i=2 split shape: serving at the 6.0 g cap", flush=True)
+                self.assertTrue(
+                    served,
+                    f"i=2 running but its port never served the alias "
+                    f"within {READY_TIMEOUT_S:.0f}s (the split shape "
+                    f"should still be a serving engine); log tail: "
+                    f"{_container_logs(i2)[-300:]}",
+                )
 
             # Phase 4: prior instances stay HEALTHY (S1.7): containers
             # Up, alias on /v1/models, and a 16-token completion
