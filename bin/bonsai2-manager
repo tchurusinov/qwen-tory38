@@ -251,9 +251,11 @@ def _mem_available_gb() -> float:
 def read_free_gb() -> float:
     """The S1.4 allocation-tier free read, bounded: one probe, one retry,
     then free = 0 (S1.4: "5 s timeout per probe, one retry; on a second
-    timeout the tier treats free as 0"). The /proc read is instant, so the
-    5 s bound is nominal here; the retry-once-then-zero shape is the load-
-    bearing part and is what the hermetic test drives with a failing reader."""
+    timeout the tier treats free as 0"). The 5 s bound (
+    FREE_PROBE_TIMEOUT_S) is the S1.4 contract on the PROBE; the current
+    /proc/meminfo reader is instant, so the bound is nominal here — the
+    load-bearing part is the retry-once-then-zero shape, which the
+    hermetic test drives with a failing reader."""
     for attempt in range(FREE_PROBE_RETRIES + 1):
         try:
             return _mem_available_gb()
@@ -288,11 +290,15 @@ def _main_container_id(container: str) -> str | None:
     return cid or None
 
 
-def main_used_gb(container: str, fallback_gb: float) -> float:
+def main_used_gb(container: str, fallback_gb: float) -> tuple[float, str]:
     """S2.3: the main container's live cgroup `memory.current` (sleep-
     accurate — reflects the main stack's CURRENT pool usage, not the 76.4
     GB fresh-load default), else the recorded `main_stack.footprint_gb`
-    fallback.
+    fallback. Returns `(used_gb, source)` with source one of
+    `"live cgroup"` / `"recorded footprint"` — the caller must log the
+    SOURCE it actually used (not infer it from the value: a container
+    genuinely sitting at exactly the recorded footprint would otherwise
+    log the fallback path).
 
     Docker on this box (cgroup v2, systemd-managed) charges each container
     to /sys/fs/cgroup/system.slice/docker-<id>.scope/. We try the
@@ -310,13 +316,13 @@ def main_used_gb(container: str, fallback_gb: float) -> float:
         ):
             if cand.is_file():
                 try:
-                    return int(cand.read_text().strip()) / 1e9  # bytes -> decimal GB
+                    return int(cand.read_text().strip()) / 1e9, "live cgroup"
                 except (OSError, ValueError) as exc:
                     _log(
                         f"main cgroup read failed ({cand}): {exc} -> footprint fallback"
                     )
                     break
-    return fallback_gb
+    return fallback_gb, "recorded footprint"
 
 
 # --------------------------------------------------------------------------
@@ -602,10 +608,11 @@ def spawn_sequence(
     wait_healthy=wait_instance_healthy,
     log=_log,
     sysctl_base: list[str] | None = None,
-) -> tuple[int, list[int], str]:
+) -> tuple[int, list[int], str, dict[int, int]]:
     """Spawn the granted instances IN ORDER, running the S1.4 allocation
     tier before each (S2.5 + S1.4 + S2.3). Returns (exit_code,
-    spawned_indexes, detail).
+    spawned_indexes, detail, start_rc) where `start_rc` maps each spawned
+    index to its `systemctl start` rc (0 = the start issued cleanly).
 
     The S1.4 two-outcome allocation tier drives the exit code:
       * fail at i > 0  -> WARN_VRAM_SHORTFALL, stop at i-1, exit 0
@@ -622,23 +629,25 @@ def spawn_sequence(
     branches without a GPU.
     """
     spawned: list[int] = []
+    start_rc: dict[int, int] = {}
     for i in range(n_prime):
         granted, free_gb, detail = allocation_tier(need_gb, free_reader)
         log(f"i={i} {detail}")
         if not granted:
             if i == 0:
-                return EXIT_VRAM_OOM, spawned, f"ERR_VRAM_OOM: {detail}"
+                return EXIT_VRAM_OOM, spawned, f"ERR_VRAM_OOM: {detail}", start_rc
             log(
                 f"WARN_VRAM_SHORTFALL {{i: {i}, free: {free_gb:.2f}, need: {need_gb:.2f}}} "
                 f"— partial load, proceeding with {len(spawned)} instance(s)"
             )
-            return EXIT_OK, spawned, f"partial load at i={i}: {detail}"
+            return EXIT_OK, spawned, f"partial load at i={i}: {detail}", start_rc
         rc = systemctl_start(i, sysctl_base)
+        start_rc[i] = rc
         if rc != 0:
             # A unit that fails to START (docker missing, port collision the
             # unit can't clear) is not a VRAM condition — S1.5 routes it to
-            # the unit's bfailed path. Record it as a spawned index so the
-            # health.json reflects it (state resolves on the next probe)
+            # the unit's bfailed path. Record it as a spawned index (the
+            # start_rc surfaces the failure to the caller for health.json)
             # but keep going: later instances are independent (S2.1).
             log(f"i={i} systemctl start rc={rc} (recorded, continuing to next)")
         spawned.append(i)
@@ -649,7 +658,12 @@ def spawn_sequence(
         # loop / MAP 2.6 will restart it per the S2.2 restart policy); the
         # ordering guarantee is that the NEXT systemctl start is gated on
         # this one's wait, which it is by construction.
-    return EXIT_OK, spawned, f"full load: {len(spawned)} instance(s) spawned"
+    return (
+        EXIT_OK,
+        spawned,
+        f"full load: {len(spawned)} instance(s) spawned",
+        start_rc,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -754,10 +768,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- S2.3 boot-time budget check -----------------------------------
     total_gb = read_total_gb()
-    main_used = main_used_gb(cfg["main_container"], cfg["main_footprint_gb"])
-    source = (
-        "live cgroup" if main_used != cfg["main_footprint_gb"] else "recorded footprint"
-    )
+    main_used, source = main_used_gb(cfg["main_container"], cfg["main_footprint_gb"])
     _log(
         f"S2.3: total {total_gb:.2f} GB, main {main_used:.2f} GB ({source}), "
         f"os-reserved {cfg['os_reserved_gb']:.1f} GB, N={n_yaml}, budget {budget_gb:.2f} GB"
@@ -791,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- S2.5 spawn path (ordered) --------------------------------------
     sysctl_base = systemctl_base()
-    exit_code, spawned, detail = spawn_sequence(
+    exit_code, spawned, detail, start_rc = spawn_sequence(
         cfg, n_prime, need_gb, log=_log, sysctl_base=sysctl_base
     )
     _log(detail)
@@ -822,15 +833,23 @@ def main(argv: list[str] | None = None) -> int:
         notify_sd("READY=1")
         return EXIT_OK
 
-    # --- first health.json (states from the spawn wait outcome) ---------
+    # --- first health.json (states from the spawn outcome) -------------
+    # A unit whose `systemctl start` returned non-zero reflects its S1.5
+    # bfailed path DIRECTLY in health.json (the start_rc the spawn
+    # sequence surfaces) instead of re-deriving by probing a possibly-dead
+    # unit. A clean start that has not gone healthy yet is `degraded`
+    # (alive-but-unproven), not bfailed.
     states = []
     for i in spawned:
-        port = _port(cfg, i)
-        states.append(
-            "healthy"
-            if instance_healthy(port, cfg["alias"], cfg["api_key"])
-            else "degraded"
-        )
+        if start_rc.get(i, 0) != 0:
+            states.append("bfailed")
+        else:
+            port = _port(cfg, i)
+            states.append(
+                "healthy"
+                if instance_healthy(port, cfg["alias"], cfg["api_key"])
+                else "degraded"
+            )
     write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
     notify_sd(f"STATUS=bonsai2-manager: booted {len(spawned)} instance(s)")
 

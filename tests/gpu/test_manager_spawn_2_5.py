@@ -186,7 +186,7 @@ def _instance_unit_text(
         f"{exec_start}\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
-        "CPUQuota=64%%\n"
+        "CPUQuota=64%\n"
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"

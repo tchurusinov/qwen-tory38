@@ -287,9 +287,33 @@ class TestPlanningTier(unittest.TestCase):
     def test_main_used_gb_falls_back_to_recorded_footprint(self):
         """S2.3: 'live when the container exists, else the recorded
         main_stack.footprint_gb default'. A missing container id is the
-        fallback path (the live cgroup read is the @gpu test's probe)."""
+        fallback path (the live cgroup read is the @gpu test's probe).
+        The returned source is the log label main() must use — never
+        inferred from the value (a container sitting exactly at the
+        recorded footprint would mislabel as the fallback path)."""
         with mock.patch.object(mgr, "_main_container_id", return_value=None):
-            self.assertEqual(mgr.main_used_gb("qwen38-sglang", 76.4), 76.4)
+            used, source = mgr.main_used_gb("qwen38-sglang", 76.4)
+        self.assertEqual(used, 76.4)
+        self.assertEqual(source, "recorded footprint")
+
+    def test_main_used_gb_live_cgroup_source_label(self):
+        """The live-read path labels itself 'live cgroup' even when the
+        value happens to equal the fallback (the P1 edge case that
+        value-comparison hid)."""
+        fake_bytes = str(int(76.4e9))  # EXACTLY the fallback value in bytes
+        first_cand = Path("/sys/fs/cgroup/system.slice/docker-abc.scope/memory.current")
+
+        def is_file(self):
+            return self == first_cand
+
+        with (
+            mock.patch.object(mgr, "_main_container_id", return_value="/abc"),
+            mock.patch.object(Path, "is_file", is_file),
+            mock.patch.object(Path, "read_text", lambda self: fake_bytes),
+        ):
+            used, source = mgr.main_used_gb("qwen38-sglang", 76.4)
+        self.assertAlmostEqual(used, 76.4)
+        self.assertEqual(source, "live cgroup")
 
 
 # --------------------------------------------------------------------------
@@ -410,7 +434,7 @@ class TestSpawnSequence(unittest.TestCase):
             order.append(f"wait-{i}")
             return True
 
-        exit_code, spawned, _ = mgr.spawn_sequence(
+        exit_code, spawned, _, start_rc = mgr.spawn_sequence(
             self._cfg(),
             2,
             15.08,
@@ -422,6 +446,7 @@ class TestSpawnSequence(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(spawned, [0, 1])
         self.assertEqual(order, ["start-0", "wait-0", "start-1", "wait-1"])
+        self.assertEqual(start_rc, {0: 0, 1: 0})
 
     def test_partial_load_at_i_gt_0_is_exit_0(self):
         """S1.4 i > 0 tier fail: WARN_VRAM_SHORTFALL, stop at i-1, exit 0."""
@@ -436,7 +461,7 @@ class TestSpawnSequence(unittest.TestCase):
             order.append(f"start-{i}")
             return 0
 
-        exit_code, spawned, detail = mgr.spawn_sequence(
+        exit_code, spawned, detail, _ = mgr.spawn_sequence(
             self._cfg(),
             2,
             15.08,
@@ -459,7 +484,7 @@ class TestSpawnSequence(unittest.TestCase):
             started.append(i)
             return 0
 
-        exit_code, spawned, detail = mgr.spawn_sequence(
+        exit_code, spawned, detail, _ = mgr.spawn_sequence(
             self._cfg(),
             2,
             15.08,
@@ -477,7 +502,7 @@ class TestSpawnSequence(unittest.TestCase):
         """S2.4 handoff: N' = 0 -> the loop body is empty, exit 0, no
         systemctl call (the main-only write is the caller's)."""
         started = []
-        exit_code, spawned, _ = mgr.spawn_sequence(
+        exit_code, spawned, _, _ = mgr.spawn_sequence(
             self._cfg(),
             0,
             15.08,
@@ -500,7 +525,7 @@ class TestSpawnSequence(unittest.TestCase):
             order.append(f"start-{i}")
             return 1 if i == 0 else 0
 
-        exit_code, spawned, _ = mgr.spawn_sequence(
+        exit_code, spawned, _, start_rc = mgr.spawn_sequence(
             self._cfg(),
             2,
             15.08,
@@ -512,6 +537,9 @@ class TestSpawnSequence(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(spawned, [0, 1], "the failed i=0 is recorded")
         self.assertEqual(order, ["start-0", "start-1"])
+        # The failed start surfaces its rc so main() can reflect bfailed in
+        # health.json directly (S1.5 routing — no re-derivation by probe).
+        self.assertEqual(start_rc, {0: 1, 1: 0})
 
     def test_needs_use_vram_formula_not_a_hardcoded_number(self):
         """The need the main() computes must equal the S1.4 formula
