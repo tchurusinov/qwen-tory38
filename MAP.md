@@ -606,6 +606,34 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: rounds 3–4 reviewed + disposed (round 3: 1 P1/2 P2, both P2 refuted-by-read + 1 P1 refuted-by-probe, cap_bytes documented; round 4: 1 P0/2 P1/1 P2, 3 fixed + 1 refuted-by-probe) + @gpu re-verify green x2 (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 3 (commit 11f12c3, disposition comment 611): isolated reviewer
+  1 P1 + 2 P2. P1 (stale free-read across instances) REFUTED by probe —
+  `allocation_tier` calls `free_reader()` inside the per-i loop, so free is
+  re-read every spawn; need_gb is a constant threshold, correctly computed
+  once. P2 (stale main_healthy) REFUTED by read — `run_probe_loop` re-calls
+  `main_healthy()` at the top of every cycle. P2 (cap_bytes brittleness)
+  DISPOSED — documented as the deliberate unit-vs-spec drift detector.
+  @gpu green (57.7 s, 2 healthy).
+- round 4 (commit 064493b, disposition comment 613 + @gpu append):
+  1 P0 + 2 P1 + 1 P2. P0 (exit-4/Type=notify fall-through) FIXED — explicit
+  `if exit_code == EXIT_VRAM_OOM` block writes health.json
+  main_only_reason="ERR_VRAM_OOM", emits STATUS=, returns 4 before READY=1
+  (Restart=on-failure is the intended transient-retry path). P1#1
+  (fallback_size_bytes unused) FIXED — validated at config-load (ERR_CONFIG
+  if not a positive int), carried into cfg, surfaced in the S2.4 N=0
+  handoff log for MAP 2.7. P1#2 (cap off-by-2) REFUTED by probe —
+  int(float('14.78')*2**30)=15869904158 == spec pinned == docker-probed cap;
+  the review's 15869904160 mis-truncated. P2 (read_total_gb OSError uncaught)
+  FIXED — try/except OSError -> ERR_CONFIG exit 2. +5 hermetic tests
+  (172/172 OK). @gpu green post-fix (59.9 s, 2 healthy).
+- next: round-5 review (launching); loop until clean, then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–2; the ERR_VRAM_OOM reason value is within the S2.4/S3.1
+  amendment's open schema).
+
 ### 2026-09-23 — G3 loop PR #10: round 2 reviewed, 6 findings (1 P0/2 P1/3 P2) disposed + fixed + @gpu re-verify green x2 (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
