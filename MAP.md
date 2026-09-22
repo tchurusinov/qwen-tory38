@@ -520,6 +520,63 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-22 — PR #8 G3 loop continued: round-3 disposition posted + round-4 review posted (pending disposition)
+- agent/model: Hermes qwen3.8-27b (session: PR #8 review-loop continuation)
+- phase(s): P1 (1.7/1.8 review loop; no new items)
+- items checked: none (1.7/1.8 still open until G4 merge)
+- machine state:
+  * branch `phase1-bringup-load` head `03521ac` (pushed): `399163c`
+    (G3c r3: P0 review.sh EXCLUDE_SPECS word-split -> EXCLUDE_ARGS array;
+    P1 load-test footprint helpers) + `03521ac` (P1 #214 wiring: the
+    meter helpers are now CALLED in test_load_1_8.py — pre-launch
+    baseline before docker run, post-window delta asserted in the S1.4
+    band [13.30, 15.88] GB, same convention as test_bringup_1_7)
+  * PR #8 comment sequence: 527 R1-raw, 530 R1-disposition, 532 R2-raw,
+    534 R2-disposition, 535 R3-raw, 539 R4-raw (head 399163c,
+    AGENTS.md+README.md excluded via REVIEW_EXCLUDE), 542 R3-disposition
+    (posted post-hoc with a sequencing note; covers all 6 R3 findings)
+  * hermetic 134/134 OK; gate PASS on 03521ac; image
+    bonsai2-server:1.0 unchanged (digest ed6068ae…)
+- R3 dispositions (comment 542): P0 review.sh word-split FIXED
+  (399163c, live pathspec probe); P1 #214 FIXED in two commits
+  (helpers 399163c + call sites 03521ac); P1 #260 WAIVED (probe: the
+  3s settling sleep was already in the tree at the reviewed head —
+  reviewer read past it; band = user-approved); P2 thread-locks NOTED
+  (GIL-atomic, deferred); P2 _completion HTTPError NOTED (real,
+  deferred to @gpu hardening); P2 kv_cache flag-set consistency NOTED
+  (belongs at S6.3/S2.2 install cross-check, deferred)
+- R4 findings (comment 539, head 399163c): 0 P0, 1 P1, 2 P2. All three
+  are re-statements of round-2 user-approved items (P1 = band floor
+  budget-anchored, already waived-by-user R2; P2 wall-time denominator,
+  already fixed+documented R2; P2 = existing-PID growth skew in
+  _gpu_delta_gb — a genuinely new note, P2, follow-up candidate).
+  R4 disposition PENDING. Note: R4 ran on 399163c, BEFORE the 03521ac
+  wiring commit; the P1 #214 class of finding is closed in 03521ac
+  regardless.
+- next (exact order, on `phase1-bringup-load`):
+  1. post the G3c round-4 disposition (comment 539's 3 findings: P1
+     waived-by-user band anchor + cite comment 534; P2 wall-time
+     waived-by-user + cite 534; P2 existing-PID-growth NOTED/deferred
+     — check whether the user wants it wired: _gpu_delta_gb could
+     instead sum new-total minus baseline-total, but that would count
+     main-stack growth against the instance; document or change at
+     user call)
+  2. if clean: G4-comment + human merge gate; then flip MAP 1.7/1.8
+     with the measurement numbers, re-run tests/run_gpu.sh once for the
+     full 10-test green including the new delta assert
+- blockers/intricacies:
+  * the two footprint helpers landed in 399163c DEFINED but not CALLED
+    (half of R3 P1 #214) — the @gpu load test would have passed without
+    ever asserting the VRAM half. Fixed in 03521ac. Lesson: when a
+    review finding says "test X doesn't assert Y", verify the assert
+    CALL SITE, not just that the helpers exist.
+  * PR comment ordering: R3-disposition (542) landed after R4-raw (539)
+    because the round-4 review was posted before the R3 disposition;
+    542 carries an explicit sequencing note so the G4 reader knows the
+    timeline.
+- spec deltas: none (this session is review-loop mechanics + one test
+  assert; no SPEC.md change)
+
 ### 2026-09-22 — Phase 1: MAP 1.7/1.8 implemented + measured, S1.3 image re-baked (branch `phase1-bringup-load`, G3 pending)
 - agent/model: Hermes qwen3.8-27b (session: continue of 2026-09-21
   mid-flight 1.7/1.8 session)
