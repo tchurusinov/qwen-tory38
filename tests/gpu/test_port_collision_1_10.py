@@ -33,9 +33,13 @@ Measurement notes (probed 2026-09-22 on this box):
     engine's raw code. The @gpu test asserts what the CONTAINER level
     can show: the fast clean exit + the bind-error log line + the
     other-instance-healthy half.
-  * The bind attempt precedes `load_model` (stderr order, probe
+  * The bind attempt precedes model load (stderr order, probe
     2026-09-22), so a collided instance consumes no VRAM and the test
-    does not need the S1.4 allocation-tier bookkeeping.
+    does not need the S1.4 allocation-tier bookkeeping. The engine's
+    model-load log line is "loading model '<file>'" / "(startup)
+    loading model" at the pinned commit (probed 2026-09-22 in the
+    runtime image's .so's — the `load_model` symbol is C++ internals,
+    not a log line).
 """
 
 import json
@@ -43,6 +47,7 @@ import re
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import unittest
 import urllib.error
@@ -63,6 +68,23 @@ READY_POLL_S = 2.0
 # 2026-09-22) — the bind is before model load — so 30 s is generous
 # without dragging the test.
 COLLISION_WATCH_S = 30.0
+
+
+def _drain_listener(listener: socket.socket, stop: "threading.Event") -> None:
+    """Accept-and-close connections on the dummy listener so its accept
+    queue does not accumulate the probe's SYNs (G3c round-1 P2: the
+    listener only `bind`s + `listen`s, so probe connections would sit
+    in the backlog for the whole window — harmless but not clean).
+    Runs on a daemon thread until `stop` is set."""
+    listener.settimeout(1.0)
+    while not stop.is_set():
+        try:
+            conn, _ = listener.accept()
+            conn.close()
+        except TimeoutError:
+            continue
+        except OSError:
+            break  # listener closed
 
 
 def _image_present() -> bool:
@@ -225,6 +247,14 @@ class TestPortCollision(unittest.TestCase):
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("0.0.0.0", PORT_BASE + 0))
         listener.listen(5)
+        # Drain the accept queue in the background (G3c round-1 P2):
+        # without it, the probe's SYNs sit in the backlog for the
+        # whole window.
+        drain_stop = threading.Event()
+        drain = threading.Thread(
+            target=_drain_listener, args=(listener, drain_stop), daemon=True
+        )
+        drain.start()
 
         i0, i1 = "bonsai2-test-i0-collide", "bonsai2-test-i1-collide"
         cap_g = f"{_instance_budget_gb():.1f}g"
@@ -273,9 +303,12 @@ class TestPortCollision(unittest.TestCase):
                 f"was something else: {logs[-800:]}",
             )
             self.assertNotIn(
-                "load_model",
+                "(startup) loading model",
                 logs,
-                "instance 0 reached model load — the collision should fail it before",
+                "instance 0 reached model load — the collision should fail "
+                "it before (the pinned engine's model-load line is "
+                "'(startup) loading model', probed 2026-09-22 in the "
+                "runtime image)",
             )
             print(
                 f"\n[1.10] instance 0: exited (code {st['exit_code']}) on the "
@@ -294,6 +327,7 @@ class TestPortCollision(unittest.TestCase):
                 "serving",
             )
         finally:
+            drain_stop.set()
             subprocess.run(["docker", "rm", "-f", i0], capture_output=True, check=False)
             subprocess.run(["docker", "rm", "-f", i1], capture_output=True, check=False)
             listener.close()

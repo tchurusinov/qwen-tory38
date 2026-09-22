@@ -29,17 +29,20 @@ loop, this test reproduces it from live free memory):
     because MemAvailable counts reclaimable page cache and the pool is
     not guaranteed below the requirement after two loads on its own
   * a path-2 demonstration spawn follows at i = 2 with its cgroup cap
-    set BELOW the tier requirement (6.0 GB < 15.08 GB) while the
-    holder still holds free down — S1.5 path 2's "the tier passed and
-    free memory moved in the gap" shape, forced to be deterministic.
-    If the kernel OOM-kills the load (OOMKilled, exit 137-class)
-    that's clean; if the warm page cache lets the load split across
-    host/CUDA instead (probed 2026-09-22: file-backed mmap'd weights
-    are reclaimable, so a sub-requirement cap does NOT guarantee an
-    OOM kill on this box — the engine logs "layer 0 is assigned to
+    set BELOW the tier requirement (6.0 GB < 15.08 GB), started while
+    the holder still holds free down — S1.5 path 2's "free memory
+    moved in the gap" shape, forced to be deterministic. The holder
+    is released as soon as the spawn has started, and the outcome is
+    measured in steady state on the loose pool (G3c round-1 P1: a
+    mid-teardown outcome races the pool transient). If the kernel
+    OOM-kills the load (OOMKilled, exit 137-class) that's clean; if
+    the warm page cache lets the load split across host/CUDA instead
+    (probed 2026-09-22: file-backed mmap'd weights are reclaimable,
+    so a sub-requirement cap does NOT guarantee an OOM kill on this
+    box — the engine logs "layer 0 is assigned to
     device CPU" and serves) that is the path-2 "kernel manages it"
-    shape and is accepted. Both outcomes assert the segfault-marker
-    check.
+    shape and is accepted. Every outcome asserts the segfault-marker
+    check and the exit-code guard (no 135/139 signal deaths).
   * prior instances 0/1 stay HEALTHY afterwards: containers Up,
     /v1/models still returns the alias on both ports, and a
     16-token completion round-trips on both (the S1.7 "stay healthy"
@@ -257,6 +260,25 @@ def _wait_ready(port: int, deadline: float) -> bool:
     return False
 
 
+def _probe_serving_once(port: int) -> bool:
+    """A single /v1/models check (True if the alias is served right now).
+    Used inside the path-2 outcome poll to detect the split shape's
+    "now serving" transition without committing to the full _wait_ready
+    window (G3c round-1 P1: the path-2 outcome is a steady-state
+    measurement, re-evaluated each poll on the loose pool)."""
+    try:
+        models = _http_json(f"http://127.0.0.1:{port}/v1/models", FREE_PROBE_TIMEOUT_S)
+        return ALIAS in (m.get("id") for m in models.get("data", []))
+    except (
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        ConnectionError,
+        TimeoutError,
+        OSError,
+    ):
+        return False
+
+
 def _engine_cmd(port: int) -> list[str]:
     """The S1.3 per-instance serving command, verbatim, at --port <port>
     (the S2.2 unit shape: the full command, not the image's baked
@@ -370,7 +392,13 @@ def _allocation_tier(free_gb: float, footprint_gb: float) -> tuple[bool, str]:
     )
 
 
-SEGFAULT_MARKERS = ("SIGSEGV", "SIGBUS", "core dumped", "Segmentation fault")
+SEGFAULT_MARKERS = ("SIGSEGV", "SIGBUS", "core dumped")
+# (G3c round-1 P1: the literal "Segmentation fault" phrase is NOT a
+# marker here — the container's PID 1 is the engine (the nvidia
+# entrypoint execs it), so no shell prints the phrase, and the pinned
+# engine's libs contain no such string (probed 2026-09-22: 0 hits in
+# all .so's). A real SIGSEGV dies with exit 139 / SIGBUS with 135,
+# which the exit-code guard below catches.)
 
 
 def _start_memory_holder(size_gb: float):
@@ -543,8 +571,13 @@ class TestOomCeiling(unittest.TestCase):
                 ok,
                 f"allocation tier unexpectedly PASSES at i=2 "
                 f"(free {free_at_i2:.2f} GB >= need {need_gb:.2f} GB) — "
-                f"the holder(s) did not cut free below the target; "
-                f"pool state drifted, re-run",
+                f"holder sizing hypothesis failed: {len(holders)} holder(s) "
+                f"touching {free_unheld - free_at_i2:.1f} GB of anonymous "
+                f"memory did not cut free below the target "
+                f"{target_free_gb:.2f} GB — page-cache reclamation absorbed "
+                f"the touched memory (the holder is the kernel's "
+                f"least-protected allocation); re-run with the pool in "
+                f"its probe state",
             )
             self.assertGreaterEqual(
                 free_at_i2,
@@ -568,55 +601,76 @@ class TestOomCeiling(unittest.TestCase):
             #   * OOMKilled=True (exit 137, free ~11.0 GB) -> the
             #     kernel's cgroup OOM-kill: the clean ERR_VRAM_OOM
             #     kernel path
-            #   * still running (observed at free ~14.1 GB and, holder-
-            #     driven, at ~12.1 GB)                   -> the
+            #   * running + serving (observed at free ~14.1 GB and,
+            #     holder-driven, at ~12.1 GB)            -> the
             #     kernel managed the split (file-backed weights
-            #     reclaimable): clean, serves at reduced placement;
-            #     its cold 6.0 g load is slow, so the ready check
-            #     gets the full 180 s spawn budget, not a short tick
+            #     reclaimable): clean, serves at reduced placement
             #   * exited without OOMKilled (exit 133
             #     SIGTRAP, free ~10.6 GB)                  -> the
             #     engine's own clean error on the under-budget
             #     allocation: clean, "not a segfault"
+            # Measurement shape (G3c round-1 P1: no mid-teardown
+            # outcome): the spawn starts while the holder holds the
+            # pool tight (that IS the "free memory moved in the gap"
+            # condition — a cgroup OOM-kill, if it is going to
+            # happen, lands in this window), then the holder is
+            # released and the OUTCOME is polled in steady state on
+            # the loose pool for the full 180 s spawn budget: a cold
+            # 6.0 g load is slow (~114 s, probe 2026-09-22), so the
+            # outcome may not be settled by the time the holder goes.
             # The one rejected outcome — a segfault-class crash — is
-            # caught by the marker loop below across ALL spawned
-            # containers, and by the non-zero-exit guard in the
-            # engine-error branch (a clean exit 0 under budget would
-            # mean the spawn "succeeded", not the path-2 failure).
-            # "Not a segfault" = no SIGSEGV/SIGBUS/core-dump markers in
-            # any spawned container's log, in any outcome.
+            # caught by the marker loop + exit-code guard below
+            # across ALL spawned containers (no SIGSEGV/SIGBUS/
+            # core-dump log markers; no 135/139 signal deaths; a
+            # clean exit 0 under budget would mean the spawn
+            # "succeeded", not the path-2 failure).
             print(
                 f"[1.9] i=2 path-2: holder(s) up (MemAvailable "
                 f"{_mem_available_gb():.1f} GB), spawning at {PATH2_CAP_G}",
                 flush=True,
             )
-            try:
-                _spawn(i2, PORT_BASE + 2, PATH2_CAP_G)
-                deadline = time.monotonic() + READY_TIMEOUT_S
-                state = None
-                while time.monotonic() < deadline:
-                    st = _container_state(i2)
-                    if not st["running"]:
-                        state = st
-                        break
-                    time.sleep(READY_POLL_S)
-                if state is None:
-                    state = _container_state(i2)  # still running: the split shape
-            finally:
-                # Release the holder(s) NOW (after the spawn's state is
-                # captured) so phase 4's "prior instances healthy" and
-                # the main-stack check run on a normal pool.
-                for h in holders:
-                    if h.returncode is None:
-                        h.terminate()
-                        h.wait(timeout=30)
+            _spawn(i2, PORT_BASE + 2, PATH2_CAP_G)
+            # Settle in the tight pool first (the cgroup limit is in
+            # effect and the load is allocating — the OOM-kill window).
+            time.sleep(15.0)
+            # Release the holder(s) and let the pool settle, so the
+            # outcome and phase 4 run on a normal pool (G3c round-1
+            # P1 + P2: no mid-teardown outcome; a short settle so the
+            # pool reading below is not still falling).
+            for h in holders:
+                if h.returncode is None:
+                    h.terminate()
+                    h.wait(timeout=30)
+            time.sleep(5.0)
+            pool_after = _mem_available_gb()
             print(
-                f"[1.9] i=2 path-2 spawn: OOMKilled={state['oom_killed']}, "
-                f"running={state['running']}, exit={state['exit_code']} "
-                f"(holders released, MemAvailable {_mem_available_gb():.1f} GB)",
+                f"[1.9] i=2 path-2: holder(s) released (MemAvailable "
+                f"{pool_after:.1f} GB); polling outcome in steady state "
+                f"(budget {READY_TIMEOUT_S:.0f}s)",
+                flush=True,
+            )
+            t_outcome = time.monotonic()
+            served = False
+            deadline = t_outcome + READY_TIMEOUT_S
+            while time.monotonic() < deadline:
+                st = _container_state(i2)
+                if not st["running"]:
+                    break
+                if _probe_serving_once(PORT_BASE + 2):
+                    served = True
+                    break
+                time.sleep(READY_POLL_S)
+            state = _container_state(i2)
+            print(
+                f"[1.9] i=2 path-2 outcome after "
+                f"{time.monotonic() - t_outcome:.0f}s: "
+                f"OOMKilled={state['oom_killed']}, "
+                f"running={state['running']}, exit={state['exit_code']}, "
+                f"served={served}",
                 flush=True,
             )
             for n in (i0, i1, i2):
+                st_n = _container_state(n)
                 logs = _container_logs(n)
                 for marker in SEGFAULT_MARKERS:
                     self.assertNotIn(
@@ -624,6 +678,18 @@ class TestOomCeiling(unittest.TestCase):
                         logs,
                         f"{n}: '{marker}' in the log — a segfault-class "
                         f"failure, not ERR_VRAM_OOM",
+                    )
+                # Exit-code guard (G3c round-1 P1): a real SIGSEGV/
+                # SIGBUS dies 139/135; the accepted non-zero exits
+                # are 137 (cgroup OOM) and the engine's own clean
+                # error (observed 133/SIGTRAP at the pinned commit).
+                if not st_n["running"]:
+                    self.assertNotIn(
+                        st_n["exit_code"],
+                        (135, 139),
+                        f"{n}: exit {st_n['exit_code']} — a "
+                        f"SIGBUS/SIGSEGV signal death, not "
+                        f"ERR_VRAM_OOM",
                     )
             if not state["running"]:
                 # Exited: either the kernel's cgroup OOM-kill
@@ -648,27 +714,22 @@ class TestOomCeiling(unittest.TestCase):
                     flush=True,
                 )
             else:
-                # The split shape: the path-2 instance survived the gap
-                # (the kernel managed the under-budget load — it did
-                # not crash), and is now finishing its COLD load. A
-                # cold 6.0 g load at a tight pool is slow (probe
-                # 2026-09-22: ~114 s to load at the looser ~14 GB pool),
-                # so the ready window is load-appropriate — the same
-                # 180 s budget the spawn used, not a 60 s tick.
-                t_ready = time.monotonic()
-                served = _wait_ready(PORT_BASE + 2, time.monotonic() + READY_TIMEOUT_S)
-                print(
-                    f"[1.9] i=2 split shape: "
-                    f"{'serving' if served else 'not yet serving'} at the "
-                    f"6.0 g cap after {time.monotonic() - t_ready:.0f}s",
-                    flush=True,
-                )
+                # The split shape: i2 survived and is a SERVING
+                # engine at the 6.0 g cap, measured in steady state
+                # on the loose pool (the kernel managed the
+                # under-budget load — it did not crash).
                 self.assertTrue(
                     served,
                     f"i=2 running but its port never served the alias "
-                    f"within {READY_TIMEOUT_S:.0f}s (the split shape "
-                    f"should still be a serving engine); log tail: "
+                    f"within the {READY_TIMEOUT_S:.0f}s steady-state "
+                    f"outcome window (the split shape should still "
+                    f"be a serving engine); log tail: "
                     f"{_container_logs(i2)[-300:]}",
+                )
+                print(
+                    f"[1.9] i=2 split shape: serving at the 6.0 g cap "
+                    f"(outcome after {time.monotonic() - t_outcome:.0f}s)",
+                    flush=True,
                 )
 
             # Phase 4: prior instances stay HEALTHY (S1.7): containers

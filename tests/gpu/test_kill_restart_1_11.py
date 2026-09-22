@@ -241,9 +241,38 @@ class TestKillRestart(unittest.TestCase):
             # pre-manager): re-run the container in the unit's
             # ExecStart shape. ExecStartPre's `docker rm -f` is folded
             # into the rm below (a dead container has no PID left to
-            # collide with, so the fresh run is the restart).
-            subprocess.run(
-                ["docker", "rm", "-f", CONTAINER], capture_output=True, check=False
+            # collide with, so the fresh run is the restart). A
+            # SIGKILL'd container exits in milliseconds, but `rm -f`
+            # racing the exit propagation can return non-zero (G3c
+            # round-1 P2) — poll the exit first (bounded), then remove
+            # and assert the removal.
+            rm_deadline = time.monotonic() + 10.0
+            while time.monotonic() < rm_deadline:
+                q = subprocess.run(
+                    [
+                        "docker",
+                        "inspect",
+                        CONTAINER,
+                        "--format",
+                        "{{.State.Running}}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if q.returncode != 0 or q.stdout.strip() == "false":
+                    break
+                time.sleep(0.5)
+            r = subprocess.run(
+                ["docker", "rm", "-f", CONTAINER],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                r.returncode,
+                0,
+                f"docker rm -f after the kill failed: {r.stderr[-300:]}",
             )
             r = subprocess.run(docker, capture_output=True, text=True, check=False)
             self.assertEqual(
@@ -302,13 +331,26 @@ class TestKillRestart(unittest.TestCase):
             # is a legitimate addition, and nvidia-smi can lag reaping
             # the killed container's entry; probe 2026-09-22: a
             # torn-down container's PID lingered for minutes).
-            lost = set(baseline) - set(_gpu_compute_apps_mib())
+            after_pids = _gpu_compute_apps_mib()
+            lost = set(baseline) - set(after_pids)
             self.assertEqual(
                 lost,
                 set(),
                 f"main-stack PIDs lost during the kill/restart window "
                 f"(the 'others unaffected' half, S1.8 #4): {lost}",
             )
+            # The killed container's host pid SHOULD be gone; nvidia-smi
+            # can lag reaping it (documented above) — if it lingers
+            # past the healthy check, warn instead of asserting (G3c
+            # round-1 P2: a subset-only check would mask a regression
+            # that started lagging the main stack's PIDs).
+            if host_pid_before in after_pids:
+                print(
+                    f"[1.11] WARNING: killed container's host pid "
+                    f"{host_pid_before} still listed by nvidia-smi "
+                    f"(reaping lag — documented, not a failure)",
+                    flush=True,
+                )
         finally:
             subprocess.run(
                 ["docker", "rm", "-f", CONTAINER],
