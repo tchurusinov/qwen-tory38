@@ -606,6 +606,40 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 1 reviewed + all 4 fixed + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- items checked: none (review round; no new MAP items)
+- machine state:
+  * branch `phase2-manager-skeleton` @ `d91f49f` (G3r1 fixes on top of
+    `a9e11a2` the 2.1–2.5 implementation commit), pushed to origin
+  * PR #10 open (http://localhost:3001/blckwell/qwen-tory38/pulls/10),
+    full PR-body contract at open time; round-1 raw review + disposition
+    = comment 603
+  * hermetic 166/166 OK (165 + 1 new: main_used_gb live-cgroup source
+    label at a value EQUAL to the fallback — the P1 edge); gate PASS;
+    ruff clean; @gpu re-verify green (56.1 s, 2 instances healthy,
+    stack=healthy, clean teardown)
+- next: G3 round 2 review (review.sh re-run after d91f49f); loop until
+  clean, then G4 human merge
+- blockers/intricacies: none. Round-1 findings: 0 P0 / 1 P1 / 3 P2,
+  all fixed in d91f49f:
+  * P1 main_used_gb: source was inferred by value comparison — a
+    container exactly at the recorded value mislabeled; now returns
+    (used_gb, source) and main() logs the path actually taken
+  * P2 read_free_gb: docstring overstated the 5 s bound as enforced;
+    it is the S1.4 contract on the probe, nominal for the instant
+    /proc reader (docstring corrected)
+  * P2 spawn rc: spawn_sequence now returns start_rc (index ->
+    systemctl start rc) and main() writes bfailed DIRECTLY in the
+    first health.json for a failed start (S1.5 routing) instead of
+    re-deriving by probing a possibly-dead unit; hermetic assertion
+    added on the rc surface
+  * P2 @gpu unit template: CPUQuota=64%% reached systemd verbatim
+    (plain string, no format applied) -> now CPUQuota=64%
+- spec deltas: none (round-1 findings were code/doc, no spec change;
+  the S2.2 docker-giB delta was already recorded at PR open)
+
 ### 2026-09-22 — Phase 2: MAP 2.1–2.5 implemented + green (branch `phase2-manager-skeleton`, G3 pending)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2, branch `phase2-manager-skeleton`)
 - phase(s): P2 (2.1 manager skeleton + 2.2 boot-tier + 2.3 allocation tier + 2.4 units + 2.5 spawn path; G3 review pending)
