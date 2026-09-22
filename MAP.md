@@ -606,6 +606,42 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 2 reviewed, 6 findings (1 P0/2 P1/3 P2) disposed + fixed + @gpu re-verify green x2 (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- items checked: none (review round; spec amendments S1.4/S1.5/S2.4 recorded)
+- machine state:
+  * branch `phase2-manager-skeleton` @ `a6fbe0e` (G3r2 fixes on top of
+    `cbd0022`), pushed to origin
+  * round-2 raw review + disposition = comment 607 on PR #10
+  * hermetic 167/167 OK (+1 cap-floor case); gate PASS; ruff clean;
+    @gpu re-verify green twice (57.3 s / 57.7 s, 2 instances healthy,
+    stack=healthy, clean teardown; both runs under the amended
+    `max(footprint+1.0, cap)` gate)
+- next: G3 round 3 review; loop until clean, then G4 human merge
+- blockers/intricacies: none. Round-2 findings (all disposed, see
+  comment 607 for the full disposition):
+  * P0 bfailed-record: DISPOSITIONED (design is spec-correct — S3.1
+    state vocabulary + S1.5 routing + S3.2 reload all key off the
+    recorded bfailed index; dropping it would make it invisible to
+    status). S1.5 port-collision row amended to remove the ambiguity.
+  * P1 tier-vs-cap: FIXED — new `allocation_need_gb() =
+    max(footprint + 1.0, per_instance_budget_gb)`; S1.4 boot-OOM
+    policy amended with the pin-reality delta (no-op on this box:
+    15.08 > 14.78; binds where the 5% margin > 1.0 GB).
+  * P1 @gpu stray unit: FIXED — precondition asserts no user-scope
+    bonsai2-sglang.service + finally unlinks it.
+  * P2 skip-wait-on-failed-start: FIXED — spawn_sequence skips the
+    healthy wait when start_rc[i] != 0.
+  * P2 budget_zero/fallback_zero: S2.4 amended (v1 shares
+    budget_zero; fallback_zero is a MAP 2.7 candidate).
+  * P2 places=9: relaxed to places=6 (drift guard, not float noise).
+- spec deltas: S1.4 (gate term = max(footprint + 1.0, cap), pin-
+  reality delta 2026-09-23), S1.5 (port-collision row: bfailed-record
+  semantics + reload re-runs the tier), S2.4 (budget_zero shared
+  with the post-PTQ1_0-retry zero; fallback_zero candidate for
+  MAP 2.7). No locked acceptance number moved.
+
 ### 2026-09-23 — G3 loop PR #10: round 1 reviewed + all 4 fixed + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
