@@ -553,6 +553,69 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-22 — G3 loop PR #9: round-1 review posted, 0 P0 / 3 P1 / 8 P2, all 11 fixed, @gpu re-run green (branch `phase1-edge-oom-kill`)
+- agent/model: Hermes qwen3.8-27b (this session)
+- phase(s): G3 (PR #9 review loop, round 1 of N)
+- reviewer: isolated pi on :30001 via `./scripts/review.sh phase1-edge-oom-kill`
+  (fresh `--no-session --no-tools`, `--thinking off`), diff
+  `origin/main...phase1-edge-oom-kill` at `8dafebc`. Raw output posted to
+  the PR as comment 557 (round 1, verbatim, pre-reconcile).
+- findings: 0 P0, 3 P1, 8 P2 — ALL 11 actionable, none waived:
+  * P1 1.9 path-2 outcome measured mid-teardown (holders still up) + the
+    split branch's second 180 s ready-wait could race i2 -> FIXED: holders
+    released right after the tight-pool spawn settle (the cgroup OOM-kill
+    window), outcome then polled in steady state on the loose pool for the
+    full 180 s spawn budget; split shape asserts served-at-cap, no wasted
+    second wait (commit 02870b0).
+  * P1 1.9 segfault marker "Segmentation fault" could false-positive on a
+    non-fatal diagnostic -> PROBED: the pinned engine's .so's contain 0
+    hits for the literal phrase (no shell in the container prints it; the
+    engine's own fatal path is GGML_ASSERT/abort). FIXED: markers narrowed
+    to SIGSEGV/SIGBUS/core dumped + an exit-code guard rejecting 135/139
+    signal deaths (02870b0).
+  * P1/P2 1.9 holder-size assertion message misnamed the cause -> FIXED:
+    names the reclamation hypothesis explicitly (02870b0).
+  * P2 1.11 `docker rm -f` racing the killed container's exit -> FIXED:
+    bounded 10 s exit-poll + rc assert (02870b0).
+  * P2 1.11 subset-only "others unaffected" could mask a nvidia-smi
+    lagging the main stack -> FIXED: lingering killed host-PID is now a
+    logged warning (02870b0).
+  * P2 1.10 dummy listener's accept queue never drained -> FIXED: background
+    accept-and-close thread (02870b0).
+  * P2 1.10 `assertNotIn("load_model")` brittle (C++ symbol, not a log
+    line) -> PROBED in the runtime image: the pinned engine logs
+    "(startup) loading model" / "loading model '<file>'". FIXED: marker is
+    now the real log line (02870b0).
+  * P2 MAP session log lacked the per-module @gpu count -> FIXED: 1.7/1.8/
+    1.9/1.10/1.11 = 5 integration cases + build-banner 3 + runtime-image 5
+    = 13 (05f3aa3).
+  * P2 gpu/README wall-time undercounted the split-shape branch -> FIXED:
+    ~15-20 min clear pool, up to ~25-30 min worst case (05f3aa3).
+- re-run (clean pool, post-fixes): full suite
+  `test-logs/gpu-20260922-201840.log` — 11/13 OK: 1.9 restructured
+  PASS (outcome after 0s: running=True exit=0 served=True — split shape
+  serving at the 6.0 g cap in steady state; instance 0/1 RT 0.88/0.83 s;
+  main-stack PIDs unchanged), 1.10 PASS, 1.7 PASS, hermetic image checks
+  PASS. Two pre-existing tests failed ON THAT RUN due to GPU contention
+  with the live Hermes session (box at 96% util mid-suite — the
+  "one heavy thing at a time" discipline): 1.8 aggregate 24.2 t/s
+  (< 26.2 floor) and 1.11 restart 18.23 s (> 15 s). Clean re-run of just
+  those two (box idle): 1.8 31.9 t/s OK, 1.11 13.95 s OK, exit 0
+  (2026-09-22 20:5x). Effective state: @gpu 13/13 green across the
+  re-run pair.
+- next:
+  1. G3c disposition comment on the PR (this entry) — then round-2
+     `./scripts/review.sh` on `05f3aa3` (the full diff is unchanged in
+     scope; the fixes are in 02870b0/05f3aa3).
+  2. G4 human merge gate.
+- blockers/intricacies:
+  * @gpu runs contend with the main Hermes session's own turns on the
+    same SGLang engine / box; keep the session quiet during the run or
+    expect 1.8/1.11 to drift (they are the two most timing-sensitive
+    tests in the suite).
+- spec deltas: none (the S1.7 "Edge" delta from the opening commit
+  stands).
+
 ### 2026-09-22 — Phase 1: MAP 1.9/1.10/1.11 @gpu tests implemented + green (branch `phase1-edge-oom-kill`, G3 pending)
 - agent/model: Hermes qwen3.8-27b (session id 20260922_140725_09d424)
 - phase(s): P1 (1.9 OOM-ceiling + 1.10 port-collision + 1.11 kill-9/restart
