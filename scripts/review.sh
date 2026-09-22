@@ -45,19 +45,20 @@ fi
 # Optional: REVIEW_EXCLUDE = colon-separated git pathspec patterns to keep
 # OUT of the reviewed diff (e.g. REVIEW_EXCLUDE="README.md" for a
 # docs-only file that is part of the PR but not the review target).
-# Each pattern becomes a ':!<pattern>' exclusion pathspec on the diff
-# command (a single unquoted token, so it word-splits into one arg).
-# Must be set BEFORE the diff below (set -u: an unset $EXCLUDE_SPECS
-# would abort at the word-split).
-EXCLUDE_SPECS=""
+# Each pattern becomes a ':!<pattern>' exclusion pathspec in the
+# EXCLUDE_ARGS array (quoted expansion: one git arg per pattern, no
+# word-split ambiguity — G3c round-3 P0).
+# Must be set BEFORE the diff below (set -u: an unset array would abort
+# at "${EXCLUDE_ARGS[@]}" on bash < 4.4 semantics).
+EXCLUDE_ARGS=()
 if [ -n "${REVIEW_EXCLUDE:-}" ]; then
   IFS=':' read -ra _excl <<< "${REVIEW_EXCLUDE}"
   for p in "${_excl[@]}"; do
     [ -n "$p" ] || continue
-    EXCLUDE_SPECS="${EXCLUDE_SPECS} :!${p}"
+    EXCLUDE_ARGS+=(":!${p}")
   done
 fi
-if ! DIFF="$(git diff "origin/$BASE...$BRANCH" $EXCLUDE_SPECS 2>/tmp/review-diff-err.txt)"; then
+if ! DIFF="$(git diff "origin/$BASE...$BRANCH" "${EXCLUDE_ARGS[@]}" 2>/tmp/review-diff-err.txt)"; then
   echo "review: git diff origin/$BASE...$BRANCH failed:" >&2
   cat /tmp/review-diff-err.txt >&2
   exit 1

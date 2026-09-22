@@ -77,12 +77,46 @@ def _image_present() -> bool:
     return r.returncode == 0
 
 
-def _instance_budget_gb() -> float:
-    """instances.per_instance_budget_gb (S2.2 --memory; S1.4 re-anchor).
+def _gpu_compute_apps_mib() -> dict:
+    """pid -> used MiB from nvidia-smi (the box's VRAM meter).
 
-    Same read as test_bringup_1_7: the --memory cap must track the
-    template, so a future re-anchor can't drift this test's cap.
+    `--query-gpu` memory fields are N/A on this GB10's unified memory;
+    the cgroup under-charges device KV, so the meter is the
+    baseline-subtracted compute-apps total (same convention as
+    test_bringup_1_7).
     """
+    r = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out = {}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line.endswith(" MiB") or "," not in line:
+            continue
+        parts = line.split(",", 1)
+        if len(parts) != 2:
+            continue
+        pid_s, mib_s = parts[0].strip(), parts[1].strip()
+        if not (pid_s.isdigit() and mib_s.endswith(" MiB")):
+            continue  # header row / unexpected shape — skip, don't die
+        out[int(pid_s)] = int(mib_s.split()[0])
+    return out
+
+
+def _gpu_delta_gb(new: dict, baseline: dict) -> float:
+    """Baseline-subtracted footprint in GB (only NEW pids count).
+
+    Inputs are MiB (nvidia-smi's unit); MiB / 1024 = GB (decimal, the
+    S1.4 convention).
+    """
+    new_pids = set(new) - set(baseline)
+    return sum(new[p] for p in new_pids) / 1024
+
+
+def _instance_budget_gb() -> float:
     text = ENGINE_YAML.read_text()
     m = re.search(r"(?m)^[ \t]*per_instance_budget_gb:[ \t]*([0-9.]+)", text)
     assert m, f"per_instance_budget_gb not found in {ENGINE_YAML}"
