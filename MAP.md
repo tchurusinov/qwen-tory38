@@ -553,6 +553,40 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-22 — G4 merge: PR #9 merged as `deb16fa`, MAP 1.9/1.10/1.11 done
+- agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `deb16fa`)
+- phase(s): P1 (1.9 + 1.10 + 1.11 @gpu tests merged; the three Phase-1
+  integration tests are now on main)
+- human gate: APPROVED (comment 595: "approved, no need for round 4
+  disposition, feel free to merge"). Round-4 review = 0 P0 / 0 P1 / 5 P2
+  (notes-of-taste, recorded on the G4 comment 596 — none blocks the DOD).
+- review loop (4 rounds, one isolated reviewer): 0 P0 throughout; P1
+  3 → 2 → 1 → 0 (converged, each round a different P1, not the same one
+  bouncing). Full per-round disposition on the PR (557/563, 572/577,
+  584/588, 593/595) + the G4 record + merge result (comment 596).
+- merge: Gitea API `do=merge` at 2026-09-22 18:14:46Z → merge commit
+  `deb16fa` is the `origin/main` tip. Branch `phase1-edge-oom-kill`
+  deleted (remote + local). `./scripts/gate.sh` on main @ `deb16fa`:
+  PASS. Hermetic `Ran 134 tests OK`.
+- diff scope (6 files): tests/gpu/test_oom_1_9.py,
+  test_port_collision_1_10.py, test_kill_restart_1_11.py (new),
+  tests/gpu/README.md, SPEC.md (S1.7 "Edge" pin-reality delta), MAP.md.
+- items checked: 1.9, 1.10, 1.11 (flipped to [x] in the round-3 entry;
+  now merged to main)
+- machine state: no subagent instances running; ports 30101–30103 free;
+  image `bonsai2-server:1.0` unchanged; main stack untouched.
+- next: see the round-3 entry's "next" (it is the active frontier) —
+  1.9/1.10/1.11 are now merged, so the frontier moves to the next MAP
+  item after them.
+- blockers/intricacies: the round-4 5 P2s (notes-of-taste) are recorded
+  on the G4 comment (596) — candidate for a follow-up issue, not a gate
+  blocker. @gpu-vs-live-session contention note still stands (1.8/1.11
+  are the two most timing-sensitive tests; keep the session quiet during
+  an @gpu run).
+- spec deltas: S1.7 "Edge" pin-reality delta (the engine exits 1 fast on
+  a port collision; the S1.5 exit-3 mapping is a unit-layer concern) —
+  now on main. No locked value moved.
+
 ### 2026-09-22 — G3 loop PR #9: round-3 review posted, 0 P0 / 1 P1 / 3 P2, all 4 fixed, @gpu re-verify green (branch `phase1-edge-oom-kill`)
 - agent/model: Hermes qwen3.8-27b (this session)
 - phase(s): G3 (PR #9 review loop, round 3)
@@ -590,9 +624,9 @@ SPEC.md `status` → `active`.
   running=True exit=0 served=True, split shape serving at the 6.0 g cap
   in steady state; instance 0/1 RT 0.94/0.89 s), 1.10 PASS (instance 0
   exit 1 on the bind collision), 1.11 PASS (numbers above).
-- next:
-  1. G3c round-3 disposition comment on the PR.
-  2. round-4 `./scripts/review.sh` on `1a19610`.
+- next: (SUPERSEDED by the G4 merge entry above — 1.9/1.10/1.11 are
+  merged to main as `deb16fa`; the frontier moves to the next MAP item
+  after 1.11)
 - blockers/intricacies: same @gpu-vs-live-session contention note.
 - spec deltas: none.
 
@@ -637,9 +671,8 @@ SPEC.md `status` → `active`.
   on the bind collision; the real '(startup) loading model' marker
   asserted absent), 1.11 PASS (kill → healthy 8.78 s, budget 15 s; host
   PID 3076735 → 3077606; exit-poll guard < 1 s).
-- next:
-  1. G3c round-2 disposition comment on the PR (this entry).
-  2. round-3 `./scripts/review.sh` on `68ae93a`.
+- next: (SUPERSEDED by the G4 merge entry above — the round-2
+  disposition + round-3 review both happened; see the round-3 entry)
 - blockers/intricacies: same @gpu-vs-live-session contention note as
   the round-1 entry.
 - spec deltas: none.
