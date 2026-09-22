@@ -128,13 +128,9 @@ def _wait_ready(port: int, deadline: float) -> bool:
             models = _http_json(f"http://127.0.0.1:{port}/v1/models", 5.0)
             if ALIAS in (m.get("id") for m in models.get("data", [])):
                 return True
-        except (
-            urllib.error.URLError,
-            json.JSONDecodeError,
-            ConnectionError,
-            TimeoutError,
-            OSError,
-        ):
+        except (json.JSONDecodeError, OSError):
+            # OSError subsumes ConnectionError/TimeoutError (G3c
+            # round-3 P2: no dead sub-classes in the tuple).
             pass
         time.sleep(READY_POLL_S)
     return False

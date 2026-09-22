@@ -110,13 +110,9 @@ def _wait_ready(deadline: float) -> bool:
             models = _http_json(f"http://127.0.0.1:{PORT}/v1/models", 5.0)
             if ALIAS in (m.get("id") for m in models.get("data", [])):
                 return True
-        except (
-            urllib.error.URLError,
-            json.JSONDecodeError,
-            ConnectionError,
-            TimeoutError,
-            OSError,
-        ):
+        except (json.JSONDecodeError, OSError):
+            # OSError subsumes ConnectionError/TimeoutError (G3c
+            # round-3 P2: no dead sub-classes in the tuple).
             pass
         time.sleep(READY_POLL_S)
     return False
@@ -236,18 +232,20 @@ class TestKillRestart(unittest.TestCase):
                 0,
                 f"kill -9 failed: {r.stderr[-300:]}",
             )
-
             # Auto-restart (the S2.2 Restart=on-failure effect,
             # pre-manager): re-run the container in the unit's
             # ExecStart shape. ExecStartPre's `docker rm -f` is folded
             # into the rm below (a dead container has no PID left to
             # collide with, so the fresh run is the restart). A
             # SIGKILL'd container exits in milliseconds; the exit poll
-            # below is the rm -f race guard (G3c round-1 P2) and the
-            # 0.2 s rhythm + 5 s bound keep this teardown guard out of
-            # the S1.8 #4 budget (G3c round-2 P1: the restart window
-            # must not include a slow teardown poll — on the clean
-            # re-run the guard itself was < 1 s).
+            # below is the rm -f race guard (G3c round-1 P2).
+            # G3c round-3 P1: the S1.8 #4 "< 15 s" acceptance budget is
+            # the engine reload/ready time AFTER the restart `docker
+            # run` returns — the teardown guard + rm + run are a
+            # bounded, separately-measured prefix (`teardown_s`, logged
+            # but not charged), so the acceptance number is the
+            # reload/ready window, not teardown+reload.
+            teardown_t0 = time.monotonic()
             rm_deadline = time.monotonic() + 5.0
             while time.monotonic() < rm_deadline:
                 q = subprocess.run(
@@ -282,23 +280,29 @@ class TestKillRestart(unittest.TestCase):
                 0,
                 f"restart docker run failed: {r.stderr[-500:]}",
             )
+            teardown_s = time.monotonic() - teardown_t0
 
-            # Back to healthy: poll the alias; the whole window (kill ->
-            # alias served again) is what S1.8 #4's "< 15 s" covers.
+            # Back to healthy: poll the alias; the window from the
+            # restart run to healthy is what S1.8 #4's "< 15 s" covers
+            # (the engine reload/ready — a main-agent waiting on this
+            # instance experiences exactly this, not the teardown).
             self.assertTrue(
                 _wait_ready(time.monotonic() + READY_TIMEOUT_S),
                 "instance never healthy again after the restart",
             )
             restart_s = time.monotonic() - kill_t0
+            reload_s = restart_s - teardown_s
             print(
                 f"[1.11] restart window: kill -> healthy in {restart_s:.2f}s "
-                f"(budget {RESTART_BUDGET_S:.0f}s)",
+                f"(teardown+rm+run {teardown_s:.2f}s, reload/ready "
+                f"{reload_s:.2f}s; S1.8 #4 budget {RESTART_BUDGET_S:.0f}s "
+                f"on the reload/ready)",
                 flush=True,
             )
             self.assertLess(
-                restart_s,
+                reload_s,
                 RESTART_BUDGET_S,
-                f"kill -> healthy took {restart_s:.2f}s (> {RESTART_BUDGET_S:.0f}s "
+                f"reload/ready took {reload_s:.2f}s (> {RESTART_BUDGET_S:.0f}s "
                 f"S1.8 #4 acceptance); the S2.7 reboot test re-measures "
                 f"this at boot scale",
             )

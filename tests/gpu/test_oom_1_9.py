@@ -247,13 +247,9 @@ def _wait_ready(port: int, deadline: float) -> bool:
             )
             if ALIAS in (m.get("id") for m in models.get("data", [])):
                 return True
-        except (
-            urllib.error.URLError,
-            json.JSONDecodeError,
-            ConnectionError,
-            TimeoutError,
-            OSError,
-        ) as e:
+        except (json.JSONDecodeError, OSError) as e:
+            # OSError subsumes URLError/ConnectionError/TimeoutError
+            # (G3c round-3 P2: no dead sub-classes in the tuple).
             last_err = str(e)
         time.sleep(READY_POLL_S)
     print(f"    (readiness {port}: last error {last_err})", flush=True)
@@ -269,13 +265,9 @@ def _probe_serving_once(port: int) -> bool:
     try:
         models = _http_json(f"http://127.0.0.1:{port}/v1/models", FREE_PROBE_TIMEOUT_S)
         return ALIAS in (m.get("id") for m in models.get("data", []))
-    except (
-        urllib.error.URLError,
-        json.JSONDecodeError,
-        ConnectionError,
-        TimeoutError,
-        OSError,
-    ):
+    except (json.JSONDecodeError, OSError):
+        # OSError subsumes URLError/ConnectionError/TimeoutError
+        # (G3c round-3 P2: no dead sub-classes in the tuple).
         return False
 
 
@@ -444,6 +436,16 @@ def _wait_free_below(target_gb: float, timeout_s: float) -> float:
     return free
 
 
+def _release_holder(h: subprocess.Popen) -> None:
+    """Idempotent holder release (G3c round-3 P2: a SIGINT/assert
+    mid-Phase-2 must not leak multi-GB holder processes until their
+    3600 s sleep expires — registered via addCleanup on every holder
+    so the release also runs on a failing/interrupted test)."""
+    if h.returncode is None:
+        h.terminate()
+        h.wait(timeout=30)
+
+
 class TestOomCeiling(unittest.TestCase):
     """S1.7 VRAM ceiling: load until the S1.4 allocation tier fails ->
     ERR_VRAM_OOM, not a segfault; prior instances stay healthy."""
@@ -549,7 +551,13 @@ class TestOomCeiling(unittest.TestCase):
                 if free_now < target_free_gb:
                     break
                 cut = free_now - target_free_gb
-                holders.append(_start_memory_holder(cut))
+                holder = _start_memory_holder(cut)
+                # G3c round-3 P2: release on ANY test exit (failure,
+                # KeyboardInterrupt, normal) — the holder's 3600 s
+                # sleep would otherwise keep its multi-GB allocation
+                # until it expires.
+                self.addCleanup(_release_holder, holder)
+                holders.append(holder)
                 time.sleep(2.0)  # let the pages commit
                 free_settled = _wait_free_below(target_free_gb, 20.0)
                 if round_no == 0:
@@ -624,14 +632,19 @@ class TestOomCeiling(unittest.TestCase):
             #     engine's own clean error on the under-budget
             #     allocation: clean, "not a segfault"
             # Measurement shape (G3c round-1 P1: no mid-teardown
-            # outcome): the spawn starts while the holder holds the
-            # pool tight (that IS the "free memory moved in the gap"
-            # condition — a cgroup OOM-kill, if it is going to
-            # happen, lands in this window), then the holder is
-            # released and the OUTCOME is polled in steady state on
-            # the loose pool for the full 180 s spawn budget: a cold
-            # 6.0 g load is slow (~114 s, probe 2026-09-22), so the
-            # outcome may not be settled by the time the holder goes.
+            # outcome; G3c round-3 P2: the tight-pool window is
+            # POLLED, not a fixed sleep — the cgroup OOM-kill, if it
+            # is going to happen, lands while the holder still holds
+            # the pool down; the holder is released the moment i2 has
+            # SETTLED, so a kill cannot land after the release and be
+            # misattributed to the split/engine-error shapes. If i2
+            # is still loading when the 60 s tight window ends, the
+            # holder is released and the outcome is polled in steady
+            # state on the loose pool for the full 180 s spawn budget
+            # — a late cgroup kill in that case is possible and is
+            # accepted: the OOMKilled/137 shape is clean either way,
+            # and the steady-state outcome still records it): a cold
+            # 6.0 g load is slow (~114 s, probe 2026-09-22).
             # The one rejected outcome — a segfault-class crash — is
             # caught by the marker loop + exit-code guard below
             # across ALL spawned containers (no SIGSEGV/SIGBUS/
@@ -644,17 +657,22 @@ class TestOomCeiling(unittest.TestCase):
                 flush=True,
             )
             _spawn(i2, PORT_BASE + 2, PATH2_CAP_G)
-            # Settle in the tight pool first (the cgroup limit is in
-            # effect and the load is allocating — the OOM-kill window).
-            time.sleep(15.0)
+            # Poll the tight pool until i2 settles or the 60 s window
+            # ends (G3c round-3 P2: a fixed sleep let a slow pool
+            # push the cgroup OOM-kill past the holder release).
+            settle_deadline = time.monotonic() + 60.0
+            while time.monotonic() < settle_deadline:
+                st = _container_state(i2)
+                if not st["running"]:
+                    break
+                time.sleep(READY_POLL_S)
             # Release the holder(s) and let the pool settle, so the
             # outcome and phase 4 run on a normal pool (G3c round-1
             # P1 + P2: no mid-teardown outcome; a short settle so the
-            # pool reading below is not still falling).
+            # pool reading below is not still falling). Idempotent —
+            # the addCleanup release (round-3 P2) runs again, safely.
             for h in holders:
-                if h.returncode is None:
-                    h.terminate()
-                    h.wait(timeout=30)
+                _release_holder(h)
             time.sleep(5.0)
             pool_after = _mem_available_gb()
             print(
