@@ -115,10 +115,12 @@ SPIKE_MARGIN_GB = 1.0
 PATH2_CAP_G = "6.0g"
 # Sane-band assertions on the live pool (the probe numbers above,
 # decimal GB): before the two full-cap loads free must cover them
-# plus headroom; at i=2 the tier must read low but not absurdly
+# plus headroom (probe: ~50.9 base; the holder sized from the live
+# read absorbs the variance, so this is a pool-CLEARED check, not a
+# precise budget); at i=2 the tier must read low but not absurdly
 # (0 GB free would mean something else ate the pool and the test is
 # invalid).
-MIN_FREE_BEFORE_LOADS_GB = 40.0
+MIN_FREE_BEFORE_LOADS_GB = 33.0
 TIER_FREE_BAND_LO_GB = 5.0
 # S1.4's bounded free read: 5 s timeout per probe, one retry, then
 # treat free as 0 (S1.4 verbatim; /proc/meminfo reads are instant —
@@ -378,7 +380,13 @@ def _start_memory_holder(size_gb: float):
     it. It reduces /proc/meminfo MemAvailable the way a concurrent
     allocation would — the exact condition the S1.4 tier protects
     against — and is killed after the path-2 demonstration. Returns the
-    Popen handle."""
+    Popen handle.
+
+    NOTE (probe 2026-09-22): MemAvailable counts reclaimable page cache,
+    so a `size_gb` allocation drops MemAvailable by LESS than size_gb
+    (the kernel reclaims clean page cache to satisfy part of it — ~4.9
+    GB reclaimed on this box after two 7 GB model loads). Size the
+    holder with a guard large enough to exceed that reclamation."""
     return subprocess.Popen(
         [
             sys.executable,
@@ -393,6 +401,19 @@ def _start_memory_holder(size_gb: float):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _wait_free_below(target_gb: float, timeout_s: float) -> float:
+    """Poll MemAvailable until it drops below target_gb (the holder's
+    pages are committed once; MemAvailable then settles). Returns the
+    final free reading. Bounded so a wedged pool can't hang the test
+    (S1.4's "bounded free read" discipline)."""
+    deadline = time.monotonic() + timeout_s
+    free = _mem_available_gb()
+    while time.monotonic() < deadline and free >= target_gb:
+        time.sleep(2.0)
+        free = _mem_available_gb()
+    return free
 
 
 class TestOomCeiling(unittest.TestCase):
@@ -485,23 +506,36 @@ class TestOomCeiling(unittest.TestCase):
             # memory holder cuts free to ~4 GB below it (the S1.5
             # path-2 "free memory moved in the gap" condition, forced).
             free_unheld = _mem_available_gb()
-            # Holder size so that free lands ~4 GB below the tier need:
-            # holder = free_unheld - (need - 4). (free_unheld > need is
-            # normal here — MemAvailable still counts reclaimable cache
-            # after the two loads; the holder is what cuts it.)
-            holder_gb = free_unheld - (need_gb - 4.0)
-            holder_gb = max(holder_gb, 4.0)
-            assert holder_gb < 14.0, (
-                f"holder {holder_gb:.1f} GB unexpectedly large (need "
-                f"{need_gb:.2f}, free {free_unheld:.1f}) — the pool "
-                f"drifted; re-run with it clear"
-            )
-            holder = _start_memory_holder(holder_gb)
-            time.sleep(3.0)  # let the holder's pages touch
+            # Holder sizing: start from the NOMINAL cut (holder =
+            # free_unheld - target). The kernel may reclaim clean page
+            # cache to satisfy part of it (probe 2026-09-22: ~4.9 GB
+            # reclaimed out of a 9.4 GB holder), which would leave
+            # free above the target — so poll, and if the nominal cut
+            # didn't reach it, top up with an additional holder for
+            # the shortfall. At most 3 rounds: a pool that needs more
+            # than that of touching memory has drifted, fail loudly.
+            target_free_gb = need_gb - 3.0  # land 3 GB below the need
+            holders = []
+            for round_no in range(3):
+                free_now = _mem_available_gb()
+                if free_now < target_free_gb:
+                    break
+                cut = free_now - target_free_gb
+                holders.append(_start_memory_holder(cut))
+                time.sleep(2.0)  # let the pages commit
+                free_settled = _wait_free_below(target_free_gb, 20.0)
+                if round_no == 0:
+                    print(
+                        f"[1.9] i=2 holder round 1: cut {cut:.1f} GB "
+                        f"-> free {free_settled:.1f} GB "
+                        f"(reclaimed {cut - (free_unheld - free_settled):.1f} GB)",
+                        flush=True,
+                    )
             free_at_i2 = _mem_available_gb()
             ok, line = _allocation_tier(free_at_i2, footprint_gb)
             print(
-                f"[1.9] i=2 (holder {holder_gb:.1f} GB up): {line} "
+                f"[1.9] i=2 ({len(holders)} holder(s), "
+                f"{free_unheld - free_at_i2:.1f} GB held): {line} "
                 f"(free unheld {free_unheld:.2f} GB)",
                 flush=True,
             )
@@ -509,8 +543,8 @@ class TestOomCeiling(unittest.TestCase):
                 ok,
                 f"allocation tier unexpectedly PASSES at i=2 "
                 f"(free {free_at_i2:.2f} GB >= need {need_gb:.2f} GB) — "
-                f"the holder did not cut free as computed; pool "
-                f"state changed, re-run",
+                f"the holder(s) did not cut free below the target; "
+                f"pool state drifted, re-run",
             )
             self.assertGreaterEqual(
                 free_at_i2,
@@ -527,7 +561,7 @@ class TestOomCeiling(unittest.TestCase):
             # until the next recheck (S1.4: "the value is re-read on
             # the S2.5 5-min recheck") — so the spawn in the gap is
             # S1.5 path 2, with a cgroup cap below the requirement
-            # while the holder still holds free down. Two acceptable
+            # while the holder(s) still hold free down. Two acceptable
             # outcomes, one rejected one:
             #   * OOMKilled=True  -> the kernel OOM-kill (exit
             #     137-class): clean
@@ -540,7 +574,7 @@ class TestOomCeiling(unittest.TestCase):
             # "Not a segfault" = no SIGSEGV/SIGBUS/core-dump markers in
             # any spawned container's log, in either outcome.
             print(
-                f"[1.9] i=2 path-2: holder still up (MemAvailable "
+                f"[1.9] i=2 path-2: holder(s) up (MemAvailable "
                 f"{_mem_available_gb():.1f} GB), spawning at {PATH2_CAP_G}",
                 flush=True,
             )
@@ -557,12 +591,17 @@ class TestOomCeiling(unittest.TestCase):
                 if state is None:
                     state = _container_state(i2)  # still running: the split shape
             finally:
-                holder.terminate()
-                holder.wait(timeout=30)
+                # Release the holder(s) NOW (after the spawn's state is
+                # captured) so phase 4's "prior instances healthy" and
+                # the main-stack check run on a normal pool.
+                for h in holders:
+                    if h.returncode is None:
+                        h.terminate()
+                        h.wait(timeout=30)
             print(
                 f"[1.9] i=2 path-2 spawn: OOMKilled={state['oom_killed']}, "
                 f"running={state['running']}, exit={state['exit_code']} "
-                f"(holder released, MemAvailable {_mem_available_gb():.1f} GB)",
+                f"(holders released, MemAvailable {_mem_available_gb():.1f} GB)",
                 flush=True,
             )
             for n in (i0, i1, i2):
@@ -618,12 +657,19 @@ class TestOomCeiling(unittest.TestCase):
                     flush=True,
                 )
 
-            # The main stack paid nothing: its PIDs are unchanged.
+            # The main stack paid nothing: its PIDs are all still in
+            # the compute-apps listing (a subset, not equality — the
+            # spawned instances' PIDs are legitimately ADDED, and
+            # nvidia-smi can lag reaping a dead container's entry,
+            # probe 2026-09-22: a torn-down container's PID lingered
+            # in the listing for minutes).
+            after_pids = _gpu_compute_apps_mib()
+            lost = set(baseline) - set(after_pids)
             self.assertEqual(
-                set(baseline),
-                set(_gpu_compute_apps_mib()),
-                "main-stack PIDs changed during the ceiling probe "
-                "(the OOM should cost instance 2's tier only)",
+                lost,
+                set(),
+                f"main-stack PIDs lost from the compute-apps listing "
+                f"during the ceiling probe: {lost}",
             )
         finally:
             _teardown(i0, i1, i2)

@@ -297,12 +297,17 @@ class TestKillRestart(unittest.TestCase):
             )
 
             # Others unaffected (the half this single-instance test can
-            # check): the main stack's nvidia-smi PIDs are unchanged.
+            # check): the main stack's nvidia-smi PIDs are all still
+            # listed (a subset, not equality — the instance's own PID
+            # is a legitimate addition, and nvidia-smi can lag reaping
+            # the killed container's entry; probe 2026-09-22: a
+            # torn-down container's PID lingered for minutes).
+            lost = set(baseline) - set(_gpu_compute_apps_mib())
             self.assertEqual(
-                set(baseline),
-                set(_gpu_compute_apps_mib()),
-                "main-stack PIDs changed during the kill/restart window "
-                "(the 'others unaffected' half, S1.8 #4)",
+                lost,
+                set(),
+                f"main-stack PIDs lost during the kill/restart window "
+                f"(the 'others unaffected' half, S1.8 #4): {lost}",
             )
         finally:
             subprocess.run(
