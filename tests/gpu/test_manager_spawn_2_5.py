@@ -322,7 +322,13 @@ class TestManagerSpawnLive(unittest.TestCase):
                     # the S1.4 decimal-GB budget (the spec formula and
                     # the tier stay decimal-GB end-to-end; the cap is a
                     # hair looser, which can only help the allocation
-                    # tier, never hurt it).
+                    # tier, never hurt it). This is a PIN-REALITY
+                    # assertion: it pins docker's EXACT g-suffix parse
+                    # behavior, so if a future docker changes that parse
+                    # (rounds, or switches to decimal GB), this test
+                    # fails on purpose — it is the unit-vs-spec drift
+                    # detector, and the fix is to re-probe + amend the
+                    # S2.2 delta note, not to loosen the assertion.
                     cap_bytes = int(budget * 2**30)
                     self.assertEqual(
                         ins["HostConfig"]["Memory"],
