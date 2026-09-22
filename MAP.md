@@ -260,13 +260,23 @@ under the manager or the full stack).
       budget to 14.78 GB; the worked example is now 14.08 GB footprint,
       N=2 at 37.2/14.78. The body text above is the PR #7 historical
       record at the original FP16-era 0.00000176 / 11.5 GB values. -->
-- [ ] 1.7 Manual single-instance bring-up: `docker run` per S1.3
+- [x] 1.7 Manual single-instance bring-up: `docker run` per S1.3
       (verbatim flags, `--port 30101`), host networking, memory cap;
       `/v1/models` returns `qwen38-27b-subagent`; 16-token completion
       round-trip < 10 s; `nvidia-smi` delta matches S1.4 formula ±10 %
-      (S1.7 integration).
-- [ ] 1.8 Sustained load: 8 concurrent completions (max_num_seqs=8) for
+      (S1.7 integration). (2026-09-22, PR #8 merged as `a567b09`, 4
+      review rounds: `tests/gpu/test_bringup_1_7.py` — cold load from
+      `bonsai2-server:1.0` in S2.2 shape; live 2026-09-22: ready ~8–15 s,
+      16-token RT ~0.8 s, footprint delta 13.4–13.51 GB in the band
+      [13.30, 15.88] GB. Band floor intentionally budget-anchored
+      (14.78*0.9 = 13.30), user-approved 2026-09-22, documented in-test.)
+- [x] 1.8 Sustained load: 8 concurrent completions (max_num_seqs=8) for
       120 s → t/s ≥ 26.2 (0.9 × 29.16 baseline), zero 5xx (S1.7, S1.8 #3).
+      (2026-09-22, PR #8 merged as `a567b09`: `tests/gpu/test_load_1_8.py`
+      — 8 concurrent × 120 s, wall-time denominator, zero-5xx, plus the
+      VRAM-delta ±10 % half asserted in the same band (wired `03521ac`).
+      Live runs 2026-09-22: 44.7–61.9 t/s aggregate (5376–7424 tokens),
+      0× 5xx — PASS with ~1.7–2.4× headroom over the 26.2 floor.)
 - [ ] 1.9 OOM-ceiling load: add instances until the S1.4 allocation tier
       fails → last failure is `ERR_VRAM_OOM`, not a segfault; prior
       instances stay healthy (S1.7).
@@ -519,6 +529,49 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-22 — G4 merge: PR #8 merged as `a567b09`, MAP 1.7/1.8 checked
+- agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `a567b09`)
+- phase(s): P1 (1.7 + 1.8 done; frontier now 1.9)
+- items checked: 1.7 (`tests/gpu/test_bringup_1_7.py`, S1.7 integration:
+  cold load S2.2 shape, alias, 16-token RT < 10 s, VRAM delta band),
+  1.8 (`tests/gpu/test_load_1_8.py`, S1.8 #3: 8×120 s ≥ 26.2 t/s, zero
+  5xx + VRAM delta ±10 % now asserted), S1.3 re-bake + image.pin
+  re-stamp (`sha256:ed6068ae…`), S1.4 re-anchor (0.000003277 / 14.78 GB /
+  N=2, carried from the prior session's uncommitted delta)
+- machine state: branch `phase1-bringup-load` merged (server-side,
+  Gitea API POST /pulls/8/merge, do=merge) and deleted local+remote;
+  `main` @ `a567b09` (local synced); `etc/subagent-engine.yaml` carries
+  the re-anchored values (count 2, budget 14.78, kv_cache q4_0, image
+  pin ed6068ae…); /opt/bonsai2 still absent (install = Phase 6).
+  No probe containers left; port 30101 free; main stack untouched.
+- review loop (PR #8, 4 rounds): R1 527/530 → `6f8e7b9`; R2 532/534 →
+  `75ecc3d`; R3 535/542 → `399163c` + `03521ac` (P0 review.sh
+  word-split→array; P1 #214 footprint helpers + call sites; P1 #260
+  WAIVED — probe: the 3 s settle sleep was already in the tree at the
+  reviewed head; 3 P2 noted/deferred); R4 539/547 → 0 P0, P1 + 1 P2
+  re-statements of user-waived round-2 items, 1 P2 noted/deferred
+  (existing-PID growth → S2.5 domain). Missed post step this session:
+  R3-disposition (542) landed after R4-raw (539); 542 carries the
+  sequencing note. G4 gate comment: 549. User approval: 546.
+- post-merge @gpu re-run (on `03521ac`, the first full run after the
+  delta-assert wiring): 10/10 OK in 159.6 s
+  (`test-logs/gpu-20260922-135803.log`) — load test: 168 completions,
+  5376 tokens in 120.2 s → 44.7 t/s aggregate, 0× 5xx, VRAM delta
+  13.51 GB (band [13.30, 15.88]); bring-up ok. Hermetic 134/134 OK;
+  gate PASS on `96b6149` (the merge head).
+- next: 1.9 OOM-ceiling load (S1.7: add instances until the S1.4
+  allocation tier fails → last failure ERR_VRAM_OOM, not a segfault;
+  prior instances stay healthy). Requires ≥2 instances under a manager
+  or by hand — per the MVP safety rule this is the first N>1
+  experiment; VRAM audit before each load (the 14.78 GB budget × 2 +
+  margin fits: 37.2 GB pool).
+- blockers/intricacies: none new. Lesson recorded: verify the assert
+  CALL SITE of a "test doesn't assert Y" finding, not just that helpers
+  exist; post the G3c-post before firing the next round's G3b.
+- spec deltas: none this session (all deltas landed on the branch in
+  the prior session: S1.3 pin-reality, S1.4 re-anchor, S0 table row,
+  S2.4 fallback, S6.4 drift threshold).
 
 ### 2026-09-22 — PR #8 G3 loop continued: round-3 disposition posted + round-4 review posted (pending disposition)
 - agent/model: Hermes qwen3.8-27b (session: PR #8 review-loop continuation)
