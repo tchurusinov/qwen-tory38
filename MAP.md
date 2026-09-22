@@ -553,6 +553,54 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-22 — G3 loop PR #9: round-2 review posted, 0 P0 / 2 P1 / 3 P2, all 5 fixed, @gpu re-verify green (branch `phase1-edge-oom-kill`)
+- agent/model: Hermes qwen3.8-27b (this session)
+- phase(s): G3 (PR #9 review loop, round 2)
+- reviewer: isolated pi on :30001, diff `origin/main...phase1-edge-oom-kill`
+  at `e5f4c51` (round-1 fixes + session log). Raw output posted to the PR
+  as comment 572 (round 2, verbatim, pre-reconcile).
+- findings: 0 P0, 2 P1, 3 P2 — 4 fixed, 1 waived:
+  * P1 1.11 teardown poll inside the S1.8 #4 window -> FIXED: exit-poll
+    tightened to 0.2 s rhythm / 5 s bound (on the clean re-run the guard
+    itself was < 1 s; SIGKILL'd containers die in milliseconds) — commit
+    68ae93a.
+  * P1 1.9 clean-exit-0 after the poll could be accepted as the split
+    shape -> PROBED + FIXED: most of it was the reviewer conflating a
+    RUNNING container's reported exit 0 with "exited cleanly 0" (running
+    reports exit 0 by construction — that is the accepted split shape);
+    the real sliver (i2 exiting cleanly in the gap after the poll loop)
+    is closed by a FINAL state re-read that the branch decision + the
+    clean-exit-0 rejection use (68ae93a).
+  * P2 1.9 holder 3-round cap's "fail loudly" deferred to the tier
+    re-eval -> FIXED: explicit reclamation-defeated log signal when the
+    cap is exhausted and free is still above target (68ae93a).
+  * P2 1.10 never-served negative check "weaker than intended" -> FIXED
+    (annotated, not reworked): the check's soundness rests on the exit
+    proven above (the exited container's engine no longer serves the
+    alias; the drain thread never returns a /v1/models payload) — no
+    fresh serving engine can appear in the window (68ae93a).
+  * P2 1.9 `_weights_gb` `size_bytes/1e9` precision -> WAIVED (false
+    positive at the pin): the pinned template stores full-precision int
+    bytes `size_bytes: 7206168928` (etc/subagent-engine.yaml, HF
+    source-object size, verified 2026-09-20); no rounding/truncation in
+    the template, so no drift at the pin. Fragile-to-future-YAML-rewrite
+    concern noted in the disposition, not in the test.
+- re-verify (clean pool 49.4 GB, box quiet, post-fixes `68ae93a`): the
+  three touched @gpu tests re-ran green, `Ran 3 tests in 73.0 s OK`:
+  1.9 PASS (tier fail at free 11.66 GB deterministic via 7.5 GB holder;
+  path-2 FINAL state after 0 s: running=True exit=0 served=True — split
+  shape serving at the 6.0 g cap, steady-state; instance 0/1 RT
+  1.07/0.86 s; main-stack PIDs unchanged), 1.10 PASS (instance 0 exit 1
+  on the bind collision; the real '(startup) loading model' marker
+  asserted absent), 1.11 PASS (kill → healthy 8.78 s, budget 15 s; host
+  PID 3076735 → 3077606; exit-poll guard < 1 s).
+- next:
+  1. G3c round-2 disposition comment on the PR (this entry).
+  2. round-3 `./scripts/review.sh` on `68ae93a`.
+- blockers/intricacies: same @gpu-vs-live-session contention note as
+  the round-1 entry.
+- spec deltas: none.
+
 ### 2026-09-22 — G3 loop PR #9: round-1 review posted, 0 P0 / 3 P1 / 8 P2, all 11 fixed, @gpu re-run green (branch `phase1-edge-oom-kill`)
 - agent/model: Hermes qwen3.8-27b (this session)
 - phase(s): G3 (PR #9 review loop, round 1 of N)
