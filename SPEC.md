@@ -394,7 +394,8 @@ api_key: bonsai2-local
    pin only exists on the fork's prism branch; the fork has no
    separate ternary banner line) plus the CUDA backend linked
    (`libggml-cuda` resolvable from the binary, S1.2 `GGML_CUDA=ON`).
-2. N instances (N per S0 table = 3 on this box) all healthy within
+2. N instances (N per S0 table = 2 on this box; the 2026-09-21 S1.4
+   re-anchor dropped it from 3) all healthy within
    120 s of boot; `/v1/models` on each port returns the alias.
 3. Concurrent load test passes (t/s ≥ 26.2, zero 5xx, VRAM delta ±10%).
 4. Kill of one instance → auto-restart < 15 s; others unaffected.
