@@ -213,6 +213,10 @@ class TestSustainedLoad(unittest.TestCase):
     @unittest.skipUnless(_image_present(), f"runtime image {RUNTIME_IMAGE} not present")
     def test_sustained_120s_8_concurrent(self):
         memory_cap_gb = _instance_budget_gb()
+        # Pre-launch VRAM baseline (main-stack PIDs) so the post-window
+        # footprint delta is this instance only (S1.8 #3 "VRAM delta
+        # +/-10%"; the same baseline-subtracted meter as test_bringup_1_7).
+        baseline = _gpu_compute_apps_mib()
         subprocess.run(
             [
                 "docker",
@@ -299,6 +303,30 @@ class TestSustainedLoad(unittest.TestCase):
                 MIN_AGG_TPS,
                 f"aggregate {tps:.1f} t/s < {MIN_AGG_TPS} t/s "
                 f"(0.9 x 29.16 community baseline)",
+            )
+
+            # S1.8 #3 VRAM half: the loaded instance's footprint delta must
+            # sit in the S1.4 +/-10% band. Same convention as
+            # test_bringup_1_7 (baseline-subtracted compute-apps meter; floor
+            # budget-anchored at per_instance_budget_gb, ceiling at the
+            # measured 14.44 GB total) so the two @gpu tests can't drift.
+            time.sleep(3.0)  # let the allocator settle after the window
+            delta_gb = _gpu_delta_gb(_gpu_compute_apps_mib(), baseline)
+            lo = memory_cap_gb * 0.9  # 13.30 GB (budget 14.78, -10%)
+            hi = 14.44 * 1.1  # 15.88 GB (measured total, +10%)
+            print(
+                f"\n[1.8] VRAM delta {delta_gb:.2f} GB (band [{lo:.2f}, {hi:.2f}] GB)",
+                flush=True,
+            )
+            self.assertGreaterEqual(
+                delta_gb,
+                lo,
+                f"VRAM delta {delta_gb:.2f} GB < {lo:.2f} GB (S1.4 -10%)",
+            )
+            self.assertLessEqual(
+                delta_gb,
+                hi,
+                f"VRAM delta {delta_gb:.2f} GB > {hi:.2f} GB (S1.4 +10%)",
             )
         finally:
             subprocess.run(
