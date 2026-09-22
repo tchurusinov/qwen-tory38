@@ -553,6 +553,49 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-22 — G3 loop PR #9: round-3 review posted, 0 P0 / 1 P1 / 3 P2, all 4 fixed, @gpu re-verify green (branch `phase1-edge-oom-kill`)
+- agent/model: Hermes qwen3.8-27b (this session)
+- phase(s): G3 (PR #9 review loop, round 3)
+- reviewer: isolated pi on :30001, diff `origin/main...phase1-edge-oom-kill`
+  at `071194f`. Raw output posted to the PR as comment 584 (round 3,
+  verbatim, pre-reconcile).
+- findings: 0 P0, 1 P1, 3 P2 — all 4 actionable, none waived (commit
+  1a19610):
+  * P1 1.11 S1.8 #4 budget included the rm-f tear-down guard -> FIXED:
+    the acceptance number now measures the reload/ready window AFTER the
+    restart `docker run` returns; the teardown guard + rm + run is a
+    separately-measured, logged prefix (`teardown_s`). Re-verified live:
+    kill → healthy 8.78 s total = teardown+rm+run 5.73 s + reload/ready
+    3.05 s; the 15 s S1.8 #4 assert is on the reload/ready. (The 5.73 s
+    teardown prefix is the exit-poll waiting for the container's exit to
+    propagate — it no longer hides inside the acceptance number.)
+  * P2 1.11/1.9/1.10 redundant except-tuple sub-classes -> FIXED:
+    OSError subsumes URLError/ConnectionError/TimeoutError; tuples now
+    `(json.JSONDecodeError, OSError)` in all four _wait_ready/_probe
+    sites.
+  * P2 1.9 fixed 15 s tight-pool settle could let a cgroup OOM-kill land
+    after the holder release -> FIXED: the tight-pool window is now
+    POLLED (break on i2 exit, 60 s bound); the holder releases the
+    moment i2 has settled, so a kill cannot be misattributed to the
+    split/engine-error shapes. If i2 is still loading at the 60 s mark
+    the holder releases and the steady-state poll continues (a late kill
+    is accepted — the OOMKilled/137 shape is clean either way).
+  * P2 1.9 SIGINT/assert mid-Phase-2 could leak multi-GB holders until
+    their 3600 s sleep expires -> FIXED: every holder is registered via
+    `self.addCleanup(_release_holder, holder)`; release is idempotent
+    and runs on any test exit (failure, interrupt, normal).
+- re-verify (clean pool 49.3 GB, box quiet, post-fixes `1a19610`):
+  `Ran 3 tests in 112.4 s OK` — 1.9 PASS (tier fail at free 11.97 GB
+  deterministic via 7.1 GB holder; path-2 final state
+  running=True exit=0 served=True, split shape serving at the 6.0 g cap
+  in steady state; instance 0/1 RT 0.94/0.89 s), 1.10 PASS (instance 0
+  exit 1 on the bind collision), 1.11 PASS (numbers above).
+- next:
+  1. G3c round-3 disposition comment on the PR.
+  2. round-4 `./scripts/review.sh` on `1a19610`.
+- blockers/intricacies: same @gpu-vs-live-session contention note.
+- spec deltas: none.
+
 ### 2026-09-22 — G3 loop PR #9: round-2 review posted, 0 P0 / 2 P1 / 3 P2, all 5 fixed, @gpu re-verify green (branch `phase1-edge-oom-kill`)
 - agent/model: Hermes qwen3.8-27b (this session)
 - phase(s): G3 (PR #9 review loop, round 2)
