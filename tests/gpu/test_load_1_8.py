@@ -35,6 +35,7 @@ Measurement notes:
 """
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -42,13 +43,19 @@ import unittest
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ENGINE_YAML = REPO_ROOT / "etc" / "subagent-engine.yaml"
 RUNTIME_IMAGE = "bonsai2-server:1.0"
 CONTAINER = "bonsai2-test-i0-load"
 PORT = 30101  # S1.3 instance 0 (the image's baked default)
 API_KEY = "bonsai2-local"  # S1.3 --api-key (local-only)
 ALIAS = "qwen38-27b-subagent"  # S1.3 --alias
-MEMORY_CAP_GB = 14.78  # S2.2 --memory = S1.4 per_instance_budget_gb
+# S2.2 --memory cap = S1.4 per_instance_budget_gb — read from the YAML
+# at test time (same source as test_bringup_1_7, so the two @gpu tests
+# can't drift if the template is re-anchored; the re-anchored value is
+# 14.78).
 CONCURRENT = 8  # S1.3 --parallel (max_num_seqs=8)
 DURATION_S = 120  # S1.7: "for 120 s"
 MIN_AGG_TPS = 26.2  # S1.7: 0.9 x 29.16 community baseline
@@ -68,6 +75,18 @@ def _image_present() -> bool:
         check=False,
     )
     return r.returncode == 0
+
+
+def _instance_budget_gb() -> float:
+    """instances.per_instance_budget_gb (S2.2 --memory; S1.4 re-anchor).
+
+    Same read as test_bringup_1_7: the --memory cap must track the
+    template, so a future re-anchor can't drift this test's cap.
+    """
+    text = ENGINE_YAML.read_text()
+    m = re.search(r"(?m)^[ \t]*per_instance_budget_gb:[ \t]*([0-9.]+)", text)
+    assert m, f"per_instance_budget_gb not found in {ENGINE_YAML}"
+    return float(m.group(1))
 
 
 class _State:
@@ -159,6 +178,7 @@ class TestSustainedLoad(unittest.TestCase):
 
     @unittest.skipUnless(_image_present(), f"runtime image {RUNTIME_IMAGE} not present")
     def test_sustained_120s_8_concurrent(self):
+        memory_cap_gb = _instance_budget_gb()
         subprocess.run(
             [
                 "docker",
@@ -169,9 +189,9 @@ class TestSustainedLoad(unittest.TestCase):
                 "--network",
                 "host",
                 "--memory",
-                f"{MEMORY_CAP_GB}g",
+                f"{memory_cap_gb}g",
                 "--memory-swap",
-                f"{MEMORY_CAP_GB}g",
+                f"{memory_cap_gb}g",
                 "--shm-size",
                 "4g",
                 "--gpus",
@@ -215,27 +235,31 @@ class TestSustainedLoad(unittest.TestCase):
             # Sustained window: the SPEC's "8 concurrent completions
             # for 120 s -> t/s >= 26.2, zero 5xx".
             st = _State()
-            deadline = time.monotonic() + DURATION_S
+            window_start = time.monotonic()
+            deadline = window_start + DURATION_S
             with ThreadPoolExecutor(max_workers=CONCURRENT) as pool:
                 futures = [
                     pool.submit(_worker, st, deadline) for _ in range(CONCURRENT)
                 ]
                 for f in futures:
                     f.result()
-
-            tps = st.tokens / DURATION_S
+            window_s = time.monotonic() - window_start
+            # Denominator = measured wall-time (SPEC: "for 120 s"), not
+            # the nominal constant: a stalled worker costs its tokens,
+            # so the measured window is the honest time base.
+            tps = st.tokens / window_s
             print(
                 f"\n[1.8] {st.ok} completions, {st.tokens} tokens in "
-                f"{DURATION_S}s -> {tps:.1f} t/s aggregate "
+                f"{window_s:.1f}s -> {tps:.1f} t/s aggregate "
                 f"(5xx={st.err_5xx}, other_err={st.err_other})",
                 flush=True,
             )
+            self.assertGreater(st.ok, 0, "no completions recorded")
             self.assertEqual(
                 st.err_5xx,
                 0,
                 f"{st.err_5xx} 5xx response(s) in the 120 s window",
             )
-            self.assertGreater(st.ok, 0, "no completions recorded")
             self.assertGreaterEqual(
                 tps,
                 MIN_AGG_TPS,

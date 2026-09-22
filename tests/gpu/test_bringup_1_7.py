@@ -69,9 +69,14 @@ def _image_present() -> bool:
 
 
 def _instance_budget_gb() -> float:
-    """instances.per_instance_budget_gb from the template (S1.4 re-anchor)."""
+    """instances.per_instance_budget_gb from the template (S1.4 re-anchor).
+
+    Anchored at line start (indentation + exact key name), so a comment
+    line that merely MENTIONS the key can't match; the value itself is
+    the first token after the colon (a trailing comment is fine).
+    """
     text = ENGINE_YAML.read_text()
-    m = re.search(r"(?m)^\s*per_instance_budget_gb:\s*([0-9.]+)", text)
+    m = re.search(r"(?m)^[ \t]*per_instance_budget_gb:[ \t]*([0-9.]+)", text)
     assert m, f"per_instance_budget_gb not found in {ENGINE_YAML}"
     return float(m.group(1))
 
@@ -228,11 +233,18 @@ class TestBringUp(unittest.TestCase):
             )
 
             # 3) VRAM delta vs the S1.4 formula, 10 % band (S1.7
-            #    integration). The formula side uses the YAML budget
-            #    (per_instance_budget_gb = 14.78, which is the re-anchored
-            #    formula footprint 14.08 + 5 % margin); the measured
-            #    total on this box is 14.44 GB. Band: formula * 0.9 ..
-            #    measured * 1.1 (12.67 .. 15.88 GB).
+            #    integration). Band = [budget*0.9, measured*1.1] =
+            #    [13.30, 15.88] GB around the re-anchored budget
+            #    (14.78 = formula footprint 14.08 + 5 % install margin)
+            #    and the measured 14.44 GB total on this box. The floor
+            #    is deliberately BUDGET-anchored (not footprint-anchored
+            #    at 14.08*0.9 = 12.67): the measured delta includes the
+            #    instance's real overhead, and anchoring the floor on
+            #    the budget keeps the band honest for the S2.2
+            #    --memory cap (which IS the budget). A q4_0 -> FP16 KV
+            #    regression (~24.6 GiB) still fails the ceiling loudly.
+            #    (User-approved band, 2026-09-22; G3c round-2 P1-2
+            #    disposition = document, not tighten.)
             time.sleep(3.0)  # let the allocator settle after the request
             delta_gb = _gpu_delta_gb(_gpu_compute_apps_mib(), baseline)
             formula_gb = _instance_budget_gb()  # 14.78 (includes the 5 % margin)

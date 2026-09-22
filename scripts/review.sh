@@ -51,7 +51,7 @@ fi
 # would abort at the word-split).
 EXCLUDE_SPECS=""
 if [ -n "${REVIEW_EXCLUDE:-}" ]; then
-  IFS=':' read -ra _excl in <<< "${REVIEW_EXCLUDE}"
+  IFS=':' read -ra _excl <<< "${REVIEW_EXCLUDE}"
   for p in "${_excl[@]}"; do
     [ -n "$p" ] || continue
     EXCLUDE_SPECS="${EXCLUDE_SPECS} :!${p}"
