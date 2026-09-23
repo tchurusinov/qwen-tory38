@@ -43,7 +43,8 @@ Exit codes (the manager PROCESS; S1.4 / S2.4 / S2.3):
       ran — "granted at plan time, short at allocation time"). This is a
       BOOT-TIME failure, handled BEFORE `READY=1` is sent: the health
       document is written (0 instances, stack derived degraded), a
-      STATUS= is emitted, and the process exits 4 so systemd sees a
+      STATUS= is emitted, then a STOPPING= (pre-READY exit bookkeeping,
+      G3 PR #10 r10 P2), and the process exits 4 so systemd sees a
       FAILED START under `Type=notify` and applies
       `Restart=on-failure` / `RestartSec=5` (the S1.4 "the manager exits
       4 before the instance's KV allocation" contract — S1.4's exit 4
@@ -878,6 +879,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         _log(str(exc))
         notify_sd(f"STATUS=bonsai2-manager: {exc}")
+        notify_sd("STOPPING=1")  # pre-READY exit (G3 PR #10 r10 P2)
         return EXIT_CONFIG
 
     n_yaml = int(cfg["count"])
@@ -892,6 +894,7 @@ def main(argv: list[str] | None = None) -> int:
         # of an uncaught traceback (exit 1), matching the load_config contract.
         _log(f"ERR_CONFIG: MemTotal read failed: {exc}")
         notify_sd(f"STATUS=bonsai2-manager: ERR_CONFIG: {exc}")
+        notify_sd("STOPPING=1")  # pre-READY exit (G3 PR #10 r10 P2)
         return EXIT_CONFIG
     main_used, source = main_used_gb(cfg["main_container"], cfg["main_footprint_gb"])
     _log(
@@ -956,6 +959,12 @@ def main(argv: list[str] | None = None) -> int:
         _log("S1.4: i=0 allocation OOM -> exit 4 (ERR_VRAM_OOM), no READY sent")
         write_health(health_dir, build_health(cfg, [], main_ok, "ERR_VRAM_OOM"))
         notify_sd(f"STATUS=bonsai2-manager: {detail}")
+        # Pre-READY exit: emit STOPPING= so a `systemctl stop` issued during
+        # this still-"starting" window has Type=notify bookkeeping to
+        # complete against instead of falling through to the TimeoutStopSec
+        # main-PID path (G3 PR #10 r10 P2). The normal case (boot exits 4
+        # in ~seconds) is a FAILED START -> Restart=on-failure, not a stop.
+        notify_sd("STOPPING=1")
         return EXIT_VRAM_OOM
 
     # --- S2.4 N=0 / main-only handoff (the PTQ1_0 / ctx-halve fallback is

@@ -316,6 +316,7 @@ class TestMainExitCodes(unittest.TestCase):
         """G3 round-4 P2: read_total_gb() raising OSError (MemTotal absent)
         maps to ERR_CONFIG exit 2, not an uncaught traceback (exit 1)."""
         cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        notified: list[str] = []
         with tempfile.TemporaryDirectory() as td:
             with (
                 mock.patch.dict(os.environ, self._env(td), clear=False),
@@ -323,9 +324,15 @@ class TestMainExitCodes(unittest.TestCase):
                 mock.patch.object(
                     mgr, "read_total_gb", side_effect=OSError("MemTotal missing")
                 ),
+                mock.patch.object(
+                    mgr, "notify_sd", side_effect=lambda s: notified.append(s)
+                ),
             ):
                 rc = mgr.main([])
             self.assertEqual(rc, 2, "MemTotal read failure = ERR_CONFIG exit 2")
+        # G3 round-10 P2: a pre-READY exit sends STOPPING= so a stop issued
+        # during the still-"starting" window has Type=notify bookkeeping.
+        self.assertIn("STOPPING=1", notified)
 
     def test_i0_oom_exits_4_writes_health_no_ready(self):
         """G3 round-4 P0: when spawn_sequence returns exit 4 (i=0
@@ -376,6 +383,12 @@ class TestMainExitCodes(unittest.TestCase):
         self.assertFalse(
             any(s.startswith("READY=") for s in notified),
             "exit-4 boot must NOT send READY=1",
+        )
+        # G3 round-10 P2: a pre-READY exit sends STOPPING= so a stop issued
+        # during the still-"starting" window has Type=notify bookkeeping
+        # instead of falling through to the TimeoutStopSec main-PID path.
+        self.assertIn(
+            "STOPPING=1", notified, "exit-4 boot must send STOPPING= (pre-READY)"
         )
 
     def test_settle_run_sends_ready_1_before_settle_window(self):
@@ -788,6 +801,46 @@ class TestSpawnSequence(unittest.TestCase):
         self.assertEqual(start_rc, {0: 1, 1: 0})
         # i=0's wait is skipped (bfailed), i=1's still happens.
         self.assertEqual(waits, [1], "failed-start index must not be waited on")
+
+    def test_steady_loop_does_not_mask_later_instance_after_failed_start(self):
+        """G3 round-10 P1 (refuted): with a failed i=0 start, the steady
+        probe loop probes _port(cfg, i) = port_base + i for the REAL index
+        i, so a later healthy instance keeps its true health — the failed
+        index's dead port cannot mask a neighbour. Pin the invariant:
+        main()'s first-health.json build marks i=0 bfailed from start_rc
+        (not by probing), and _refresh_states over several cycles keeps
+        i=1 'healthy' while i=0 settles to the skeleton's degraded
+        over-report (its probe misses; bfailed only comes from the
+        start_rc path)."""
+        cfg = self._cfg()
+        port_base = int(cfg["port_base"])
+        start_rc = {0: 1, 1: 0}
+        spawned = [0, 1]
+        # main()'s first-health.json state build (reproduced verbatim):
+        # start_rc != 0 -> bfailed, else a probe.
+        states = []
+        for i in spawned:
+            if start_rc.get(i, 0) != 0:
+                states.append("bfailed")
+            else:
+                states.append("healthy")  # i=1's probe: healthy
+        self.assertEqual(states, ["bfailed", "healthy"])
+        self.assertEqual(mgr.stack_summary(states)[0], "degraded")
+        # i=0's port dead, i=1's port healthy: run several cycles.
+        with mock.patch.object(
+            mgr,
+            "instance_healthy",
+            side_effect=lambda port, a, k: port == port_base + 1,
+        ):
+            for _ in range(3):
+                states = mgr._refresh_states(cfg, spawned, states)
+        self.assertEqual(
+            states[1],
+            "healthy",
+            "a healthy instance after a failed i=0 start must NOT be masked",
+        )
+        self.assertIn(states[0], ("bfailed", "degraded"))
+        self.assertEqual(mgr.stack_summary(states)[0], "degraded")
 
     def test_needs_use_vram_formula_not_a_hardcoded_number(self):
         """The need the main() computes must equal the S1.4 formula
