@@ -7,7 +7,8 @@ install.sh will wire it (S2.2/S2.5):
 
   * the S2.2 `bonsai2-server@i` unit shape is installed (here in USER
     scope — blckwll is the manager's production user; the unit files are
-    byte-identical to the S2.2 shape, only the scope differs)
+    the S2.2 shape with the user-scope deltas listed below — Requires=
+    dropped, After= shortened, Description marker)
   * `bonsai2-sglang.service`'s ExecStart target (`bonsai2-manager`) runs
     the S2.3 boot check + S1.4 allocation tier + S2.5 ordered spawn
     against the LIVE pool
@@ -22,12 +23,23 @@ production units are SYSTEM units (MAP 2.4's templates land in
 a system-scope manager (sudo needs a password; polkit not configured),
 and the S2.2 unit's `Requires=docker.service` is FATAL in user scope
 ("Unit docker.service not found" — probed 2026-09-22; the user manager
-has no docker unit). So the test units drop the `Requires=` line (kept
-in the system template, where it is S2.2-verbatim) and the manager
-prefixes systemctl with `--user` (BONSAI2_USER_SYSTEMCTL=1, the
-manager's documented test hook). Everything else — ExecStartPre, the
-verbatim docker-run flags, Restart=on-failure, RestartSec=5,
-StartLimitBurst=3, CPUQuota=64% — is the S2.2 shape byte-for-byte.
+has no docker unit). The user-scope deltas vs the system template are
+EXACTLY three (G3 PR #10 round 8 P1, enumerated so the shape claim is
+checkable line-by-line):
+  1. `Requires=docker.service` DROPPED (fatal in user scope; the
+     docker client is on PATH, which is what the ExecStart/ExecStartPre
+     actually need).
+  2. `After=docker.service bonsai2-sglang.service` shortened to
+     `After=docker.service` — a user unit cannot order against a
+     system unit, and the test's manager subprocess handles the
+     main-stack-first ordering itself (S2.1).
+  3. `Description` carries a `, @gpu test` marker suffix.
+Everything else — ExecStartPre, the verbatim docker-run flags,
+StartLimitIntervalSec=300, StartLimitBurst=3, Restart=on-failure,
+RestartSec=5, CPUQuota=64%, [Install] WantedBy=multi-user.target — is
+the S2.2 shape byte-for-byte. And the manager prefixes systemctl with
+`--user` (BONSAI2_USER_SYSTEMCTL=1, the manager's documented test
+hook).
 
 Measurement notes (box-specific, per the @gpu convention):
   * pool state is asserted BEFORE the run (the 1.9 test's rule — a
@@ -236,6 +248,16 @@ class TestManagerSpawnLive(unittest.TestCase):
             stray_manager_unit.exists(),
             "stray user-scope bonsai2-sglang.service — stop/disable it and re-run",
         )
+        # S2.1 'main stack unaffected': the main-stack GPU PIDs that exist
+        # NOW (captured after the preconditions, immediately before the
+        # manager's spawn) must still be present after the run — i.e. the
+        # manager's spawn did not kill/replace the main stack. Scope: this
+        # guards the main stack from being DISTURBED by the subagent
+        # spawn, not from an unrelated main-stack process that happens to
+        # restart on its own between capture and run (the test asserts
+        # `not lost`, so a pid appearing after capture is out of scope;
+        # G3 PR #10 round 8 P2, note-only — the ordering guarantee the
+        # assertion targets is S2.1 'main first, subagents never preempt').
         baseline_pids = set(_gpu_compute_apps_mib())
 
         ctx, kv, par = _ctx_kv_from_template()

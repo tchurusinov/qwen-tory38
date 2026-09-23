@@ -199,6 +199,31 @@ class TestConfigLoading(unittest.TestCase):
                 mgr.load_config(bad, SERVING_YAML)
             self.assertIn("ERR_CONFIG", str(ctx.exception))
 
+    def test_non_numeric_instance_key_is_err_config(self):
+        """G3 round-8 P2: a hand-edited YAML with a non-numeric int key
+        (e.g. `count: abc`) must fail at config-load with ERR_CONFIG, not
+        as a cryptic `int()` ValueError mid-boot in main()."""
+        with tempfile.TemporaryDirectory() as td:
+            good = ENGINE_YAML.read_text().replace("count: 2", "count: abc")
+            bad = Path(td) / "subagent-engine.yaml"
+            bad.write_text(good)
+            with self.assertRaises(ValueError) as ctx:
+                mgr.load_config(bad, SERVING_YAML)
+            self.assertIn("ERR_CONFIG", str(ctx.exception))
+            self.assertIn("instances.count", str(ctx.exception))
+
+    def test_float_budget_is_accepted(self):
+        """The per_instance_budget_gb key accepts int OR float (S1.4 works
+        in decimal GB; the YAML template ships 14.78 as a float)."""
+        with tempfile.TemporaryDirectory() as td:
+            good = ENGINE_YAML.read_text().replace(
+                "per_instance_budget_gb: 14.78", "per_instance_budget_gb: 12"
+            )
+            ok = Path(td) / "subagent-engine.yaml"
+            ok.write_text(good)
+            cfg = mgr.load_config(ok, SERVING_YAML)
+            self.assertEqual(cfg["budget_gb"], 12)
+
 
 class TestHealthJson(unittest.TestCase):
     """2.1: /run/bonsai2/health.json in the S3.1 schema (S2.2)."""

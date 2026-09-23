@@ -198,6 +198,24 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
         raise ValueError(  # noqa: TRY004
             "ERR_CONFIG: subagent-engine.yaml: model.size_bytes missing/not int"
         )
+    # Numeric instance keys: validate the TYPE at config-load (ERR_CONFIG)
+    # instead of letting `int(cfg[...])` / `float(cfg[...])` in main()
+    # raise a cryptic `ValueError: invalid literal for int()` mid-boot
+    # (G3 PR #10 round 8 P2). A non-numeric string ("abc") reaches main()
+    # only when the YAML is hand-edited — this is the early, named
+    # failure. (Range checks are the S1.7 render-config tool's job;
+    # the manager validates presence + type + sign.)
+    for key in ("count", "port_base", "ctx_size", "max_num_seqs"):
+        if not isinstance(inst.get(key), int) or isinstance(inst.get(key), bool):
+            raise ValueError(  # noqa: TRY004  (ERR_CONFIG contract: ValueError, msg names it)
+                f"ERR_CONFIG: subagent-engine.yaml: instances.{key} not an int"
+            )
+    if not isinstance(inst.get("per_instance_budget_gb"), (int, float)) or isinstance(
+        inst.get("per_instance_budget_gb"), bool
+    ):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: subagent-engine.yaml: instances.per_instance_budget_gb not a number"
+        )
     alias = eng.get("alias")
     api_key = eng.get("api_key")
     if not isinstance(alias, str) or not isinstance(api_key, str):
