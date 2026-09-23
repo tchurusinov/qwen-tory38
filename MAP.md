@@ -606,6 +606,17 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 13 reviewed — 0 P0/2 P1/4 P2; P1#1 kv_cache-never-feeds-S1.4 REAL + fixed (ERR_CONFIG on unvalidated dtype), P1#2 None-deadline-TypeError refuted by probe, P2s closed (commit 061706c)
+- G3 PR #10 (MAP 2.1–2.5). Round 13: 0 P0 / 2 P1 / 4 P2 (raw: /tmp/review-phase2-manager-skeleton-r13.txt; stdout /tmp/review-10-stdout-r13.txt, review.sh rc=0).
+  - P1#1 `kv_cache` (S1.6 key) never read by load_config → S1.4 footprint hard-coded the q4_0 constant; a future FP16 edit would silently over-admit. REAL — fixed: `KV_PER_SLOT_PER_TOKEN_GB = {"q4_0": 0.000003277}` (S1.4 locks ONLY q4_0; the reviewer's suggested fp16→0.00000176 is the old under-predicting anchor the re-anchor replaced, so unknown dtype = ERR_CONFIG at load, not a guessed constant at boot); load_config validates + exposes `kv_cache`/`per_slot_per_token_gb`; `allocation_need_gb` 5th param (default = module constant); main() threads cfg value into both footprint calls + tier log prints `kv_cache=`. 4 new hermetic tests.
+  - P1#2 explicit `boot_deadline_s=None` → `else: deadline = None` → `time.monotonic() < None` TypeError — REFUTED: source order is `if boot_deadline_s is None:` FIRST; /tmp/probe_r13_p1b.py: `wait_instance_healthy(0, cfg, None)` → False in ~2s (no TypeError); end-to-end `spawn_sequence(..., boot_deadline_s=None)` rc=1 start → `rc=0 spawned=[0] start_rc={0:1}`.
+  - P2#1 allocation_tier log marker: gate is `free >= need` but marker printed `<=` when granted — the OPPOSITE for every strict grant (worse than the reported edge case) → pinned `{'>=' if granted else '<'}`.
+  - P2#2 completion timeout docstring: kwarg is the urlopen SOCKET cap; the S2.2 '<10 s' gate is measured elapsed (timer pre-urlopen). Clarified in docstring.
+  - P2#3 @gpu `--batch-size 2048` hardcoded: S1.3 locked value, NOT an S1.6 key — comment at the site (drift would be silent; probes don't check batch size).
+  - P2#4 intent file "31 cases" stale → now "44 cases at r13; 31 at r1 — the count grew with each review round's pins".
+  - Verified: 182/182 OK; ruff check+format clean; gate PASS; commit 061706c pushed. @gpu r13: 50.7 s (2 instances healthy, stack=healthy) — first run with the kv_cache-validated S1.4 path live. Disposition posted → PR #10 comment 664.
+  - P2 trend: 7(r1) → 1(r4) → 3(r5) → 2(r6) → 4(r11) → 3(r12) → 4(r13). P1s since r9: r11=1 real, r12=2 (1 vestige/1 refuted), r13=2 (1 real/1 refuted). Round 14 = confirmation on the new surface (kv_cache load path + log marker + 4 new tests).
+
 ### 2026-09-23 — G3 loop PR #10: round 12 reviewed — 0 P0/2 P1/3 P2; P1#1 vestigial (fixed), P1#2 refuted by probe + pin tightened, P2s closed (commit 0f0cf4e)
 - G3 PR #10 (MAP 2.1–2.5). Round 12: 0 P0 / 2 P1 / 3 P2 (raw: /tmp/review-phase2-manager-skeleton-r12.txt; stdout /tmp/review-10-stdout-r12.txt, review.sh rc=0).
   - P1#1 `stack_summary` tuple second always None → `build_health` `elif reason:` dead (behavior already correct: `main()` sets `main_only_reason` only in the n_prime==0 branch). REAL vestige — fixed: bare-str return, branch removed, S3.1 contract stated in both docstrings; hermetic callers updated.

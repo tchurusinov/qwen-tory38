@@ -363,6 +363,11 @@ instances:
   max_num_seqs: 8
   per_instance_budget_gb: 14.78   # S1.4: 14.08 GB measured q4_0 footprint + 5% margin
 kv_cache: q4_0                   # S1.3 --cache-type-k/v (the S1.4 re-anchor; FP16 default doubles the footprint)
+#                                       # Manager validation (delta 2026-09-23, G3 PR #10 r13):
+#                                       # load_config ERR_CONFIGs (exit 2) a missing kv_cache or a
+#                                       # dtype with no LOCKED S1.4 constant (today: q4_0 only) —
+#                                       # the footprint must never silently gate on a constant the
+#                                       # config didn't ask for.
 sampling:                          # locked from model card
   temperature: 1.0
   top_p: 0.9
