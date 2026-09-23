@@ -107,7 +107,11 @@ def _user_systemctl_available() -> bool:
 
 
 def _port_free(port: int) -> bool:
+    # G3 PR#11 r1 (DOD #4): SO_REUSEADDR — see test_lifecycle_2_11's
+    # _port_free for the root cause (host-net TIME_WAIT entries from
+    # the @gpu files that ran earlier in the same discovery).
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(("127.0.0.1", port))
         return True
@@ -193,6 +197,22 @@ def _assert_memory_cap_is_gib_truncation(ins, budget, name):
     assert ins["HostConfig"]["MemorySwap"] == cap_bytes, (
         f"{name} memory-swap != {budget}g (S2.2: no swap escape)"
     )
+
+
+def _ports_free_bounded(timeout_s: float = 15.0, poll_s: float = 1.0) -> bool:
+    """G3 PR#11 r1 (DOD #4): the port precondition is RETRIABLE — a
+    transient holder between @gpu files (the discovery runs test 1.11 /
+    1.10 on --network host first, and their teardown's TIME_WAIT
+    entries + any mid-restart unit linger briefly on 30101/30102) is
+    waited out for a bounded window instead of hard-failing the
+    precondition; the hard assert happens only AFTER the window."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if _port_free(PORT_BASE) and _port_free(PORT_BASE + 1):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
 
 
 def _instance_unit_text(
@@ -318,8 +338,9 @@ class TestManagerSpawnLive(unittest.TestCase):
             f"(2 x {budget} + 1.0 margin) — run the VRAM audit and clear",
         )
         self.assertTrue(
-            _port_free(PORT_BASE) and _port_free(PORT_BASE + 1),
-            "ports 30101/30102 busy — leftover container?",
+            _ports_free_bounded(),
+            "ports 30101/30102 busy after the bounded 15 s wait — leftover "
+            "container? (a transient holder between @gpu files is retriable)",
         )
         self.assertTrue(_no_bonsai_containers(), "stale bonsai2-server containers")
         # G3 PR #10 r14 P2: the test is written for EXACTLY 2 instances
@@ -361,6 +382,10 @@ class TestManagerSpawnLive(unittest.TestCase):
         )
         user_unit_dir = Path.home() / ".config" / "systemd" / "user"
         unit_files = []
+        # G3 PR#11 r1 (DOD #4): the manager's S2.6 measured-boot write-back
+        # mutates the tracked serving.yaml (and S2.4 could touch the engine
+        # yaml) — snapshot both so the tracked tree is clean after the run.
+        tpl_backups = {p: p.read_bytes() for p in (ENGINE_YAML, SERVING_YAML)}
         try:
             # ---- install the two S2.2-shaped user units ----
             user_unit_dir.mkdir(parents=True, exist_ok=True)
@@ -515,6 +540,14 @@ class TestManagerSpawnLive(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
+            # Restore the tracked templates the manager's S2.6/S2.4
+            # write-backs may have mutated (G3 PR#11 r1 DOD #4).
+            for p, blob in tpl_backups.items():
+                try:
+                    if p.read_bytes() != blob:
+                        p.write_bytes(blob)
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":

@@ -143,7 +143,22 @@ def _user_systemctl_available() -> bool:
 
 
 def _port_free(port: int) -> bool:
+    # G3 PR#11 r1 (DOD #4): SO_REUSEADDR — a plain bind() reports EADDRINUSE
+    # on a port whose listener is GONE but whose connections are still in
+    # TIME_WAIT (the @gpu discovery runs test 1.11 / 1.10 on
+    # --network host right before this file; the host-net engine's
+    # closed connections leave TIME_WAIT entries on 30101/30102 for up
+    # to 60 s). SO_REUSEADDR lets the probe bind through the TIME_WAIT
+    # entries — the check then measures ACTUAL listeners, not the
+    # kernel's socket table. (A real listener still refuses the
+    # connect-style probe semantics: the unit's ExecStartPre
+    # docker rm -f clears a same-name container, but a DIFFERENT
+    # listener on the port is exactly what this precondition must
+    # catch, and bind-vs-lister contention is unaffected by
+    # SO_REUSEADDR when the holder has it set too — the bounded retry
+    # in _preconditions covers that residual case.)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(("127.0.0.1", port))
         return True
@@ -151,6 +166,22 @@ def _port_free(port: int) -> bool:
         return False
     finally:
         s.close()
+
+
+def _ports_free_bounded(timeout_s: float = 15.0, poll_s: float = 1.0) -> bool:
+    """G3 PR#11 r1 (DOD #4): the port precondition is RETRIABLE — a
+    transient holder between tests (a unit mid-restart after the prior
+    @gpu file's teardown, a slow docker rm) is waited out for a
+    bounded window instead of hard-failing the precondition; the hard
+    assert happens only AFTER the window. 15 s matches the documented
+    MAP 2.11 fix (poll every ~1 s up to ~15 s)."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if _port_free(PORT_BASE) and _port_free(PORT_BASE + 1):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
 
 
 def _no_bonsai_containers() -> bool:
@@ -488,6 +519,12 @@ class TestS28Acceptance(unittest.TestCase):
         cls.user_unit_dir = Path.home() / ".config" / "systemd" / "user"
         cls.user_unit_dir.mkdir(parents=True, exist_ok=True)
         cls.unit_files = []
+        # G3 PR#11 r1 (DOD #4): the manager's S2.6 measured-boot and S2.4
+        # quant/ctx write-backs mutate the LIVE templates under the @gpu
+        # harness (BONSAI2_*_YAML point at the tracked etc/ files).
+        # Snapshot both so the tracked tree is clean after the suite —
+        # otherwise the next hermetic run reads the leaked values.
+        cls._tpl_backups = {p: p.read_bytes() for p in (ENGINE_YAML, SERVING_YAML)}
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -500,6 +537,12 @@ class TestS28Acceptance(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+        for p, blob in cls._tpl_backups.items():
+            try:
+                if p.read_bytes() != blob:
+                    p.write_bytes(blob)
+            except OSError:
+                pass
 
     def _install_units(self) -> None:
         for i in (0, 1):
@@ -582,8 +625,8 @@ class TestS28Acceptance(unittest.TestCase):
             f"— run the VRAM audit and clear",
         )
         self.assertTrue(
-            _port_free(PORT_BASE) and _port_free(PORT_BASE + 1),
-            "ports 30101/30102 busy — leftover container?",
+            _ports_free_bounded(),
+            "ports 30101/30102 busy after 15 s — leftover container?",
         )
         self.assertTrue(_no_bonsai_containers(), "stale bonsai2-server containers")
         self.assertEqual(
@@ -643,9 +686,8 @@ class TestS28Acceptance(unittest.TestCase):
                 # serving.yaml path the manager was fed. Under the @gpu
                 # harness that path IS the tracked template
                 # (BONSAI2_SERVING_YAML); the write is asserted via the
-                # manager's log line, and the template is restored in
-                # finally (best-effort: a changed boot_target_s value
-                # is a legitimate test artifact, not a failure).
+                # manager's log line, and the tracked templates are
+                # restored by tearDownClass (G3 PR#11 r1 DOD #4).
                 self.assertIn("S2.6: measured boot", err)
                 health = _poll_health(health_dir, 5.0)
                 self.assertEqual(health["stack"], "healthy")
@@ -665,12 +707,6 @@ class TestS28Acceptance(unittest.TestCase):
                 )
         finally:
             self._teardown_instances()
-            subprocess.run(
-                ["git", "checkout", "--", "etc/serving.yaml"],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                check=False,
-            )
 
     # ------------------------------------------------------------------
     # S2.8 #2 — single-instance crash -> auto-recovered, main

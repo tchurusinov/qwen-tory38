@@ -766,6 +766,23 @@ class TestAllocationTier(unittest.TestCase):
         granted, _, _ = mgr.allocation_tier(gate, lambda: 12.0)
         self.assertTrue(granted)
 
+    def test_tier_pre_charge_reduces_available(self):
+        """G3 PR#11 r1 P1: the S3.2 reload loop charges each in-pass start
+        against the shared pool (pre_charge_gb), the way spawn_sequence's
+        post-spawn re-read does at boot. A static pool that is enough for
+        ONE instance must reject the second target once the first start
+        is charged against it."""
+        need = 15.08
+        # Pool is enough for exactly one instance.
+        granted, _, _ = mgr.allocation_tier(need, lambda: 15.10, pre_charge_gb=0.0)
+        self.assertTrue(granted, "first target: free >= need")
+        # After the first start is charged, the pool drops below need.
+        granted2, _, detail = mgr.allocation_tier(
+            need, lambda: 15.10, pre_charge_gb=need
+        )
+        self.assertFalse(granted2, "second target: free - in-pass charge < need")
+        self.assertIn("in-pass charge", detail, "the detail names the in-pass charge")
+
     def test_read_free_gb_retries_once_then_zero(self):
         """S1.4: '5 s timeout per probe, one retry; on a second timeout
         the tier treats free as 0'."""
@@ -1249,6 +1266,65 @@ class TestEscalation(unittest.TestCase):
         self.assertEqual(rt.entries[0].restarts, 0)
         self.assertEqual(rt.entries[0].fails, 0)
 
+    def test_baseline_frozen_after_streak_start(self):
+        """G3 PR#11 r1 P1: the NRestarts baseline is captured ONCE at the
+        streak start (fails 0 -> 1) and NOT re-advanced on later
+        sub-threshold cycles. A systemd-side restart that lands while
+        fails is still < RESTART_FAILS must still be caught by the defer
+        check at the threshold — so the baseline stays at the streak-start
+        value, not the post-restart value."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        restarts = []
+
+        def restart(i, base):
+            restarts.append(i)
+            return 0
+
+        # streak start: fails 0 -> 1, baseline -1 -> captured (NRestarts=7)
+        rt.entries[0].fails = 1
+        with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+            mgr.check_escalation(
+                rt,
+                1000.0,
+                base=["systemctl"],
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=7\n"),
+                restart=restart,
+                log=lambda *a: None,
+            )
+        self.assertEqual(
+            rt.entries[0].last_nrestarts, 7, "baseline captured at streak start"
+        )
+
+        # later sub-threshold cycle: baseline must NOT be re-read/advanced
+        rt.entries[0].fails = 3
+        with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+            mgr.check_escalation(
+                rt,
+                1010.0,
+                base=["systemctl"],
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=8\n"),
+                restart=restart,
+                log=lambda *a: None,
+            )
+        self.assertEqual(
+            rt.entries[0].last_nrestarts,
+            7,
+            "baseline frozen at the streak-start value (not advanced mid-streak)",
+        )
+        # at the threshold: systemd already restarted (8 > 7) -> defer
+        rt.entries[0].fails = 5
+        with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+            mgr.check_escalation(
+                rt,
+                1020.0,
+                base=["systemctl"],
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=8\n"),
+                restart=restart,
+                log=lambda *a: None,
+            )
+        self.assertEqual(restarts, [], "systemd-side restart mid-streak is deferred")
+
 
 # --------------------------------------------------------------------------
 # MAP 2.7 — S2.4 N=0 PTQ1_0 fallback + ctx-halve retry + bookkeeping
@@ -1317,6 +1393,28 @@ class TestFallback(unittest.TestCase):
             self.assertEqual(data["instances"]["ctx_size"], 131072)
         finally:
             p.unlink(missing_ok=True)
+
+    def test_record_ctx_in_use_matches_unspaced_key(self):
+        """G3 PR#11 r1 P2: `ctx_size:262144` (no space after the colon,
+        valid YAML) must be matched by the replace path — otherwise the
+        replace misses and the insert path appends a DUPLICATE ctx_size
+        key under instances:."""
+        import tempfile
+
+        d = Path(tempfile.mkdtemp())
+        try:
+            p = d / "eng.yaml"
+            p.write_text("instances:\n  ctx_size:262144\n  count: 2\n")
+            self.assertTrue(mgr.record_ctx_in_use(p, 131072, log=lambda *a: None))
+            text = p.read_text()
+            self.assertEqual(
+                text.count("ctx_size:"), 1, f"duplicate ctx_size key: {text!r}"
+            )
+            import yaml
+
+            self.assertEqual(yaml.safe_load(text)["instances"]["ctx_size"], 131072)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_rewrite_unit_model_and_memory_are_surgical(self):
         import tempfile
@@ -1577,6 +1675,51 @@ class TestDriftWatch(unittest.TestCase):
             )
         self.assertEqual(cgroup_calls, [], "bunloaded index not cgroup-read")
 
+    def test_drift_at_ctx_floor_is_a_noop_no_restart(self):
+        """G3 PR#11 r1 P2: when the ctx is already at the floor, the
+        sustained pressure window fires but the halve is a no-op — no
+        unit rewrite, no in-place restart (no restart-budget count
+        burned); the pressure clock still resets."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        rt.entries[0].ctx = mgr.CTX_FLOOR  # already at the floor
+        cap = mgr._drift_cap_bytes(float(cfg["budget_gb"]))
+        over = int(float(cfg["budget_gb"]) * 1e9) + 1
+        rewrites = []
+        restarts = []
+        with mock.patch.object(
+            mgr, "_instance_unit_path", return_value=Path("/u.service")
+        ):
+            mgr.check_drift(
+                rt,
+                1000.0,
+                cap,
+                base=["systemctl"],
+                cgroup_path=lambda n: Path("/x"),
+                cgroup_read=lambda p: over,
+                rewrite=lambda u, nc, cc, log=None: rewrites.append(nc) or True,
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+            # > 30 s later, still over cap: the window fires but the
+            # floor makes the halve a no-op.
+            mgr.check_drift(
+                rt,
+                1000.0 + mgr.DRIFT_PRESSURE_S + 1,
+                cap,
+                base=["systemctl"],
+                cgroup_path=lambda n: Path("/x"),
+                cgroup_read=lambda p: over,
+                rewrite=lambda u, nc, cc, log=None: rewrites.append(nc) or True,
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+        self.assertEqual(rewrites, [], "no ctx rewrite at the floor")
+        self.assertEqual(restarts, [], "no in-place restart at the floor")
+        self.assertEqual(rt.entries[0].restarts, 0, "no restart-budget count")
+        self.assertEqual(rt.entries[0].ctx, mgr.CTX_FLOOR)
+        self.assertIsNone(rt.entries[0].pressure_start, "the pressure clock reset")
+
 
 # --------------------------------------------------------------------------
 # MAP 2.9 — S2.6 serving.yaml writer (measured boot_target_s write-back)
@@ -1764,6 +1907,170 @@ class TestControlQueue(unittest.TestCase):
             self.assertEqual(ack["state"], "error")
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_list_of_all_strings_and_bare_int_are_error_acks(self):
+        """G3 PR#11 r1 P0: the mixed-operator validation let a list like
+        ["all"] through (crashing on int("all") after the ack was
+        decided) and rejected a bare int target. The explicit
+        validation: valid = the string "all" OR a list of ints;
+        everything else gets an error ack, the request is marked done,
+        no crash."""
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            for rid, targets in (("la", ["all"]), ("bi", 0)):
+                f = d / "control" / f"{rid}.json"
+                f.write_text(
+                    json.dumps(
+                        {"type": "unload", "instances": targets, "request_id": rid}
+                    )
+                )
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control", rt, 1000.0, base=["systemctl"], log=lambda *a: None
+                )
+            for rid in ("la", "bi"):
+                ack = json.loads((d / "control" / f"ack-{rid}.json").read_text())
+                self.assertEqual(ack["state"], "error", f"{rid}: {ack}")
+                self.assertTrue((d / "control" / f"{rid}.json.done").exists())
+            # nothing was touched
+            self.assertEqual(rt.entries[0].state, "healthy")
+            self.assertEqual(rt.entries[1].state, "healthy")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_unload_unspawned_index_is_a_noop(self):
+        """G3 PR#11 r1 P0: an index the manager never spawned (not in
+        runtime.spawned) is a no-op for that index — no systemctl stop,
+        no state change, not in the ack's unloaded list (the next reload
+        must not have to re-admit an index the manager did not manage)."""
+        import tempfile
+
+        cfg = self._cfg()
+        # only i=0 was spawned; i=1 is configured but not running
+        rt = mgr.Runtime(cfg, [0], ["healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "unload", "all", "u2")
+            stopped = []
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    stop=lambda i, base: stopped.append(i) or 0,
+                    wait_down=lambda *a, **k: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(stopped, [0], "only the spawned index is stopped")
+            self.assertEqual(rt.entries[1].state, "bdown", "unspawned index untouched")
+            ack = json.loads((d / "control" / "ack-u2.json").read_text())
+            self.assertEqual(ack["unloaded"], [0])
+            self.assertEqual(ack["state"], "ok")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_unload_failed_stop_keeps_prior_state(self):
+        """G3 PR#11 r1 P1: a non-zero stop rc means the container may
+        still be running — the manager keeps the prior state (the probe
+        loop re-observes it) instead of believing a failed stop; the
+        index stays in spawned so a later pass can retry."""
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "unload", [0], "u3")
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    stop=lambda i, base: 1,  # the stop did not land
+                    wait_down=lambda *a, **k: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(
+                rt.entries[0].state, "healthy", "state kept on failed stop"
+            )
+            self.assertIn(0, rt.spawned, "index stays spawned for the retry")
+            ack = json.loads((d / "control" / "ack-u3.json").read_text())
+            self.assertNotIn(
+                0, ack.get("unloaded", []), "failed stop not reported unloaded"
+            )
+            self.assertEqual(ack["state"], "ok", "the pass itself completes")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_reload_static_pool_charges_in_pass_starts(self):
+        """G3 PR#11 r1 P1: a reload pass gates each target on the SAME
+        shared pool — a static free reading that fits only ONE instance
+        must grant i=0 and reject i=1 (the in-pass charge), even though
+        the pool is not re-read between targets. (The pre-charge test in
+        TestAllocationTier pins the tier half; this pins the reload
+        loop's use of it end-to-end.)"""
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        for i in (0, 1):
+            rt.entries[i].state = "bunloaded"
+        rt.spawned = []
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "reload", "all", "r2")
+            started = []
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    free_reader=lambda: 15.10,  # static: fits exactly one
+                    start=lambda i, base: started.append(i) or 0,
+                    wait_healthy=lambda i, c, dl: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(started, [0], "i=0 reloaded; i=1 rejected by the charge")
+            self.assertEqual(rt.entries[1].state, "bunloaded")
+            ack = json.loads((d / "control" / "ack-r2.json").read_text())
+            self.assertEqual(ack["reloaded"], [0])
+            self.assertEqual(ack["state"], "partial")
+            self.assertEqual(ack.get("detail"), "WARN_VRAM_SHORTFALL")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_wait_port_down_default_is_bounded_at_5s(self):
+        """G3 PR#11 r1 P2: the unload drain defaults to 5 s (the stop is
+        `docker rm -f`, near-instant); a port that never frees must
+        return False around the 5 s cap, not 30 s — the 10 s probe
+        cadence cannot stall 30 s x N behind the drain."""
+        import time as _time
+
+        calls = []
+
+        def slow_check(port):
+            calls.append(_time.monotonic())
+            return False
+
+        t0 = _time.monotonic()
+        out = mgr.wait_port_down(30101, check=slow_check)
+        elapsed = _time.monotonic() - t0
+        self.assertFalse(out)
+        # ~5 s cap: the drain polled until the deadline (poll 0.5 s), not
+        # the old 30 s default.
+        self.assertLess(elapsed, 7.0, f"drain took {elapsed:.1f} s — cap moved?")
+        self.assertGreaterEqual(elapsed, 4.5, f"drain exited early at {elapsed:.1f} s")
 
 
 if __name__ == "__main__":

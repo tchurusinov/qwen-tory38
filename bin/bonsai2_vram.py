@@ -51,6 +51,16 @@ EXIT_CONFIG = 2
 PER_SLOT_PER_TOKEN_GB = (
     0.000003277  # S1.4 re-anchor (MAP 1.7): measured q4_0 KV on this box
 )
+# S1.4 kv_cache dtype -> per_slot_per_token_GB (SPEC S1.4 'formula,
+# locked'). Single source of truth (G3 PR#11 r1): the manager's
+# load_config validates the S1.6 `kv_cache` key against THIS table and
+# feeds the footprint from it; the @gpu acceptance tests read the
+# constants from here too (a dtype with no locked measured value is an
+# ERR_CONFIG at load, not a guess at boot — only q4_0 is measured on
+# this box, the MAP 1.7 re-anchor).
+KV_PER_SLOT_PER_TOKEN_GB = {
+    "q4_0": 0.000003277,  # S1.4 re-anchor (MAP 1.7): measured q4_0 KV on this box
+}
 N_MIN = 0  # S1.4 clamp
 N_MAX = 8  # S1.4 clamp: 8 instances = 64 slots total, the demo ceiling
 DEFAULT_BUDGET_GB = (
