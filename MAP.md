@@ -312,25 +312,77 @@ under the manager or the full stack).
 
 Exit: S2.8 acceptance (all five, runnable on this box).
 
-- [ ] 2.1 `bonsai2-manager` skeleton: Type=notify via sd_notify; reads
+- [x] 2.1 `bonsai2-manager` skeleton: Type=notify via sd_notify; reads
       `subagent-engine.yaml` + `serving.yaml`; writes
       `/run/bonsai2/health.json` in the S3.1 schema (S2.2).
-- [ ] 2.2 Boot-time budget check (S2.3): `free_gb` from the main
+      (2026-09-22, branch `phase2-manager-skeleton`:
+      `bin/bonsai2-manager` — hand-rolled sd_notify (AF_UNIX datagram,
+      no systemd-python dep), the two-YAML loader (ERR_CONFIG exit 2),
+      atomic `health.json` write (tmp+rename), the S3.1 document builder
+      (stack/instances/main_endpoint/main_healthy + `main_only_reason`
+      ONLY at 0 instances, S2.4). Hermetic: `tests/test_manager.py`
+      (config load + ERR_CONFIG paths, S3.1 schema + atomicity, stack
+      derivation, main-only reason echo). @gpu:
+      `tests/gpu/test_manager_spawn_2_5.py`.)
+- [x] 2.2 Boot-time budget check (S2.3): `free_gb` from the main
       container's live cgroup `memory.current` (sleep-accurate) else the
       recorded fresh-load `footprint_gb`; `N' = max(0, min(N, floor(...)))`;
       `WARN_VRAM_SHORTFALL` on 0 < N' < N.
-- [ ] 2.3 Allocation tier (S1.4, manager-run): stricter pre-spawn gate
+      (2026-09-22, same branch: `planning_tier` (the S2.3 formula verbatim,
+      pure + total: full grant, shortfall->warn+proceed, negative free ->
+      `max(0,...)` clamp to 0, min(N,...) clamp) + `main_used_gb`
+      (live cgroup `memory.current` via the `system.slice/docker-<id>.scope`
+      shape this box uses — probed 2026-09-22; falls back to
+      `main_stack.footprint_gb` when the container/cgroup is gone). Live:
+      the @gpu test read the main cgroup at ~1.97 GB (sleep-accurate —
+      SGLang asleep, device KV not cgroup-charged, the known MAP 1.7
+      finding) and computed N'=2 off the live pool.)
+- [x] 2.3 Allocation tier (S1.4, manager-run): stricter pre-spawn gate
       `free ≥ instance_footprint_GB + 1.0`; probe timeout 5 s + one
       retry, then treat free as 0; i > 0 → partial load exit 0; i = 0
       with granted N' ≥ 1 → exit 4 `ERR_VRAM_OOM`; N' = 0 → S2.4 handoff.
-- [ ] 2.4 Unit files: `bonsai2-sglang.service` + `bonsai2-server@i.service`
+      (2026-09-22, same branch: `allocation_tier` (need = `bonsai2_vram.
+      instance_footprint_gb` + 1.0 — the formula module is the source, no
+      hardcoded need) + `read_free_gb` (one probe + one retry, then 0 —
+      the bounded shape the hermetic test drives with a failing reader:
+      exactly 2 calls, then 0.0). Hermetic: grant-at-need / reject-below /
+      the 1.0 GB margin / retry-then-zero. Live: @gpu tier ran at need
+      15.08 GB — i=0 PASS @47.4 GB, i=1 PASS @34.6 GB.)
+- [x] 2.4 Unit files: `bonsai2-sglang.service` + `bonsai2-server@i.service`
       verbatim main-stack shape — `docker run` flags per S2.2,
       `ExecStartPre= docker rm -f`, `Restart=on-failure`, `RestartSec=5`,
       `StartLimitBurst=3` → `bfailed`, `CPUQuota=64 %`; `Wants=` (not
       `Requires=`) on the main stack (S2.1, S2.2).
-- [ ] 2.5 Spawn path: manager starts granted instances in order via
+      (2026-09-22, same branch: both `units/*.service` templates carry the
+      S2.1/S2.2 shape — manager: `Type=notify` + `Wants=qwen38-sglang`
+      (not `Requires=`) + `After=` incl. the main stack; server:
+      `Requires=docker.service` + `ExecStartPre= docker rm -f` +
+      `Restart=on-failure`/`RestartSec=5`/`StartLimitBurst=3`/`CPUQuota=
+      64%` — hermetic-asserted in `tests/test_manager.py::TestUnitFiles`;
+      the server template's comment now names the full-command docker-run
+      (probed 2026-09-22: bare `docker run img --flag` dies under the
+      nvidia entrypoint) + that the S1.4 tier is what admits a start.
+      `docker rm -f` on an absent container returns rc=0 (probed), so
+      `ExecStartPre` is safe on first start.)
+- [x] 2.5 Spawn path: manager starts granted instances in order via
       `systemctl start bonsai2-server@i`; waits each to healthy before the
       next; boot order: main stack first (S2.1).
+      (2026-09-22, same branch: `spawn_sequence` — tier gate ->
+      `systemctl start bonsai2-server@i` -> S2.2 health probe wait
+      (models + 16-token RT, `boot_target_s`) BEFORE the next index;
+      i>0 tier fail -> WARN_VRAM_SHORTFALL + exit 0 partial; i=0 tier
+      fail -> exit 4 ERR_VRAM_OOM with no start issued; a failed unit
+      start is recorded, loop continues (S2.1 independent engines).
+      Hermetic: the ordering (i=1's start only after i=0's wait returns
+      True), all four exit/outcome branches. Live (@gpu
+      `test_manager_spawn_2_5.py`, 2026-09-22): the manager booted from
+      the tracked templates, read the live pool, and spawned BOTH real
+      27B instances in order — 46.9 s boot+spawn+settle, both healthy,
+      health.json `stack=healthy`, main PIDs unchanged; teardown left no
+      containers. NOTE for install.sh (6.2): the unit's `Requires=
+      docker.service` is system-scope only (user scope has no docker
+      unit — the @gpu test's documented deviation; `BONSAI2_USER_SYSTEMCTL`
+      is the manager's user-scope hook).)
 - [ ] 2.6 Health probe loop: every 10 s, `GET /v1/models` (200 + alias)
       AND 16-token completion < 10 s; two consecutive fails → `degraded`,
       five → restart attempt (S2.2).
@@ -536,7 +588,8 @@ SPEC.md `status` → `active`.
 
 ## Session log
 
-<!-- Newest entry on top. One entry per implementation session, appended by
+<!-- Newest entry on top.
+ One entry per implementation session, appended by
      the agent BEFORE ending the session. Template:
 
 ### <YYYY-MM-DD> — <one-line title>
@@ -552,6 +605,411 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-23 — G3 loop PR #10: round 16 reviewed — 0 P0/1 P1/2 P2, ALL THREE refuted by pin-reality/code/design-split → DOD met, G3 loop complete (no code changes; last code commit 24d801a)
+
+- **Review: 0 P0 / 1 P1 / 2 P2 (raw: /tmp/review-phase2-manager-skeleton-r16.txt; stdout /tmp/review-10-stdout-r16.txt, review.sh rc=0).** All three refuted:
+  - P1 "S1.4 free read is host-wide MemAvailable, not GPU/VRAM → tier is a no-op on the target box" — **REFUTED (box pin-reality).** Verified live this round: `nvidia-smi --query-gpu=memory.used,memory.total` → `[N/A], [N/A]` on this GB10 — on unified-LPDDR5X there is no separate VRAM pool; the pool IS /proc/meminfo, and the MAP 1.9 OOM test already pins `MemAvailable` as the free read (`test_oom_1_9.py`: "free = /proc/meminfo MemAvailable"). SPEC S1.4 says "nvidia-smi/cgroup free"; on unified memory the cgroup-visible free = MemAvailable. The tier is not a no-op: it gates `MemAvailable >= max(footprint+1.0, cap)` = 15.08 GB and binds under real pressure (after ~28 GB of instances load, or host memory pressure). The "wrong pool" framing assumes a discrete VRAM pool this architecture does not have.
+  - P2#1 "load_config never rejects count:0 / budget:0" — **REFUTED (spec + documented design split).** count=0 is explicitly valid (SPEC S1.4: "N=0 is a valid result (main-only mode; see S2.4)"); count 3–8 are in the valid [0,8] range; budget=0 is caught by `planning_tier`'s existing `budget_gb <= 0` guard → N'=0 → main-only (correct S2.4 behaviour). The load_config docstring states the split: presence+type+sign at load, range checks belong to the S1.7 render-config tool.
+  - P2#2 "main-only settle path passes main_only_reason=None into run_probe_loop" — **REFUTED (misread of the call site).** `main_only_reason = "budget_zero"` is set at line 1153 BEFORE the branch; the settle `run_probe_loop` (line 1187) passes that value, not None. The `build_health` fallback only fires on actual None. The forward-looking concern (S3.2 reload persisting user_unloaded/ERR_VRAM_OOM 0-instance reasons) is MAP 2.6/2.7 territory (reload not in the skeleton); recorded as a hook there.
+- **DOD met: 0 real P0/P1, all P2s refuted with reasons. G3 loop complete (16 rounds).**
+- **State at close:** 186/186 hermetic OK; ruff clean; gate PASS; last code commit `24d801a` (r15); @gpu green ×14 (last: r15 52.2 s, 2 instances healthy, stack=healthy).
+- **MAP/PR:** raw + disposition → PR #10 comment 680.
+- **Next: G4 human merge gate** (`git-merge-push-sync`), then MAP 2.6.
+
+### 2026-09-23 — G3 loop PR #10: round 15 reviewed — 0 P0/1 P1/2 P2; P1 (boot deadline started AFTER the S2.3 reads — extends r14 P1) + both P2s real, all fixed + pinned (commit 24d801a, @gpu r15 52.2 s)
+
+- **Review: 0 P0 / 1 P1 / 2 P2.**
+  - P1: the S2.8 #1 `boot_deadline_s` was still computed AFTER the S2.3 reads (MemTotal, the main cgroup read incl. its un-bounded `docker inspect`) and the S1.4 footprint computation — r14 had moved only the main probe inside the window. **REAL (extends r14 P1).** FIXED: `boot_deadline_s` now sits immediately after `load_config`, before every boot step (S2.3 reads, S1.4 footprint, S2.1 probe, S2.5 spawn). The r14 pin stays valid as a lower bound. No green-path behavior change — the accounting window only widens.
+  - P2#1: exit-4 (ERR_VRAM_OOM) health doc carried the pre-spawn `main_ok`; the doc is terminal (no probe loop follows), so a main that died during the tier rejection was recorded healthy. **REAL.** FIXED: the exit-4 path re-probes `main_healthy` before `write_health`. Scope check: the N=0 main-only path has the same transient value but the steady probe loop refreshes it next cycle — exit-4 alone was the right scope. New pin: `test_i0_oom_health_document_uses_the_reprobed_main_state` (main_healthy side-effect True→False; asserts ≥2 probes + doc carries `main_healthy: false`).
+  - P2#3: @gpu `assertIn("N'=2", stderr)` matches `N'=20` (substring). **REAL.** FIXED: `assertRegex(r"N'=2(\s|$)")`.
+- **Verified:** 186/186 hermetic OK (185 + the new reprobe pin); ruff check+format clean; gate PASS; commit `24d801a` pushed.
+- **@gpu r15:** 52.2 s manager boot+spawn+settle (free 48.2 GB; 2 instances healthy; stack=healthy), exit 0; no leftover bonsai2 containers.
+- **MAP/PR:** raw + disposition → PR #10 comment 677.
+- **Next:** round 16 confirmation.
+
+### 2026-09-23 — G3 loop PR #10: round 14 reviewed — 1 P0/1 P1/3 P2; P0 (free-probe 5 s cap nominal → ENFORCED via daemon thread + join(timeout)) + P1 (shared boot deadline started AFTER main_healthy → now BEFORE) REAL + fixed + pinned, P2s closed (commit 51fa6ae)
+- G3 PR #10 (MAP 2.1–2.5). Round 14: 1 P0 / 1 P1 / 3 P2 (raw: /tmp/review-phase2-manager-skeleton-r14.txt; stdout /tmp/review-10-stdout-r14.txt, review.sh rc=0).
+  - P0 the S1.4 "5 s timeout per probe" was NOMINAL (docstring admitted it): a wedged /proc/meminfo read would deadlock the boot, violating "wedged probe must never deadlock the manager". REAL — fixed: new `_mem_available_gb_bounded()` = daemon thread + join(FREE_PROBE_TIMEOUT_S) → genuine TimeoutError at the cap; TimeoutError feeds the SAME retry-once-then-zero path as OSError (S1.4). 2 new hermetic tests (wedged reader → TimeoutError ≤ cap; TimeoutError counts as failed probe).
+  - P1 shared S2.8 #1 boot deadline computed AFTER main_healthy() → the main probe's up-to-5 s was outside the 180 s whole-boot budget (S2.8 #1 "main + N healthy ≤ 180 s"). REAL — fixed: `boot_deadline_s = time.monotonic() + cfg["boot_target_s"]` now computed BEFORE the S2.1 main probe (the probe is inside the budget, not on top of it). New hermetic pin `test_boot_deadline_starts_before_the_main_probe` (records monotonic() inside the mocked main_healthy; asserts deadline − boot_target_s ≤ probe_time).
+  - P2#1 footprint computed but need_gb recomputed independently → single source of truth: `need_gb = max(footprint + TIER_MARGIN_GB, budget_gb)` derived from the SAME footprint the log prints (allocation_need_gb stays for pure-formula tests).
+  - P2#2 @gpu pool precondition guaranteed 2 instances but didn't assert template count==2 → a count bump to ≥3 would drift the "full load: 2 instance(s)" assertion silently → new `_count_from_template()` + precondition assertEqual(count, 2).
+  - P2#3 size_bytes required int while per_instance_budget_gb accepted int-or-float (inconsistent numeric edge) → uniform: int OR positive float, bool excluded, normalized to int at load; same edge for fallback_size_bytes.
+  - Verified: 185/185 OK; ruff check+format clean; gate PASS; commit 51fa6ae pushed. @gpu r14: first run FAILED on the documented transient-PID flake ({1153957} lost from compute-apps — a transient CUDA process captured at baseline, close to the test's own pid 1154086, now gone; main stack 5581/12262 both still alive); re-run (r14b) GREEN in 52.1 s (2 instances healthy, stack=healthy, main stack 5581/12262 stable). Disposition → PR #10 comment 672.
+  - P1/P0 trend: r14 = first round with a P0 since r4 (both real contract gaps, not vestiges). P2 trend: 7→1→3→2→4→3→4→3 (r1–r13).
+
+### 2026-09-23 — G3 loop PR #10: round 13 reviewed — 0 P0/2 P1/4 P2; P1#1 kv_cache-never-feeds-S1.4 REAL + fixed (ERR_CONFIG on unvalidated dtype), P1#2 None-deadline-TypeError refuted by probe, P2s closed (commit 061706c)
+- G3 PR #10 (MAP 2.1–2.5). Round 13: 0 P0 / 2 P1 / 4 P2 (raw: /tmp/review-phase2-manager-skeleton-r13.txt; stdout /tmp/review-10-stdout-r13.txt, review.sh rc=0).
+  - P1#1 `kv_cache` (S1.6 key) never read by load_config → S1.4 footprint hard-coded the q4_0 constant; a future FP16 edit would silently over-admit. REAL — fixed: `KV_PER_SLOT_PER_TOKEN_GB = {"q4_0": 0.000003277}` (S1.4 locks ONLY q4_0; the reviewer's suggested fp16→0.00000176 is the old under-predicting anchor the re-anchor replaced, so unknown dtype = ERR_CONFIG at load, not a guessed constant at boot); load_config validates + exposes `kv_cache`/`per_slot_per_token_gb`; `allocation_need_gb` 5th param (default = module constant); main() threads cfg value into both footprint calls + tier log prints `kv_cache=`. 4 new hermetic tests.
+  - P1#2 explicit `boot_deadline_s=None` → `else: deadline = None` → `time.monotonic() < None` TypeError — REFUTED: source order is `if boot_deadline_s is None:` FIRST; /tmp/probe_r13_p1b.py: `wait_instance_healthy(0, cfg, None)` → False in ~2s (no TypeError); end-to-end `spawn_sequence(..., boot_deadline_s=None)` rc=1 start → `rc=0 spawned=[0] start_rc={0:1}`.
+  - P2#1 allocation_tier log marker: gate is `free >= need` but marker printed `<=` when granted — the OPPOSITE for every strict grant (worse than the reported edge case) → pinned `{'>=' if granted else '<'}`.
+  - P2#2 completion timeout docstring: kwarg is the urlopen SOCKET cap; the S2.2 '<10 s' gate is measured elapsed (timer pre-urlopen). Clarified in docstring.
+  - P2#3 @gpu `--batch-size 2048` hardcoded: S1.3 locked value, NOT an S1.6 key — comment at the site (drift would be silent; probes don't check batch size).
+  - P2#4 intent file "31 cases" stale → now "44 cases at r13; 31 at r1 — the count grew with each review round's pins".
+  - Verified: 182/182 OK; ruff check+format clean; gate PASS; commit 061706c pushed. @gpu r13: 50.7 s (2 instances healthy, stack=healthy) — first run with the kv_cache-validated S1.4 path live. Disposition posted → PR #10 comment 664.
+  - P2 trend: 7(r1) → 1(r4) → 3(r5) → 2(r6) → 4(r11) → 3(r12) → 4(r13). P1s since r9: r11=1 real, r12=2 (1 vestige/1 refuted), r13=2 (1 real/1 refuted). Round 14 = confirmation on the new surface (kv_cache load path + log marker + 4 new tests).
+
+### 2026-09-23 — G3 loop PR #10: round 12 reviewed — 0 P0/2 P1/3 P2; P1#1 vestigial (fixed), P1#2 refuted by probe + pin tightened, P2s closed (commit 0f0cf4e)
+- G3 PR #10 (MAP 2.1–2.5). Round 12: 0 P0 / 2 P1 / 3 P2 (raw: /tmp/review-phase2-manager-skeleton-r12.txt; stdout /tmp/review-10-stdout-r12.txt, review.sh rc=0).
+  - P1#1 `stack_summary` tuple second always None → `build_health` `elif reason:` dead (behavior already correct: `main()` sets `main_only_reason` only in the n_prime==0 branch). REAL vestige — fixed: bare-str return, branch removed, S3.1 contract stated in both docstrings; hermetic callers updated.
+  - P1#2 "permanently-bfailed unit flips to degraded on the next cycle" — REFUTED by /tmp/probe_r12_p1b.py: i=0 stays `bfailed` across 3 `_refresh_states` cycles (cycle 1–3: `['bfailed','healthy']`; VERDICT both True). Reviewer's "first miss → degraded" applies only to `healthy`-on-entry (the documented r9 skeleton over-report); non-healthy states are preserved on a miss. r10 pin tightened: `states[0] == "bfailed"` (was `in ("bfailed","degraded")`) + docstring corrected.
+  - P2#1 401 auth-wall indistinguishable from healthy → accepted limitation documented in `main_healthy` docstring (S2.1: main = independent infra; pool probes carry the key); keyed probe = MAP 2.6 candidate if the exit-82 gate under-fires.
+  - P2#2 @gpu test hardcoded model/alias/api_key/reasoning → new `_model_alias_key_reasoning_from_template()` reads them LIVE from subagent-engine.yaml; `_instance_unit_text` now 11-arg; stale API_KEY/ALIAS/MAIN_CONTAINER module constants deleted (PORT_BASE stays, asserted vs unit at install).
+  - P2#3 r10-pin docstring said "i=0 settles to degraded over-report" (wrong) → corrected to "i=0 STAYS bfailed (probe miss preserves prior state; only a fresh healthy probe clears it; MAP 2.6 restarts it)".
+  - Verified: 178/178 OK; ruff check+format clean; gate PASS; commit 0f0cf4e pushed. @gpu r12: 39.3 s (2 instances healthy, stack=healthy) — first run with YAML-derived unit text. Disposition posted → PR #10 comment 659 (PATCH-corrected probe quote, verified via /issues/10/comments).
+  - P2 trend: 7(r1) → 1(r4) → 3(r5) → 2(r6) → 4(r11) → 3(r12). P1s since r9: r11 = 1 (4xx main_healthy, real), r12 = 2 (1 vestigial fixed / 1 refuted+pinned). Round 13 = confirmation pass on the new surface (bare-str stack_summary + YAML-sourced @gpu unit).
+
+### 2026-09-23 — G3 loop PR #10: round 11 reviewed — 0 P0/1 P1/4 P2; P1 (main_healthy 4xx) + P2#1 (S2.8 #1 shared boot deadline) REAL + FIXED + pinned, P2#2-4 closed, P2#5 naming (commit ed273d3) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 11 (commit ed273d3, disposition comment 650 + @gpu append):
+  0 P0 + 1 P1 + 4 P2. P1 (main_healthy classified all 4xx as up; a
+  404/410 on a moved/removed /v1/models misreports healthy, contradicting
+  S3.1's exit-82 liveness contract) CONFIRMED + FIXED — semantics
+  tightened: 2xx = up; 401 = up (auth-walled, expected healthy shape);
+  404/410 = DOWN (route moved/removed; health.json main_healthy feeds
+  the exit-82 gate); other 4xx = up (route-level error, server alive);
+  5xx/refused/timeout = down. Pinned with test_main_healthy_4xx_semantics
+  (6 codes). P2#1 (per-instance boot_target_s deadline → N×180 s worst
+  case vs S2.8 #1's 180 s WHOLE-boot acceptance) CONFIRMED + FIXED —
+  wait_instance_healthy now takes an optional boot_deadline_s; main()
+  sets ONE shared boot_deadline_s = monotonic()+boot_target_s before the
+  spawn sequence (the whole boot is capped at boot_target_s, not N × it);
+  None → per-instance. Pinned with test_wait_instance_healthy_shared_boot_
+  deadline. P2#2 (build_health main-only positional main_only_reason
+  brittle to reorder) — the n_prime==0 write_health call now uses the
+  explicit main_only_reason= kwarg. P2#3 (unreachable return exit_code
+  after the infinite probe loop) — now `return EXIT_OK` with the why
+  (exit-4 path already returned; r6 annotation retained). P2#4 (@gpu cap
+  assertion is a docker-parse drift detector but the test name doesn't
+  say so) — extracted to _assert_memory_cap_is_gib_truncation(ins,
+  budget, name) whose docstring carries the pin-reality delta +
+  drift-detector contract; the test calls the named helper (kept in the
+  one @gpu test, not a 2nd — a standalone cap test would re-boot 2 real
+  27B instances to re-inspect containers the first already inspects).
+  Hermetic 178/178 OK (+2 new tests). @gpu green post-fix (43.3 s, 2
+  healthy, stack=healthy, branch tip ed273d3 — this run now exercises
+  the shared S2.8 #1 boot-deadline path live).
+- next: round-12 review (convergence pass #3); P1 + P2#1 confirmed +
+  fixed + pinned, P2s all closed — expect REVIEW CLEAN, then G4 human
+  merge.
+- spec deltas: none new (S2.8 #1's 180 s whole-boot budget is now ENFORCED
+  by the shared deadline, not amended; S3.1's main-endpoint probe
+  contract is now IMPLEMENTED by main_healthy's 404/410-down semantics,
+  not changed).
+
+### 2026-09-23 — G3 loop PR #10: round 10 reviewed — 0 P0/1 P1/2 P2; P1 REFUTED by probe + pinned, P2 STOPPING= fixed + pinned (commit 0a83c06) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 10 (commit 0a83c06, disposition comment 644 + @gpu append 645):
+  0 P0 + 1 P1 + 2 P2. P1 (failed i=0 start "permanently masks instance 1's
+  health in health.json") REFUTED BY PROBE — ran the real
+  spawn_sequence + main() first-health.json build + _refresh_states over
+  3 cycles with i=0's start rc=5 and i=1 healthy: spawned=[0,1],
+  start_rc={0:5,1:0}, first health.json ['bfailed','healthy'], after 3
+  cycles i=1 stays 'healthy' (probes port_base+1 independently; i=0's
+  dead port drives only i=0's own state; the reviewer's own round-10 walk
+  observed the same ['bfailed','healthy'] outcome). Pinned with new
+  hermetic test test_steady_loop_does_not_mask_later_instance_after_
+  failed_start (asserts i=1 healthy over 3 cycles + stack=degraded per
+  S3.1). P2#1 (exit-4 returns before any STOPPING= → Type=notify stop of
+  the still-"starting" unit deadlocks until TimeoutStopSec) FIXED — all
+  3 pre-READY exits (exit-4 ERR_VRAM_OOM + both ERR_CONFIG paths: config
+  ValueError, MemTotal OSError) now emit STOPPING=1 after STATUS=; module
+  docstring exit-4 section records it; pinned in both exit-code tests
+  (assert STOPPING=1 in notified). P2#2 (dead `return exit_code` after
+  the infinite probe loop) already annotated in round 6 — no change.
+  Hermetic 176/176 OK (+1). @gpu green post-fix (68.2 s, 2 healthy,
+  stack=healthy, branch tip 0a83c06).
+- next: round-11 review (convergence pass #2); P1 refuted + pinned, P2s
+  closed/pinned — expect REVIEW CLEAN, then G4 human merge.
+- spec deltas: none new (STOPPING= is an implementation detail of the
+  pre-READY exits, not a spec value; S2.2/S1.4/S1.5/S2.4 carry).
+
+### 2026-09-23 — G3 loop PR #10: round 9 reviewed — 0 P0/0 P1/3 P2 (reviewer self-downgraded 2 P1s to P2) + P2 pass + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 9 (commit d80264c, disposition comment 639 + @gpu append):
+  0 P0 + 0 P1 + 3 P2. The two items the reviewer first raised as P1
+  both self-downgraded to P2 in its own reasoning ('Net: P2' / 'Weak
+  test, not a defect. P2'). DOD met: no P0 open, no P1 open. P2 pass:
+  (a) P2#1 unit_files teardown — note-only (the finally already unlinks
+  every unit before any late assert; preconditions re-check pool/port/
+  stray per run; systemctl stop on a never-loaded unit is a no-op).
+  (b) P2#2 settle test weak — FIXED: test_settle_run_sends_ready_1_before_
+  settle_window now captures write_health via side_effect and asserts the
+  S3.1 document of the first health.json write (stack=healthy, instance
+  state=healthy, main_healthy=True, main_only_reason absent per S2.4) —
+  the test now guards states, not just the READY ordering.
+  (c) P2#3 _refresh_states single-miss -> degraded over-reports vs S2.2
+  two-consecutive — CONFIRMED docstring/code/spec gap; old docstring said
+  'keeps the last state on a probe miss' while the code flips
+  healthy->degraded on the FIRST miss. Fixed the docstring to state the
+  exact skeleton miss-mapping (marked over-report vs S2.2's locked rule;
+  MAP 2.6 replaces with the 2-fail counter + 5-fail -> restart) + pinned
+  the same intent in the branch comment.
+  (d) P2#4 spawn_sequence slow-load left permanently degraded — note-only;
+  pinned restart-path ownership to MAP 2.6 (S2.2 five-fail escalation).
+  (e) P2#5 cap_bytes assertEqual brittleness — disposed as documented
+  intent (the exact-equal IS the docker-g-parse drift detector; integer
+  budgets make the truncation a no-op so the brittleness doesn't fire).
+  Hermetic 175/175 OK. @gpu green post-P2-pass (73.3 s, 2 healthy,
+  stack=healthy, branch tip d80264c).
+- next: round-10 review (convergence pass); P0/P1 clean since round 5,
+  P2 trend 3 (all notes/hardening) — expect REVIEW CLEAN, then G4 human
+  merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–8; round 9 is docstring + test-hardening + notes, no
+  locked-value spec moves).
+
+### 2026-09-23 — G3 loop PR #10: round 8 reviewed + 3 findings disposed (1 P1/2 P2) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 8 (commit f6a3be1, disposition comment 634 + @gpu append):
+  0 P0 + 1 P1 + 2 P2. P1 (@gpu docstring overstates 'byte-identical to
+  S2.2 shape') FIXED — diffed the @gpu user-scope unit against the system
+  template line-by-line; the reviewer was right the claim was overstated.
+  Beyond the Requires= drop, the @gpu unit ALSO shortens After= (user
+  units can't order against system units; the test's manager subprocess
+  handles S2.1 main-first ordering) and adds a `, @gpu test` Description
+  marker. Module docstring now ENUMERATES the exact 3 user-scope deltas +
+  lists everything else that stays byte-for-byte — the shape claim is now
+  checkable line-by-line. P2 (load_config coerces non-numeric instance
+  key to cryptic int()/float() ValueError mid-boot) FIXED — numeric
+  instance keys type-validated at config-load (count/port_base/ctx_size/
+  max_num_seqs int, per_instance_budget_gb int-or-float, bool excluded)
+  -> named ERR_CONFIG exit 2; range checks stay the S1.7 render-config
+  tool's. +2 hermetic tests. P2 (baseline_pids timing) DISPOSED by
+  comment — the assertion targets S2.1 'main stack unaffected' (spawn
+  didn't kill/replace the main stack); 'not lost' is the right direction,
+  a pid appearing after capture is out of scope by construction; comment
+  documents the scope. Hermetic 175/175 OK. @gpu green post-fix
+  (64.2 s, 2 healthy, stack=healthy, branch tip f6a3be1).
+- next: round-9 review (launching); P0/P1 have been the convergence target
+  — no P0 open, no P1 open now (r8's P1 was the last). Expect CLEAN or
+  only P2 notes, then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–7; round 8 is docstring + config-validation + a test-scope
+  comment, no locked-value spec moves).
+
+### 2026-09-23 — G3 loop PR #10: round 7 reviewed + 1 P2 disposed (0 P0/0 P1, docstring-precision fix) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 7 (commit f22cad0, disposition comment pending):
+  0 P0 + 0 P1 + 1 P2. Loop has converged — P0/P1 clean since round 5,
+  P2 trend 7 (r6) -> 1 (r7). The lone P2 re-flags the `systemctl_state`
+  forward-hook site (first surfaced r6 P2): the r6 docstring said 'maps a
+  unit to the S3.1 instance state', but the function returns the RAW
+  `systemctl show -p SubState -p Result` values (SubState='exited'/
+  'running', Result='success'); the SubState/Result -> S3.1 string mapping
+  is applied by the consumer (MAP 2.6 restart escalation), where the
+  forward-hook is wired. Fixed the docstring to state exactly that
+  (docstring-only; no behavior delta). Hermetic 173/173 OK. @gpu green
+  on branch tip.
+- next: final @gpu on f22cad0 + post disposition; a final reviewer pass
+  is expected to return REVIEW CLEAN (no P0/P1 open, P2s all annotated/
+  disposed), then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–6; round 7 is a docstring-precision fix, not a spec change).
+
+### 2026-09-23 — G3 loop PR #10: round 6 reviewed + 7 P2s disposed (0 P0/0 P1) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 6 (commit 6e9dc8b, disposition comment pending):
+  0 P0 + 0 P1 + 7 P2 (all "minor, note for later"). DOD met on P0/P1.
+  All 7 P2s disposed (fixed, not just noted): removed 3 vestigial params
+  (`wait_instance_healthy` base, `run_probe_loop` main_ok,
+  `_refresh_states` main_ok — main is re-probed per-cycle in the loop),
+  merged the double failed-start log into one line, annotated
+  `systemctl_state` as a MAP-2.6 forward-hook + fixed its return
+  annotation (`-> dict`, was `-> str`), annotated the unreachable
+  non-settle `return exit_code` (SIGTERM is the real path). P2#6
+  (`StartLimitIntervalSec=300` not in S2.2 spec): the reviewer
+  misread it as @gpu-only — the SYSTEM unit ships it (line 39), so S2.2
+  is amended to record it (spec-follows-code, a 300 s window for 3
+  restarts so a slow two-27 B-load boot doesn't exhaust the burst) +
+  pinned in `test_server_unit_shape`. Hermetic 173/173 OK. @gpu green
+  post-fix (43.3 s, 2 healthy, stack=healthy).
+- next: round-7 review (launching); expect CLEAN (0 P0/0 P1, P2s now all
+  annotated/disposed), then G4 human merge.
+- spec deltas: S2.2 (record StartLimitIntervalSec=300; spec-follows-code,
+  G3 PR #10 round 6 P2). No locked-value moves.
+
+### 2026-09-23 — G3 loop PR #10: round 5 reviewed + 4 findings disposed (1 P1 fixed, 3 P2 doc-amended/note-only) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 5 (commit f84b0f0, disposition comment 619 + @gpu append):
+  0 P0 + 1 P1 + 3 P2. P1 (settle paths skip READY=1) FIXED — both
+  --settle branches (instances + main-only budget_zero) now notify
+  READY=1 BEFORE the settle window; under a user-scope Type=notify
+  start an exit-0 with no prior READY=1 is a FAILED START in systemd
+  notify semantics, so a --settle run (a normal ready boot) would have
+  reported failed. New hermetic test asserts rc=0, READY=1 present,
+  and READY=1 ordered AFTER the 'booted N instance(s)' STATUS= line.
+  P2#1 (probe-loop 5 s urlopen blocks single-threaded loop) — note-only,
+  documented in main_healthy docstring (single hard 5 s cap, revisit if
+  MAP 2.6 adds concurrent probes). P2#2 (4xx broader than docstring)
+  FIXED by docstring — any 4xx = up (liveness, S2.1), incl. a moved
+  /v1/models route; behavior unchanged. P2#3 (test import shadowing) —
+  note-only, comment at the module-level load site (bin/ is the deploy
+  layout; accepted). Hermetic 173/173 OK. @gpu green post-fix
+  (63.6 s, 2 healthy).
+- next: round-6 review (launching); loop until clean, then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–2; round-5 changes are behavior/doc clarifications, not spec).
+
+### 2026-09-23 — G3 loop PR #10: rounds 3–4 reviewed + disposed (round 3: 1 P1/2 P2, both P2 refuted-by-read + 1 P1 refuted-by-probe, cap_bytes documented; round 4: 1 P0/2 P1/1 P2, 3 fixed + 1 refuted-by-probe) + @gpu re-verify green x2 (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 3 (commit 11f12c3, disposition comment 611): isolated reviewer
+  1 P1 + 2 P2. P1 (stale free-read across instances) REFUTED by probe —
+  `allocation_tier` calls `free_reader()` inside the per-i loop, so free is
+  re-read every spawn; need_gb is a constant threshold, correctly computed
+  once. P2 (stale main_healthy) REFUTED by read — `run_probe_loop` re-calls
+  `main_healthy()` at the top of every cycle. P2 (cap_bytes brittleness)
+  DISPOSED — documented as the deliberate unit-vs-spec drift detector.
+  @gpu green (57.7 s, 2 healthy).
+- round 4 (commit 064493b, disposition comment 613 + @gpu append):
+  1 P0 + 2 P1 + 1 P2. P0 (exit-4/Type=notify fall-through) FIXED — explicit
+  `if exit_code == EXIT_VRAM_OOM` block writes health.json
+  main_only_reason="ERR_VRAM_OOM", emits STATUS=, returns 4 before READY=1
+  (Restart=on-failure is the intended transient-retry path). P1#1
+  (fallback_size_bytes unused) FIXED — validated at config-load (ERR_CONFIG
+  if not a positive int), carried into cfg, surfaced in the S2.4 N=0
+  handoff log for MAP 2.7. P1#2 (cap off-by-2) REFUTED by probe —
+  int(float('14.78')*2**30)=15869904158 == spec pinned == docker-probed cap;
+  the review's 15869904160 mis-truncated. P2 (read_total_gb OSError uncaught)
+  FIXED — try/except OSError -> ERR_CONFIG exit 2. +5 hermetic tests
+  (172/172 OK). @gpu green post-fix (59.9 s, 2 healthy).
+- next: round-5 review (launching); loop until clean, then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–2; the ERR_VRAM_OOM reason value is within the S2.4/S3.1
+  amendment's open schema).
+
+### 2026-09-23 — G3 loop PR #10: round 2 reviewed, 6 findings (1 P0/2 P1/3 P2) disposed + fixed + @gpu re-verify green x2 (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- items checked: none (review round; spec amendments S1.4/S1.5/S2.4 recorded)
+- machine state:
+  * branch `phase2-manager-skeleton` @ `a6fbe0e` (G3r2 fixes on top of
+    `cbd0022`), pushed to origin
+  * round-2 raw review + disposition = comment 607 on PR #10
+  * hermetic 167/167 OK (+1 cap-floor case); gate PASS; ruff clean;
+    @gpu re-verify green twice (57.3 s / 57.7 s, 2 instances healthy,
+    stack=healthy, clean teardown; both runs under the amended
+    `max(footprint+1.0, cap)` gate)
+- next: G3 round 3 review; loop until clean, then G4 human merge
+- blockers/intricacies: none. Round-2 findings (all disposed, see
+  comment 607 for the full disposition):
+  * P0 bfailed-record: DISPOSITIONED (design is spec-correct — S3.1
+    state vocabulary + S1.5 routing + S3.2 reload all key off the
+    recorded bfailed index; dropping it would make it invisible to
+    status). S1.5 port-collision row amended to remove the ambiguity.
+  * P1 tier-vs-cap: FIXED — new `allocation_need_gb() =
+    max(footprint + 1.0, per_instance_budget_gb)`; S1.4 boot-OOM
+    policy amended with the pin-reality delta (no-op on this box:
+    15.08 > 14.78; binds where the 5% margin > 1.0 GB).
+  * P1 @gpu stray unit: FIXED — precondition asserts no user-scope
+    bonsai2-sglang.service + finally unlinks it.
+  * P2 skip-wait-on-failed-start: FIXED — spawn_sequence skips the
+    healthy wait when start_rc[i] != 0.
+  * P2 budget_zero/fallback_zero: S2.4 amended (v1 shares
+    budget_zero; fallback_zero is a MAP 2.7 candidate).
+  * P2 places=9: relaxed to places=6 (drift guard, not float noise).
+- spec deltas: S1.4 (gate term = max(footprint + 1.0, cap), pin-
+  reality delta 2026-09-23), S1.5 (port-collision row: bfailed-record
+  semantics + reload re-runs the tier), S2.4 (budget_zero shared
+  with the post-PTQ1_0-retry zero; fallback_zero candidate for
+  MAP 2.7). No locked acceptance number moved.
+
+### 2026-09-23 — G3 loop PR #10: round 1 reviewed + all 4 fixed + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- items checked: none (review round; no new MAP items)
+- machine state:
+  * branch `phase2-manager-skeleton` @ `d91f49f` (G3r1 fixes on top of
+    `a9e11a2` the 2.1–2.5 implementation commit), pushed to origin
+  * PR #10 open (http://localhost:3001/blckwell/qwen-tory38/pulls/10),
+    full PR-body contract at open time; round-1 raw review + disposition
+    = comment 603
+  * hermetic 166/166 OK (165 + 1 new: main_used_gb live-cgroup source
+    label at a value EQUAL to the fallback — the P1 edge); gate PASS;
+    ruff clean; @gpu re-verify green (56.1 s, 2 instances healthy,
+    stack=healthy, clean teardown)
+- next: G3 round 2 review (review.sh re-run after d91f49f); loop until
+  clean, then G4 human merge
+- blockers/intricacies: none. Round-1 findings: 0 P0 / 1 P1 / 3 P2,
+  all fixed in d91f49f:
+  * P1 main_used_gb: source was inferred by value comparison — a
+    container exactly at the recorded value mislabeled; now returns
+    (used_gb, source) and main() logs the path actually taken
+  * P2 read_free_gb: docstring overstated the 5 s bound as enforced;
+    it is the S1.4 contract on the probe, nominal for the instant
+    /proc reader (docstring corrected)
+  * P2 spawn rc: spawn_sequence now returns start_rc (index ->
+    systemctl start rc) and main() writes bfailed DIRECTLY in the
+    first health.json for a failed start (S1.5 routing) instead of
+    re-deriving by probing a possibly-dead unit; hermetic assertion
+    added on the rc surface
+  * P2 @gpu unit template: CPUQuota=64%% reached systemd verbatim
+    (plain string, no format applied) -> now CPUQuota=64%
+- spec deltas: none (round-1 findings were code/doc, no spec change;
+  the S2.2 docker-giB delta was already recorded at PR open)
+
+### 2026-09-22 — Phase 2: MAP 2.1–2.5 implemented + green (branch `phase2-manager-skeleton`, G3 pending)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2, branch `phase2-manager-skeleton`)
+- phase(s): P2 (2.1 manager skeleton + 2.2 boot-tier + 2.3 allocation tier + 2.4 units + 2.5 spawn path; G3 review pending)
+- items checked: 2.1, 2.2, 2.3, 2.4, 2.5 (flipped to [x] in this entry;
+  hermetic 165/165 OK + @gpu live spawn PASS)
+- machine state:
+  * branch `phase2-manager-skeleton` off `origin/main` @ `ecb895a`
+  * NEW: `bin/bonsai2-manager` (the S2 manager: hand-rolled sd_notify,
+    two-YAML loader, S2.3 planning tier + live cgroup read, S1.4
+    allocation tier, S2.5 ordered spawn, S3.1 health.json writer,
+    steady probe loop) + `tests/test_manager.py` (31 hermetic cases)
+    + `tests/gpu/test_manager_spawn_2_5.py` (@gpu live spawn) +
+    SPEC S2.2 pin-reality delta + units/bonsai2-server@.service comment
+  * hermetic `Ran 165 tests OK` (was 134; +31 manager cases); gate PASS;
+    ruff clean on all three new files (the manager is extensionless,
+    outside the gate's `*.py` glob — linted manually)
+  * @gpu live run (pool 46.2 GB free, box quiet, main stack asleep):
+    manager boot+spawn+settle 46.9 s — S2.3 read the main cgroup LIVE
+    (1.97 GB, sleep-accurate) -> N'=2; S1.4 tier need 15.08 GB, i=0
+    PASS @47.4 GB -> start -> healthy, i=1 PASS @34.6 GB -> start ->
+    healthy; both 27B instances up under the S2.2 `--memory 14.78g` cap
+    (docker parses g as GiB + truncates -> 15869904158 B, the spec
+    delta); health.json `stack=healthy`, 2 instances healthy,
+    main PIDs unchanged; teardown left zero containers
+  * no /opt/bonsai2 yet (install = Phase 6); main stack untouched
+- next (exact order, on `phase2-manager-skeleton`):
+  1. `./scripts/gate.sh` (PASS), commit, Gitea PR, `./scripts/review.sh`
+     loop (G3), G4 human merge
+  2. after G4: next MAP item = 2.6 (health probe loop: the skeleton has
+     the re-probe + health.json refresh; MAP 2.6 owns the
+     two-fail->degraded / five-fail->restart escalation — the marked
+     hooks are in `_refresh_states`)
+- blockers/intricacies:
+  * cgroup v2 on this box: docker containers live at
+    `/sys/fs/cgroup/system.slice/docker-<id>.scope/` (NOT
+    `/sys/fs/cgroup/docker/<id>/`) — `main_used_gb` tries both; the
+    cgroup only counts HOST memory (device KV is not cgroup-charged,
+    the MAP 1.7 finding) — sleep-accurate means "the main container's
+    cgroup is small when SGLang sleeps", exactly what S2.3 wants.
+  * user-scope systemd: `Requires=docker.service` is fatal there ("Unit
+    docker.service not found") — the @gpu test installs USER units with
+    `After=` only (documented deviation; system units keep the S2.2
+    verbatim shape). blckwll has Linger=yes so `systemctl --user` works.
+  * docker `--memory 14.78g` = GiB + truncation (15869904158 B), ~0.91%
+    looser than the decimal-GB budget — SPEC S2.2 delta recorded.
+  * main endpoint probe: `GET /v1/models` on the main stack returns 401
+    (up, wants its api key) — the manager treats 2xx/4xx as healthy,
+    5xx/refused as down (it does not hold the main's key).
+- spec deltas:
+  * S2.2 pin-reality delta (2026-09-22): docker's `g` suffix = GiB
+    (2^30) + float truncation; the S1.4 formula + tier stay decimal-GB;
+    no budget value moved.
+  * (no other SPEC changes; the S2.3/S1.4 behavior was implemented
+    verbatim, no amendment needed)
 
 ### 2026-09-22 — G4 merge: PR #9 merged as `deb16fa`, MAP 1.9/1.10/1.11 done
 - agent/model: Hermes qwen3.8-27b (session: G4 merge, branch `main` @ `deb16fa`)

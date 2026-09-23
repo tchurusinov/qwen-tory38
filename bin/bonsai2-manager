@@ -1,0 +1,1241 @@
+#!/usr/bin/env python3
+"""bonsai2-manager — MAP 2.1–2.5 / S2.1–S2.5: the subagent instance manager.
+
+Runs from `bonsai2-sglang.service` (Type=notify via this file's sd_notify;
+S2.2). It is the actor for the whole S2 lifecycle skeleton:
+
+  * reads `/opt/bonsai2/etc/subagent-engine.yaml` + `serving.yaml` (S2.2)
+  * runs the S2.3 boot-time budget check —
+        `N' = max(0, min(N, floor(free_gb / per_instance_budget_gb)))`
+    with `free_gb` read from the MAIN container's live cgroup
+    `memory.current` (sleep-accurate) else the recorded fresh-load
+    `main_stack.footprint_gb` fallback (S2.3)
+  * runs the S1.4 allocation tier before each spawn — the stricter
+    `free >= instance_footprint_GB + 1.0` gate, with the bounded free
+    read (5 s probe + one retry, then free = 0) (S1.4/S2.3)
+  * spawns the granted instances IN ORDER via `systemctl start
+    bonsai2-server@i`, waiting each to healthy before the next (S2.5);
+    boot order is main-stack-first (S2.1 — enforced by the unit's
+    `After=qwen38-sglang.service`; the manager re-checks main health
+    and records `main_healthy`)
+  * writes `/run/bonsai2/health.json` in the S3.1 schema (S2.2), atomically
+  * sends `READY=1` to systemd once the boot sequence completes (Type=notify)
+  * then runs the steady health-probe loop (S2.2; MAP 2.6 plugs in here)
+
+MAP scope for this file: 2.1 (skeleton: notify + config + health.json),
+2.2 (boot-time budget check), 2.3 (allocation tier), 2.5 (spawn path).
+2.4 is the unit files (`units/`, the manager is what they run). The
+S2.4 PTQ1_0 / ctx-halve N=0 fallback (MAP 2.7) and the S2.5 5-minute
+drift watch (MAP 2.8) are clearly-marked hooks the skeleton defers to.
+
+Stdlib-only for the core so it is hermetic-testable; PyYAML at the YAML
+edge (same convention as the other `bin/` tools). sd_notify is hand-rolled
+(AF_UNIX datagram per the systemd NotifySocket protocol) so the manager
+has no systemd-Python dependency. `bonsai2_vram` (the S1.4 pure formula)
+is imported from the same `bin/` dir for the footprint term.
+
+Exit codes (the manager PROCESS; S1.4 / S2.4 / S2.3):
+  0 = boot complete — full load, partial load (allocation short at i > 0,
+      the S1.4 "i > 0 partial load, exit 0" rule), or main-only (N' = 0,
+      the S2.4 handoff, exit 0)
+  4 = ERR_VRAM_OOM — the S2.3 planning tier granted N' >= 1 but the S1.4
+      allocation tier failed at i = 0 (VRAM was lost *after* the budget
+      ran — "granted at plan time, short at allocation time"). This is a
+      BOOT-TIME failure, handled BEFORE `READY=1` is sent: the health
+      document is written (0 instances, stack derived degraded), a
+      STATUS= is emitted, then a STOPPING= (pre-READY exit bookkeeping,
+      G3 PR #10 r10 P2), and the process exits 4 so systemd sees a
+      FAILED START under `Type=notify` and applies
+      `Restart=on-failure` / `RestartSec=5` (the S1.4 "the manager exits
+      4 before the instance's KV allocation" contract — S1.4's exit 4
+      IS the unit-level signal here).
+  2 = ERR_CONFIG — a YAML failed to parse / is malformed, OR a boot-tier
+      memory read (MemTotal / MemAvailable) failed (the /proc/meminfo
+      OSErr -> ERR_CONFIG mapping; see main())
+
+Under `Type=notify` the full/partial/main-only boots send `READY=1` and
+the process then STAYS ALIVE in the steady probe loop until systemd
+stops it (a stopped unit exits 0; the boot-time exit 4 above is the
+only exit code the unit ever observes without a prior READY).
+`--settle N` exits 0 after N seconds for the @gpu harness / manual runs.
+
+Usage:
+  bonsai2-manager                 # systemd Type=notify daemon (run forever)
+  bonsai2-manager --settle 45     # boot, then probe-loop for 45 s, exit 0
+  bonsai2-manager --config-dir D  # read the two YAMLs from D (default
+                                  #   /opt/bonsai2/etc)
+Env overrides (hermetic/test hooks; the S3.2-style convention):
+  BONSAI2_ENGINE_YAML   full path to subagent-engine.yaml
+  BONSAI2_SERVING_YAML  full path to serving.yaml
+  BONSAI2_HEALTH_DIR    dir for health.json (default /run/bonsai2)
+  BONSAI2_USER_SYSTEMCTL=1   prefix systemctl with `--user` (user-scope
+                        units; the @gpu test harness. System-scope is the
+                        install-time default — the S2.2 units are
+                        system units in production.)
+
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# Reuse the S1.4 pure formula (MAP 1.6) for the allocation-tier footprint
+# term. Both live in the same bin/ dir (the manager is deployed to
+# /opt/bonsai2/bin/bonsai2-manager; the formula is
+# /opt/bonsai2/bin/bonsai2_vram.py), so make our own dir importable.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bonsai2_vram
+
+EXIT_OK = 0
+EXIT_CONFIG = 2
+EXIT_VRAM_OOM = 4  # S1.4 ERR_VRAM_OOM (the i = 0 allocation-tier defeat)
+
+# S1.4 allocation-tier spike margin (GB): `free >= footprint + 1.0`.
+TIER_MARGIN_GB = 1.0
+# S1.4: kv_cache dtype -> per_slot_per_token_GB (SPEC S1.4 'formula,
+# locked'). Only q4_0 has a LOCKED measured constant (the S1.3/S1.4
+# re-anchor, MAP 1.7: 6.87 GB KV at 8 slots x 262144 ctx on this box).
+# The S1.6 `kv_cache` key now feeds the S1.4 footprint through
+# load_config (G3 PR #10 r13 P1: a non-q4_0 edit must not silently
+# gate VRAM on the q4_0 constant — it has no locked value, so it is an
+# ERR_CONFIG at load, not a guess at load time).
+KV_PER_SLOT_PER_TOKEN_GB = {"q4_0": 0.000003277}
+# S1.4 bounded free read: 5 s per probe, one retry, then free = 0.
+FREE_PROBE_TIMEOUT_S = 5.0
+FREE_PROBE_RETRIES = 1
+
+DEFAULT_CONFIG_DIR = "/opt/bonsai2/etc"
+DEFAULT_HEALTH_DIR = "/run/bonsai2"
+
+# S2.2 health-probe constants (the steady-loop values; MAP 2.6 owns the
+# full degraded/restart policy — the skeleton uses these to WAIT during
+# the spawn sequence, which S2.5 needs regardless).
+HEALTH_PROBE_POLL_S = 2.0
+COMPLETION_RT_MAX_S = 10.0  # S2.2: a 16-token completion must RT < 10 s
+COMPLETION_MAX_TOKENS = 16
+
+
+# --------------------------------------------------------------------------
+# sd_notify (Type=notify, S2.2) — hand-rolled, no systemd python dep.
+# --------------------------------------------------------------------------
+def notify_sd(state: str) -> None:
+    """Send `state` (e.g. "READY=1", "STATUS=...") to systemd.
+
+    Implements the systemd NotifySocket protocol: an AF_UNIX datagram to
+    the socket path in $NOTIFY_SOCKET (an abstract socket when the path
+    starts with '@'). No-op when NOTIFY_SOCKET is unset (the manager is
+    not running under systemd — the @gpu test harness path).
+    """
+    path = os.environ.get("NOTIFY_SOCKET")
+    if not path:
+        return
+    try:
+        if path.startswith("@"):
+            # Abstract socket: strip the '@', prepend the NUL byte.
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            sock.sendto(state.encode(), ("\0" + path[1:],))
+            sock.close()
+        else:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            sock.sendto(state.encode(), path)
+            sock.close()
+    except OSError:
+        # sd_notify is advisory; a broken NOTIFY_SOCKET (a non-systemd
+        # run) must never kill the manager's boot sequence.
+        _log(f"sd_notify: could not send {state!r} to {path!r} (ignored)")
+
+
+# --------------------------------------------------------------------------
+# logging (stderr = human-only; stdout is reserved for one JSON on exit,
+# the S3.1 contract applied to the manager's own terminal report)
+# --------------------------------------------------------------------------
+def _log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    print(f"[{ts}] bonsai2-manager: {msg}", file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------
+# config loading (S2.2) — PyYAML at the edge, stdlib core
+# --------------------------------------------------------------------------
+def _load_yaml_map(path: Path) -> dict:
+    import yaml  # PyYAML: box dep (edge-only, same convention as MAP 1.5)
+
+    text = path.read_text()
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError(f"ERR_CONFIG: {path}: top level is not a mapping")  # noqa: TRY004
+    return data
+
+
+def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
+    """Load + lightly-normalize the two S2.2 config files.
+
+    Raises ValueError (ERR_CONFIG) on a missing/malformed file or a
+    missing required key, so the caller maps it to exit 2.
+    """
+    for p in (engine_yaml, serving_yaml):
+        if not p.is_file():
+            raise ValueError(f"ERR_CONFIG: config not found: {p}")
+    eng = _load_yaml_map(engine_yaml)
+    srv = _load_yaml_map(serving_yaml)
+
+    inst = eng.get("instances")
+    if not isinstance(inst, dict):
+        raise ValueError("ERR_CONFIG: subagent-engine.yaml: instances: block missing")  # noqa: TRY004
+    for key in (
+        "count",
+        "port_base",
+        "ctx_size",
+        "max_num_seqs",
+        "per_instance_budget_gb",
+    ):
+        if key not in inst:
+            raise ValueError(
+                f"ERR_CONFIG: subagent-engine.yaml: instances.{key} missing"
+            )
+    model = eng.get("model")
+    if not isinstance(model, dict):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: subagent-engine.yaml: model: block missing"
+        )
+    # Byte sizes: uniform numeric edge (G3 PR #10 r14 P2) — int OR
+    # positive float, bool excluded (same shape as
+    # per_instance_budget_gb above), normalized to int at load. Bytes
+    # are an integral quantity, so the int() normalization is exact for
+    # whole-byte floats; a hand-edited `7.2e9` is still accepted and
+    # normalized, matching the budget key's leniency.
+    size_bytes = model.get("size_bytes")
+    if not isinstance(size_bytes, (int, float)) or isinstance(size_bytes, bool):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: subagent-engine.yaml: model.size_bytes missing/not a number"
+        )
+    if size_bytes <= 0:
+        raise ValueError(
+            "ERR_CONFIG: subagent-engine.yaml: model.size_bytes not positive"
+        )
+    # Numeric instance keys: validate the TYPE at config-load (ERR_CONFIG)
+    # instead of letting `int(cfg[...])` / `float(cfg[...])` in main()
+    # raise a cryptic `ValueError: invalid literal for int()` mid-boot
+    # (G3 PR #10 round 8 P2). A non-numeric string ("abc") reaches main()
+    # only when the YAML is hand-edited — this is the early, named
+    # failure. (Range checks are the S1.7 render-config tool's job;
+    # the manager validates presence + type + sign.)
+    for key in ("count", "port_base", "ctx_size", "max_num_seqs"):
+        if not isinstance(inst.get(key), int) or isinstance(inst.get(key), bool):
+            raise ValueError(  # noqa: TRY004  (ERR_CONFIG contract: ValueError, msg names it)
+                f"ERR_CONFIG: subagent-engine.yaml: instances.{key} not an int"
+            )
+    if not isinstance(inst.get("per_instance_budget_gb"), (int, float)) or isinstance(
+        inst.get("per_instance_budget_gb"), bool
+    ):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: subagent-engine.yaml: instances.per_instance_budget_gb not a number"
+        )
+    alias = eng.get("alias")
+    api_key = eng.get("api_key")
+    if not isinstance(alias, str) or not isinstance(api_key, str):
+        raise ValueError("ERR_CONFIG: subagent-engine.yaml: alias/api_key missing")  # noqa: TRY004
+    # S1.6 `kv_cache` (S1.3 --cache-type-k/v): feeds the S1.4 footprint
+    # (G3 PR #10 r13 P1). Only q4_0 has a LOCKED measured constant (SPEC
+    # S1.4: 0.000003277, the MAP 1.7 re-anchor); an unvalidated edit to
+    # e.g. f16 would silently gate VRAM on the q4_0 constant (the FP16
+    # footprint is ~2.2x the q4_0 one — over-admission). A missing or
+    # unknown dtype is an ERR_CONFIG at load, not a guess at boot.
+    kv_cache = eng.get("kv_cache")
+    if not isinstance(kv_cache, str):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: subagent-engine.yaml: kv_cache missing"
+        )
+    if kv_cache not in KV_PER_SLOT_PER_TOKEN_GB:
+        raise ValueError(
+            "ERR_CONFIG: subagent-engine.yaml: kv_cache "
+            f"'{kv_cache}' has no locked S1.4 per_slot_per_token_GB "
+            f"(locked: {sorted(KV_PER_SLOT_PER_TOKEN_GB)})"
+        )
+    # The S2.4 N=0 PTQ1_0 fallback quant (S1.1). NOT a hard requirement
+    # of the MAP 2.1–2.5 skeleton — the fallback RETRY logic lands in
+    # MAP 2.7 — but it is surfaced now so a malformed/missing fallback
+    # quant is caught at config-load (ERR_CONFIG) or explicitly logged,
+    # not discovered mid-N=0-handoff. Same uniform numeric edge as
+    # size_bytes above (r14 P2).
+    fallback_size_bytes = model.get("fallback_size_bytes")
+    if fallback_size_bytes is not None and not (
+        isinstance(fallback_size_bytes, (int, float))
+        and not isinstance(fallback_size_bytes, bool)
+        and fallback_size_bytes > 0
+    ):
+        raise ValueError(
+            "ERR_CONFIG: subagent-engine.yaml: model.fallback_size_bytes not a positive number"
+        )
+
+    main_stack = srv.get("main_stack")
+    if not isinstance(main_stack, dict):
+        raise ValueError("ERR_CONFIG: serving.yaml: main_stack: block missing")  # noqa: TRY004
+    if not isinstance(main_stack.get("container"), str):
+        raise ValueError("ERR_CONFIG: serving.yaml: main_stack.container missing")  # noqa: TRY004
+    if not isinstance(main_stack.get("endpoint"), str):
+        raise ValueError("ERR_CONFIG: serving.yaml: main_stack.endpoint missing")  # noqa: TRY004
+    footprint = main_stack.get("footprint_gb")
+    if not isinstance(footprint, (int, float)):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: serving.yaml: main_stack.footprint_gb missing/not a number"
+        )
+    os_reserved = srv.get("os_reserved_gb")
+    if not isinstance(os_reserved, (int, float)):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: serving.yaml: os_reserved_gb missing/not a number"
+        )
+    manager = srv.get("manager") or {}
+    health_poll_s = manager.get("health_poll_s", 10)
+    if not isinstance(health_poll_s, (int, float)) or health_poll_s <= 0:
+        health_poll_s = 10
+    boot_target_s = srv.get("boot_target_s", 180)
+    if not isinstance(boot_target_s, (int, float)) or boot_target_s <= 0:
+        boot_target_s = 180
+
+    return {
+        "engine": eng,
+        "serving": srv,
+        "alias": alias,
+        "api_key": api_key,
+        "weights_bytes": int(size_bytes),  # normalized (r14 P2)
+        "weights_gb": size_bytes / 1e9,  # decimal GB (S1.4 convention)
+        "fallback_size_bytes": (
+            int(fallback_size_bytes) if fallback_size_bytes is not None else None
+        ),  # normalized (r14 P2)
+        "count": inst["count"],
+        "port_base": inst["port_base"],
+        "ctx_size": inst["ctx_size"],
+        "slots": inst["max_num_seqs"],
+        "kv_cache": kv_cache,
+        "per_slot_per_token_gb": KV_PER_SLOT_PER_TOKEN_GB[kv_cache],
+        "budget_gb": inst["per_instance_budget_gb"],
+        "main_container": main_stack["container"],
+        "main_endpoint": main_stack["endpoint"],
+        "main_footprint_gb": float(footprint),
+        "os_reserved_gb": float(os_reserved),
+        "health_poll_s": float(health_poll_s),
+        "boot_target_s": float(boot_target_s),
+    }
+
+
+# --------------------------------------------------------------------------
+# free-memory reads
+# --------------------------------------------------------------------------
+def _mem_available_gb() -> float:
+    """The S1.4 tier's free-memory read on this GB10: /proc/meminfo
+    MemAvailable in DECIMAL GB (the MAP 1.9 OOM test's convention —
+    nvidia-smi --query-gpu memory fields are N/A on this unified-memory
+    box; MemAvailable counts reclaimable page cache)."""
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) / 1e6  # kB -> decimal GB
+    raise OSError("MemAvailable not in /proc/meminfo")
+
+
+def _mem_available_gb_bounded() -> float:
+    """_mem_available_gb with a REAL wall-clock cap (G3 PR #10 r14 P0).
+
+    The S1.4 contract is '5 s timeout per probe' — a wedged probe must
+    never deadlock the manager. /proc reads are normally instant, so a
+    post-hoc deadline check would be nominal (the reviewer's point);
+    the only stdlib way to genuinely bound a synchronous local read is
+    a daemon thread + join(timeout): a wedged reader keeps spinning in
+    the background (harmless — a pure file read, no resources of its
+    own) while the caller gets its TimeoutError on time."""
+    result: dict = {}
+
+    def _run() -> None:
+        try:
+            result["v"] = _mem_available_gb()
+        except BaseException as exc:  # noqa: BLE001 — re-raised below
+            result["e"] = exc
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(FREE_PROBE_TIMEOUT_S)
+    if t.is_alive():
+        raise TimeoutError(
+            f"free-memory probe exceeded {FREE_PROBE_TIMEOUT_S:.0f}s (wedged /proc read)"
+        )
+    if "e" in result:
+        raise result["e"]
+    return result["v"]
+
+
+def read_free_gb() -> float:
+    """The S1.4 allocation-tier free read, bounded: one probe, one retry,
+    then free = 0 (S1.4: "5 s timeout per probe, one retry; on a second
+    timeout the tier treats free as 0"). The 5 s bound
+    (FREE_PROBE_TIMEOUT_S) is ENFORCED per probe (r14 P0: a wedged
+    reader raises TimeoutError at exactly the cap, inside the retry
+    loop below); the load-bearing shape is retry-once-then-zero, which
+    the hermetic test drives with a failing reader (the reader is
+    injectable, so the thread-bounded real reader is exercised only
+    live)."""
+    for attempt in range(FREE_PROBE_RETRIES + 1):
+        try:
+            return _mem_available_gb_bounded()
+        except (OSError, TimeoutError) as exc:
+            _log(
+                f"free-memory probe {attempt + 1} failed: {exc} "
+                f"(retry={'yes' if attempt < FREE_PROBE_RETRIES else 'no -> free=0'})"
+            )
+    return 0.0
+
+
+def read_total_gb() -> float:
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) / 1e6
+    raise OSError("MemTotal not in /proc/meminfo")
+
+
+def _main_container_id(container: str) -> str | None:
+    """docker container id (with the leading '/') for `container`, or None
+    if the container does not exist (the S2.3 'live when the container
+    exists' gate — else the footprint fallback)."""
+    r = subprocess.run(
+        ["docker", "inspect", "-f", "{{.Id}}", container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        return None
+    cid = r.stdout.strip()
+    return cid or None
+
+
+def main_used_gb(container: str, fallback_gb: float) -> tuple[float, str]:
+    """S2.3: the main container's live cgroup `memory.current` (sleep-
+    accurate — reflects the main stack's CURRENT pool usage, not the 76.4
+    GB fresh-load default), else the recorded `main_stack.footprint_gb`
+    fallback. Returns `(used_gb, source)` with source one of
+    `"live cgroup"` / `"recorded footprint"` — the caller must log the
+    SOURCE it actually used (not infer it from the value: a container
+    genuinely sitting at exactly the recorded footprint would otherwise
+    log the fallback path).
+
+    Docker on this box (cgroup v2, systemd-managed) charges each container
+    to /sys/fs/cgroup/system.slice/docker-<id>.scope/. We try the
+    system.slice shape first, then the raw docker/ shape, so the read is
+    robust across cgroup layouts. Any read failure (container gone,
+    cgroup unreadable) falls back to the recorded footprint — the spec's
+    'else the S2.6 main_stack.footprint_gb default'.
+    """
+    cid = _main_container_id(container)
+    if cid:
+        flat = cid.replace("/", "")
+        for cand in (
+            Path(f"/sys/fs/cgroup/system.slice/docker-{flat}.scope/memory.current"),
+            Path(f"/sys/fs/cgroup/docker/{flat}/memory.current"),
+        ):
+            if cand.is_file():
+                try:
+                    return int(cand.read_text().strip()) / 1e9, "live cgroup"
+                except (OSError, ValueError) as exc:
+                    _log(
+                        f"main cgroup read failed ({cand}): {exc} -> footprint fallback"
+                    )
+                    break
+    return fallback_gb, "recorded footprint"
+
+
+# --------------------------------------------------------------------------
+# S2.3 boot-time budget check
+# --------------------------------------------------------------------------
+def planning_tier(
+    total_gb: float,
+    main_used_gb: float,
+    os_reserved_gb: float,
+    n_yaml: int,
+    budget_gb: float,
+) -> tuple[int, float, list[str]]:
+    """S2.3, one-to-one: `free_gb = total - main - reserved`;
+    `N' = max(0, min(N, floor(free_gb / budget)))`. Returns
+    (n_prime, free_gb, warnings). The `max(0, ...)` clamps a negative
+    free (main + reserved already consume the pool) to main-only instead
+    of a negative count (S2.3 verbatim; the S2.2 `max(0, ...)` note).
+
+    Pure + total on its domain (the hermetic test drives every branch):
+    budget <= 0 -> 0; free < 0 -> 0; 0 < N' < N -> a WARN_VRAM_SHORTFALL
+    entry is appended (S2.3).
+    """
+    warnings: list[str] = []
+    free_gb = total_gb - main_used_gb - os_reserved_gb
+    if budget_gb <= 0:
+        return 0, free_gb, [f"WARN_VRAM_SHORTFALL: budget {budget_gb} GB <= 0, N'=0"]
+    n_prime = int(free_gb // budget_gb)
+    n_prime = max(n_prime, 0)  # the S2.3 max(0, ...) clamp
+    n_prime = min(n_yaml, n_prime)
+    if 0 < n_prime < n_yaml:
+        warnings.append(
+            f"WARN_VRAM_SHORTFALL: N'={n_prime} < N={n_yaml} "
+            f"(free {free_gb:.2f} GB / budget {budget_gb:.2f} GB)"
+        )
+    return n_prime, free_gb, warnings
+
+
+# --------------------------------------------------------------------------
+# S1.4 allocation tier (the per-spawn stricter gate)
+# --------------------------------------------------------------------------
+def allocation_need_gb(
+    weights_gb: float,
+    slots: int,
+    ctx_size: int,
+    budget_gb: float,
+    per_slot_per_token_gb: float = bonsai2_vram.PER_SLOT_PER_TOKEN_GB,
+) -> float:
+    """The S1.4 allocation-tier gate term:
+    `max(instance_footprint_GB + 1.0, per_instance_budget_gb)`.
+
+    The `+ 1.0` GB spike margin is S1.4's gate; the `max(..., budget)`
+    floor is the S1.4-vs-S2.2 reconciliation (pin-reality delta
+    2026-09-23): S2.2 caps each container at `per_instance_budget_gb`
+    (= footprint + 5% margin), so on a box where the 5% margin > 1.0 GB
+    the cap is the larger term and the tier must gate on the cap — a
+    free pool between the two would pass `footprint + 1.0` but not fit
+    the container. On this box the margin term is the max
+    (need 15.08 > cap 14.78), so the floor is a no-op here; it binds on
+    any box where budget > footprint + 1.0.
+
+    `per_slot_per_token_gb` is the S1.4 KV constant for the configured
+    `kv_cache` dtype (G3 PR #10 r13 P1: the S1.6 key now feeds the
+    footprint — main() passes cfg['per_slot_per_token_gb']; the default
+    is the module constant so pure-formula callers keep working).
+    """
+    return max(
+        bonsai2_vram.instance_footprint_gb(
+            weights_gb, slots, ctx_size, per_slot_per_token_gb
+        )
+        + TIER_MARGIN_GB,
+        budget_gb,
+    )
+
+
+def allocation_tier(need_gb: float, free_reader) -> tuple[bool, float, str]:
+    """S1.4: `free >= allocation_need_gb` (the gate term is
+    `max(footprint + 1.0, cap)` — see `allocation_need_gb`). `free_reader`
+    is injectable (the hermetic test drives the bounded-read retry); the
+    real reader is `read_free_gb`. Returns (granted, free_gb, detail)."""
+    free_gb = free_reader()
+    granted = free_gb >= need_gb
+    # Pinned log marker (G3 PR #10 r13 P2): granted means free >= need —
+    # the printed inequality must be the GATE's, not the opposite.
+    detail = (
+        f"S1.4 allocation tier: free {free_gb:.2f} GB "
+        f"{'>=' if granted else '<'} need {need_gb:.2f} GB "
+        f"(max(footprint + 1.0 GB margin, per-instance cap))"
+    )
+    return granted, free_gb, detail
+
+
+# --------------------------------------------------------------------------
+# instance health probe (S2.2) — the 'healthy' definition
+# --------------------------------------------------------------------------
+def _probe_models(port: int, alias: str, api_key: str, timeout: float = 5.0) -> bool:
+    """GET /v1/models -> 200 + the alias in the body (S2.2, half 1)."""
+    url = f"http://127.0.0.1:{port}/v1/models"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return False
+            body = json.loads(resp.read())
+        return alias in [m.get("id") for m in body.get("data", [])]
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError):
+        return False
+
+
+def _probe_completion(
+    port: int,
+    alias: str,
+    api_key: str,
+    max_tokens: int = COMPLETION_MAX_TOKENS,
+    timeout: float = COMPLETION_RT_MAX_S + 5.0,
+) -> bool:
+    """A `max_tokens` completion round-trips in < COMPLETION_RT_MAX_S
+    (S2.2, half 2 — 'catches alive-but-stuck'). Under
+    --reasoning-format deepseek a trivial prompt may land entirely in
+    reasoning_content (content: '') — the acceptance is the ROUND-TRIP,
+    not the text (the MAP 1.7 finding); any populated message is alive.
+
+    The `timeout` kwarg (COMPLETION_RT_MAX_S + 5 s, G3 PR #10 r13 P2
+    clarification) is the urlopen SOCKET cap, not the acceptance bar:
+    it only bounds how long a stuck connect may occupy the probe; the
+    S2.2 '< 10 s' gate is the measured `elapsed` (timer starts before
+    urlopen — connect + send + read are all counted), checked against
+    COMPLETION_RT_MAX_S. A 14 s round-trip therefore gets a response,
+    then fails the gate on elapsed — exactly the alive-but-stuck case
+    half 2 exists to catch."""
+    url = f"http://127.0.0.1:{port}/v1/chat/completions"
+    body = json.dumps(
+        {
+            "model": alias,
+            "messages": [{"role": "user", "content": "Say hello in one word."}],
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+    ).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            parsed = json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError):
+        return False
+    elapsed = time.monotonic() - t0
+    if elapsed >= COMPLETION_RT_MAX_S:
+        return False
+    try:
+        msg = parsed["choices"][0].get("message", {})
+    except (KeyError, IndexError, TypeError):
+        return False
+    return bool(msg.get("content") or msg.get("reasoning_content"))
+
+
+def instance_healthy(port: int, alias: str, api_key: str) -> bool:
+    """S2.2 health probe: /v1/models 200+alias AND a 16-token completion
+    RT < 10 s. Both halves required (a models-200 that can't complete is
+    alive-but-stuck)."""
+    return _probe_models(port, alias, api_key) and _probe_completion(
+        port, alias, api_key
+    )
+
+
+def main_healthy(endpoint: str, timeout: float = 5.0) -> bool:
+    """The main endpoint is UP (liveness probe, S2.1). `GET /v1/models`
+    on the main stack returns 401 (up, demanding the main's api key) or
+    200 — both mean 'the engine is answering'. Semantics: 2xx = up; 401 =
+    up (auth-walled, the expected healthy shape — the manager does not
+    hold the main stack's key); 404/410 = DOWN (the route was moved or
+    removed — a moved /v1/models is NOT liveness: the manager's
+    health.json `main_healthy` feeds the harness exit-82 gate, SPEC
+    S3.1, and S3.1 treats the main-endpoint probe as a 2xx liveness
+    contract — G3 PR #10 r11 P1; earlier any-4xx-as-up was a 'route
+    moved' hedge that over-reported a genuinely gone route as up);
+    other 4xx (405 etc.) = up (a route-level error — the server
+    answered, so the route exists and the engine is answering); 5xx,
+    connection refused, timeout, non-HTTP error = down.
+
+    Accepted limitation (G3 PR #10 r12 P1, note for later): the probe
+    sends no Authorization header, so a dead-but-listening proxy that
+    answers 401 is indistinguishable from a healthy auth-walled main —
+    the harness exit-82 gate (S3.1/S3.6 `main_endpoint_healthy_probe`)
+    will not fire on auth-only breakage. Accepted: S2.1 says the main
+    stack is independent infrastructure (the pool's probes carry the key;
+    the manager's liveness probe deliberately does not), and a dead main
+    that still answers 401 is a main-stack problem, not a pool one. A
+    keyed probe is a MAP 2.6 candidate if the exit-82 gate ever proves
+    to under-fire.
+
+    Timeout: a
+    single hard 5 s urlopen cap (no separate read/connect split) —
+    noted in the docstring only; the probe-loop blocking cost of a
+    black-holed main is accepted in the skeleton (G3 PR #10 r5 P2,
+    revisit if MAP 2.6 adds concurrent probes)."""
+    req = urllib.request.Request(endpoint.rstrip("/") + "/v1/models", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(64)
+        return True
+    except urllib.error.HTTPError as e:
+        # 2xx handled above. 404/410 = route moved/removed = down
+        # (r11 P1); 401 + other 4xx = up (the server answered).
+        return (200 <= e.code < 500) and e.code not in (404, 410)
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+
+
+# --------------------------------------------------------------------------
+# systemctl spawn (S2.5)
+# --------------------------------------------------------------------------
+def systemctl_base() -> list[str]:
+    """The systemctl prefix. System-scope in production (the S2.2 units
+    are system units); user-scope under the @gpu test harness when
+    BONSAI2_USER_SYSTEMCTL=1 (non-root; user@1000 is active on this box)."""
+    if os.environ.get("BONSAI2_USER_SYSTEMCTL") == "1":
+        return ["systemctl", "--user"]
+    return ["systemctl"]
+
+
+def systemctl_start_instance(i: int, base: list[str] | None = None) -> int:
+    """`systemctl start bonsai2-server@i` (S2.5). Returns the exit code."""
+    cmd = (base or systemctl_base()) + ["start", f"bonsai2-server@{i}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        _log(
+            f"systemctl start bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}"
+        )
+    return r.returncode
+
+
+def systemctl_state(i: int, base: list[str] | None = None) -> dict:
+    """`systemctl show -p SubState -p Result` for the unit. Returns the RAW
+    systemd values (e.g. SubState="exited"/"running", Result="success"),
+    NOT S3.1 state strings — the SubState/Result -> S3.1 mapping
+    (active->healthy pending probe, failed->bfailed,
+    inactive->bdown/bunloaded) is applied by the CONSUMER. FORWARD-HOOK
+    (G3 PR #10 r6 P2; r7 P2): not called by the skeleton's boot/probe
+    paths — the S1.5 bfailed routing comes from the `systemctl start` rc
+    (start_rc), and steady state comes from the port probe. MAP 2.6's
+    restart escalation is where this is consumed + the S3.1 mapping is
+    wired."""
+    unit = f"bonsai2-server@{i}"
+    r = subprocess.run(
+        (base or systemctl_base()) + ["show", "-p", "SubState", "-p", "Result", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state = {}
+    for line in r.stdout.splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            state[k.strip()] = v.strip()
+    return state
+
+
+def wait_instance_healthy(
+    i: int, cfg: dict, boot_deadline_s: float | None = None
+) -> bool:
+    """Wait for instance i to reach the S2.2 'healthy' definition, polling
+    every HEALTH_PROBE_POLL_S. Returns True iff it went healthy in time.
+
+    Deadline: `boot_deadline_s` (an absolute monotonic() deadline) when
+    given — the SHARED S2.8 #1 whole-boot budget (S2.5: 'waits each to
+    healthy before the next'; S2.8 #1: 'Cold boot → main + N healthy ≤
+    180 s (recorded T)'). A per-instance `boot_target_s` deadline would
+    let N instances each burn the full budget (N × 180 s for N=8 =
+    1440 s, far beyond S2.8 #1's 180 s whole-boot acceptance — G3 PR #10
+    r11 P2); the shared deadline caps the WHOLE spawn sequence at
+    boot_target_s. When None (direct call outside the spawn sequence)
+    the per-instance `boot_target_s` deadline applies.
+
+    Polling is the health probe itself (models + completion), not just a
+    unit-state poll: a unit that is 'active' but whose engine is
+    alive-but-stuck is not 'healthy' by S2.2. (No systemctl base param —
+    the wait is a port probe, not a unit-state poll; G3 PR #10 r6 P2.)"""
+    port = cfg["port_base"] + i
+    if boot_deadline_s is None:
+        deadline = time.monotonic() + cfg["boot_target_s"]
+    else:
+        deadline = boot_deadline_s
+    last = False
+    while time.monotonic() < deadline:
+        last = instance_healthy(port, cfg["alias"], cfg["api_key"])
+        if last:
+            return True
+        time.sleep(HEALTH_PROBE_POLL_S)
+    return last
+
+
+# --------------------------------------------------------------------------
+# S3.1 health.json
+# --------------------------------------------------------------------------
+def _port(cfg: dict, i: int) -> int:
+    return int(cfg["port_base"]) + i
+
+
+def _instance_entry(cfg: dict, i: int, state: str) -> dict:
+    slots = int(cfg["slots"])
+    return {
+        "i": i,
+        "port": _port(cfg, i),
+        "state": state,
+        "ctx": int(cfg["ctx_size"]),
+        "ctx_reduced": False,  # S2.5 drift watch (MAP 2.8) sets this True
+        "slots_in_use": 0,  # the harness owns live task slots (MAP P3)
+        "slots_total": slots,
+    }
+
+
+def stack_summary(instance_states: list[str]) -> str:
+    """Derive the S3.1 `stack` from the instance states.
+
+    S3.1: `stack` in {healthy, degraded, main-only}; `main_only_reason`
+    present ONLY when instances: 0 (S2.4) — the reason is the caller's
+    (budget_zero / user_unloaded / ERR_VRAM_OOM), not derived here.
+    Zero instances -> main-only; any bdown/bfailed -> degraded; any
+    degraded -> degraded; else healthy. (Returned as a bare str — the
+    main-only reason is the caller's to supply; the former tuple second
+    was always None, G3 PR #10 r12 P1.)"""
+    if not instance_states:
+        return "main-only"
+    if any(s in ("bdown", "bfailed") for s in instance_states):
+        return "degraded"
+    if any(s == "degraded" for s in instance_states):
+        return "degraded"
+    return "healthy"
+
+
+def build_health(
+    cfg: dict, states: list[str], main_ok: bool, main_only_reason: str | None = None
+) -> dict:
+    """The S3.1 schema, one document. `states` is a list of S3.1 instance
+    states aligned to i=0..len-1 (empty = main-only)."""
+    stack = stack_summary(states)
+    doc: dict = {
+        "stack": stack,
+        "instances": [_instance_entry(cfg, i, st) for i, st in enumerate(states)],
+        "main_endpoint": cfg["main_endpoint"],
+        "main_healthy": bool(main_ok),
+    }
+    # S2.4: main_only_reason present only when instances: 0 — echo the
+    # caller's cause (budget_zero / user_unloaded / ERR_VRAM_OOM); the
+    # stack summary never supplies it for >=1 instance (the S3.1
+    # 'reason present when instances: 0' contract — G3 PR #10 r12 P1
+    # removed a vestigial `elif reason:` branch that could never fire).
+    if not states:
+        doc["main_only_reason"] = main_only_reason or "budget_zero"
+    return doc
+
+
+def write_health(health_dir: Path, doc: dict) -> None:
+    """Atomic write of health.json (tmp + rename) so a reader never sees a
+    partial file. Creates the (tmpfs) dir if missing — the install-time
+    unit is responsible for it, but the manager must not die if it is
+    absent on a cold start (S2.2 'emits health JSON on /run/bonsai2')."""
+    health_dir.mkdir(parents=True, exist_ok=True)
+    final = health_dir / "health.json"
+    tmp = health_dir / "health.json.tmp"
+    tmp.write_text(json.dumps(doc, indent=2) + "\n")
+    os.replace(tmp, final)
+
+
+# --------------------------------------------------------------------------
+# spawn sequence (S2.5) — the ordered grant-and-wait loop
+# --------------------------------------------------------------------------
+def spawn_sequence(
+    cfg: dict,
+    n_prime: int,
+    need_gb: float,
+    *,
+    free_reader=read_free_gb,
+    systemctl_start=systemctl_start_instance,
+    wait_healthy=wait_instance_healthy,
+    log=_log,
+    sysctl_base: list[str] | None = None,
+    boot_deadline_s: float | None = None,
+) -> tuple[int, list[int], str, dict[int, int]]:
+    """Spawn the granted instances IN ORDER, running the S1.4 allocation
+    tier before each (S2.5 + S1.4 + S2.3). Returns (exit_code,
+    spawned_indexes, detail, start_rc) where `start_rc` maps each spawned
+    index to its `systemctl start` rc (0 = the start issued cleanly).
+
+    `boot_deadline_s` (an absolute monotonic() deadline, set by the
+    caller) is the SHARED S2.8 #1 whole-boot budget passed to
+    `wait_healthy` — None leaves `wait_healthy` to its own per-instance
+    deadline (the hermetic tests' fake waits take `(i, cfg)` and do not
+    see this kwarg).
+
+    The S1.4 two-outcome allocation tier drives the exit code:
+      * fail at i > 0  -> WARN_VRAM_SHORTFALL, stop at i-1, exit 0
+        (the 'i > 0 partial load, exit 0' rule — a valid state)
+      * fail at i = 0  -> exit 4 ERR_VRAM_OOM (granted at plan time,
+        short at allocation time; S1.4 'the manager exits 4 before the
+        instance's KV allocation')
+    n_prime = 0 -> no loop body -> exit 0 (the caller handles the S2.4
+    main-only handoff / MAP 2.7 PTQ1_0 fallback).
+
+    Every dependency is injectable (free_reader, systemctl_start,
+    wait_healthy) so the hermetic test proves the ORDERING (i=0 must reach
+    healthy before i=1's systemctl start is issued) and the partial/exit-4
+    branches without a GPU.
+    """
+    spawned: list[int] = []
+    start_rc: dict[int, int] = {}
+    for i in range(n_prime):
+        granted, free_gb, detail = allocation_tier(need_gb, free_reader)
+        log(f"i={i} {detail}")
+        if not granted:
+            if i == 0:
+                return EXIT_VRAM_OOM, spawned, f"ERR_VRAM_OOM: {detail}", start_rc
+            log(
+                f"WARN_VRAM_SHORTFALL {{i: {i}, free: {free_gb:.2f}, need: {need_gb:.2f}}} "
+                f"— partial load, proceeding with {len(spawned)} instance(s)"
+            )
+            return EXIT_OK, spawned, f"partial load at i={i}: {detail}", start_rc
+        rc = systemctl_start(i, sysctl_base)
+        start_rc[i] = rc
+        spawned.append(i)
+        if rc != 0:
+            # A unit that fails to START (docker missing, port collision the
+            # unit can't clear) is not a VRAM condition — S1.5 routes it to
+            # the unit's bfailed path. Record it as a spawned index (the
+            # start_rc surfaces the failure to the caller for health.json)
+            # but keep going: later instances are independent (S2.1). Skip
+            # the healthy wait: polling a dead engine's port for up to
+            # boot_target_s is wasted time (the S2.5 "wait each to healthy
+            # before the next" guarantee still holds — the NEXT start is
+            # gated on this index's bookkeeping, not a healthy probe).
+            # MAP 2.6's escalation restarts the bfailed unit.
+            log(
+                f"i={i} systemctl start rc={rc} (recorded as bfailed, "
+                f"skipping healthy wait, continuing to next)"
+            )
+            continue
+        ok = wait_healthy(i, cfg, boot_deadline_s)
+        log(f"i={i} healthy={ok} (S2.5: wait before next)")
+        # S2.5: 'waits each to healthy BEFORE the next' — the wait happens
+        # inline. A not-yet-healthy instance is still spawned (the probe
+        # loop / MAP 2.6 will restart it per the S2.2 restart policy); the
+        # ordering guarantee is that the NEXT systemctl start is gated on
+        # this one's wait, which it is by construction. Skeleton scope: a
+        # slow load that exceeds boot_target_s is left 'degraded' by the
+        # first health.json and re-probed every health_poll_s; the restart
+        # for one that never recovers is MAP 2.6's (the S2.2 five-fail
+        # escalation), not the skeleton's (G3 PR #10 r9 P2).
+    return (
+        EXIT_OK,
+        spawned,
+        f"full load: {len(spawned)} instance(s) spawned",
+        start_rc,
+    )
+
+
+# --------------------------------------------------------------------------
+# steady probe loop (S2.2; MAP 2.6 owns the degraded->restart escalation)
+# --------------------------------------------------------------------------
+def _refresh_states(
+    cfg: dict, spawned: list[int], states: list[str], log=_log
+) -> list[str]:
+    """Re-probe each spawned instance every cycle; map to an S3.1 state.
+
+    Skeleton miss-mapping (a fresh healthy probe always wins):
+      * healthy probe  -> healthy (clears any degraded mark)
+      * miss, was healthy -> degraded. This is a deliberate skeleton
+        OVER-REPORT: S2.2's locked rule is *two consecutive* fails ->
+        degraded, but the skeleton flips on the first miss (no per-instance
+        fail counter yet). A transient single-cycle probe miss therefore
+        shows degraded in health.json for one `health_poll_s` cycle. MAP 2.6
+        replaces this with the two-fail counter and the five-fail -> restart
+        escalation.
+      * miss, was degraded/bdown/bfailed -> keep the prior state (only a
+        fresh healthy probe clears it).
+    `states` in, aligned states out.
+    (No main_ok param — instance liveness is probed per-instance; the main
+    stack's health is the probe loop's own job, not this one; G3 PR #10
+    r6 P2.)"""
+    if len(states) != len(spawned):
+        states = ["healthy"] * len(spawned)
+    new_states = list(states)
+    for idx, i in enumerate(spawned):
+        port = _port(cfg, i)
+        if instance_healthy(port, cfg["alias"], cfg["api_key"]):
+            new_states[idx] = "healthy"
+        else:
+            # Skeleton over-report (G3 PR #10 r9 P2): first miss -> degraded
+            # (S2.2's two-consecutive-fail rule is a MAP 2.6 counter); a
+            # degraded/bdown/bfailed instance keeps its state on a miss.
+            new_states[idx] = (
+                "degraded" if new_states[idx] == "healthy" else new_states[idx]
+            )
+    return new_states
+
+
+def run_probe_loop(
+    cfg: dict,
+    spawned: list[int],
+    health_dir: Path,
+    states: list[str],
+    settle_s: float,
+    main_only_reason: str | None = None,
+    log=_log,
+) -> int:
+    """The steady state: every `health_poll_s`, re-probe each instance +
+    main, atomically rewrite health.json (S2.2). Runs forever under
+    systemd (settle_s == 0); exits 0 after settle_s when non-zero (the
+    @gpu test harness + a manual run). Returns the process exit code.
+    (No main_ok param — the main stack's health is re-probed fresh every
+    cycle inside the loop; G3 PR #10 r6 P2.)"""
+    cycle = 0
+    t0 = time.monotonic()
+    while True:
+        main_ok = main_healthy(cfg["main_endpoint"])
+        states = _refresh_states(cfg, spawned, states, log)
+        write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
+        if settle_s > 0 and (time.monotonic() - t0) >= settle_s:
+            log(f"probe loop: settled {settle_s:.0f}s (cycle {cycle}), exit 0")
+            return EXIT_OK
+        # S2.2: health_poll_s cadence (the steady-loop constant from
+        # serving.yaml; the skeleton's settle loop uses it too).
+        time.sleep(cfg["health_poll_s"])
+        cycle += 1
+
+
+# --------------------------------------------------------------------------
+# entry point
+# --------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="bonsai2 instance manager (MAP 2.1–2.5, S2.1–S2.5)."
+    )
+    ap.add_argument(
+        "--settle",
+        type=float,
+        default=0.0,
+        help="after boot + notify, run the probe loop this many "
+        "seconds then exit 0 (0 = run forever under systemd)",
+    )
+    ap.add_argument(
+        "--config-dir",
+        default=None,
+        help=f"dir holding subagent-engine.yaml + serving.yaml "
+        f"(default {DEFAULT_CONFIG_DIR}; "
+        f"or set BONSAI2_ENGINE_YAML / BONSAI2_SERVING_YAML)",
+    )
+    args = ap.parse_args(argv)
+
+    cfg_dir = args.config_dir or DEFAULT_CONFIG_DIR
+    engine_yaml = Path(
+        os.environ.get(
+            "BONSAI2_ENGINE_YAML", str(Path(cfg_dir) / "subagent-engine.yaml")
+        )
+    )
+    serving_yaml = Path(
+        os.environ.get("BONSAI2_SERVING_YAML", str(Path(cfg_dir) / "serving.yaml"))
+    )
+    health_dir = Path(os.environ.get("BONSAI2_HEALTH_DIR", DEFAULT_HEALTH_DIR))
+
+    notify_sd("STATUS=bonsai2-manager: loading config")
+    try:
+        cfg = load_config(Path(engine_yaml), Path(serving_yaml))
+    except ValueError as exc:
+        _log(str(exc))
+        notify_sd(f"STATUS=bonsai2-manager: {exc}")
+        notify_sd("STOPPING=1")  # pre-READY exit (G3 PR #10 r10 P2)
+        return EXIT_CONFIG
+
+    n_yaml = int(cfg["count"])
+    budget_gb = float(cfg["budget_gb"])
+
+    # --- S2.8 #1 shared whole-boot deadline (STARTS NOW) ----------------
+    # ONE shared budget for the whole boot: every step from here — the
+    # S2.3 reads (MemTotal, the main cgroup read incl. its docker
+    # inspect), the S1.4 footprint, the S2.1 main probe, and the S2.5
+    # spawn sequence — counts against boot_target_s. G3 PR #10 r14 P1
+    # moved the start before the main probe; r15 P1 moves it before the
+    # S2.3 reads too, so an un-bounded docker inspect or a wedged cgroup
+    # read lives INSIDE the budget, not on top of it. (S2.8 #1: 'Cold
+    # boot → main + N healthy ≤ 180 s'.)
+    boot_deadline_s = time.monotonic() + cfg["boot_target_s"]
+
+    # --- S2.3 boot-time budget check -----------------------------------
+    try:
+        total_gb = read_total_gb()
+    except OSError as exc:
+        # A boot-tier /proc/meminfo read failure is a config/boot-environment
+        # problem, not a transient one: map it to ERR_CONFIG (exit 2) instead
+        # of an uncaught traceback (exit 1), matching the load_config contract.
+        _log(f"ERR_CONFIG: MemTotal read failed: {exc}")
+        notify_sd(f"STATUS=bonsai2-manager: ERR_CONFIG: {exc}")
+        notify_sd("STOPPING=1")  # pre-READY exit (G3 PR #10 r10 P2)
+        return EXIT_CONFIG
+    main_used, source = main_used_gb(cfg["main_container"], cfg["main_footprint_gb"])
+    _log(
+        f"S2.3: total {total_gb:.2f} GB, main {main_used:.2f} GB ({source}), "
+        f"os-reserved {cfg['os_reserved_gb']:.1f} GB, N={n_yaml}, budget {budget_gb:.2f} GB"
+    )
+    n_prime, free_gb, warns = planning_tier(
+        total_gb, main_used, cfg["os_reserved_gb"], n_yaml, budget_gb
+    )
+    for w in warns:
+        _log(w)
+    _log(f"S2.3: free {free_gb:.2f} GB -> N'={n_prime}")
+
+    # --- S1.4 allocation-tier need (max(footprint + 1.0, cap)) --------
+    # cfg["per_slot_per_token_gb"] is the S1.4 KV constant for the
+    # configured kv_cache dtype (r13 P1: the S1.6 key feeds the
+    # footprint; load_config ERR_CONFIGs a dtype without a locked value).
+    footprint = bonsai2_vram.instance_footprint_gb(
+        cfg["weights_gb"],
+        int(cfg["slots"]),
+        int(cfg["ctx_size"]),
+        cfg["per_slot_per_token_gb"],
+    )
+    # Pinned single source of truth (G3 PR #10 r14 P2): the tier need is
+    # derived from the SAME `footprint` value the log prints — no second
+    # independent recomputation that could silently diverge (the
+    # allocation_need_gb module function stays for the pure-formula
+    # tests; main() is the live caller).
+    need_gb = max(footprint + TIER_MARGIN_GB, budget_gb)
+    _log(
+        f"S1.4 allocation tier need: {need_gb:.2f} GB "
+        f"(max(footprint {footprint:.2f} + {TIER_MARGIN_GB:.1f} GB margin, "
+        f"cap {budget_gb:.2f} GB); kv_cache={cfg['kv_cache']})"
+    )
+
+    # --- S2.1 boot order: main stack first -----------------------------
+    main_ok = main_healthy(cfg["main_endpoint"])
+    _log(
+        f"S2.1: main endpoint {cfg['main_endpoint']} healthy={main_ok} "
+        f"(recorded in health.json; the pool is an independent engine, "
+        f"Wants= not Requires=)"
+    )
+
+    # --- S2.5 spawn path (ordered) --------------------------------------
+    sysctl_base = systemctl_base()
+    exit_code, spawned, detail, start_rc = spawn_sequence(
+        cfg,
+        n_prime,
+        need_gb,
+        log=_log,
+        sysctl_base=sysctl_base,
+        boot_deadline_s=boot_deadline_s,
+    )
+    _log(detail)
+
+    # --- i = 0 allocation OOM (exit 4): a BOOT-TIME failure -------------
+    # spawn_sequence returns (4, [], detail, {}) — nothing started, the
+    # manager exits BEFORE any READY=1 (the S1.4 "exits 4 before the
+    # instance's KV allocation" contract). Handle it here, explicitly, so
+    # the exit-4 path is not "falls through with an empty state":
+    #   * health.json is written with 0 instances. stack_summary returns
+    #     "main-only" for 0 instances (there really are no subagents
+    #     running), and main_only_reason names the CAUSE — here
+    #     "ERR_VRAM_OOM" so a reader of bonsai2-health can distinguish
+    #     "planning tier found nothing to run" (budget_zero / user_unloaded)
+    #     from "planning tier granted, allocation tier refused" (this path).
+    #     The S3.1 schema keeps main_only_reason free-form for 0-instance
+    #     documents (S2.4 amendment 2026-09-23 already opened it to new
+    #     reason values like the MAP 2.7 fallback_zero candidate).
+    #   * STATUS= is emitted so systemd's journal shows WHY the start
+    #     failed (without it, Type=notify + exit 4 = a bare "status=failed
+    #     reason=exit-code" with no context)
+    #   * then exit 4, which systemd under Type=notify treats as a FAILED
+    #     START -> Restart=on-failure + RestartSec=5 (the unit's policy).
+    if exit_code == EXIT_VRAM_OOM:
+        _log("S1.4: i=0 allocation OOM -> exit 4 (ERR_VRAM_OOM), no READY sent")
+        # G3 PR #10 r15 P2: the S2.1 main_ok was probed BEFORE the spawn
+        # sequence — re-probe now, so the OOM health document reports the
+        # main stack's CURRENT state (a main that died during the tier
+        # rejection is not silently recorded as healthy).
+        main_ok_now = main_healthy(cfg["main_endpoint"])
+        write_health(health_dir, build_health(cfg, [], main_ok_now, "ERR_VRAM_OOM"))
+        notify_sd(f"STATUS=bonsai2-manager: {detail}")
+        # Pre-READY exit: emit STOPPING= so a `systemctl stop` issued during
+        # this still-"starting" window has Type=notify bookkeeping to
+        # complete against instead of falling through to the TimeoutStopSec
+        # main-PID path (G3 PR #10 r10 P2). The normal case (boot exits 4
+        # in ~seconds) is a FAILED START -> Restart=on-failure, not a stop.
+        notify_sd("STOPPING=1")
+        return EXIT_VRAM_OOM
+
+    # --- S2.4 N=0 / main-only handoff (the PTQ1_0 / ctx-halve fallback is
+    #     MAP 2.7; the skeleton hands off to main-only, exit 0) ----------
+    main_only_reason: str | None = None
+    if n_prime == 0:
+        # S2.4: the planning-tier N'=0 reason is `budget_zero` (the
+        # spec shares it with the post-PTQ1_0-retry zero; a distinct
+        # `fallback_zero` is a MAP 2.7 candidate — S2.4 amendment
+        # 2026-09-23, G3 PR #10 round 2). Distinct from S3.2's
+        # `user_unloaded` (explicit unload).
+        main_only_reason = "budget_zero"
+        _log(
+            "S2.4: N'=0 -> main-only mode (reason=budget_zero). "
+            "MAP 2.7 adds the PTQ1_0 / ctx-halve fallback before this handoff."
+            + (
+                f" Fallback quant validated at config-load: PTQ1_0 "
+                f"{cfg['fallback_size_bytes']} B "
+                f"(~{cfg['fallback_size_bytes'] / 1e9:.2f} GB vs PQ2_0 "
+                f"{cfg['weights_gb']:.2f} GB)."
+                if cfg.get("fallback_size_bytes")
+                else " No model.fallback_size_bytes in the YAML — MAP 2.7's "
+                "PTQ1_0 retry has no size to plan against (P1, G3 PR #10 r4)."
+            )
+        )
+        states: list[str] = []
+        write_health(
+            health_dir,
+            build_health(cfg, states, main_ok, main_only_reason=main_only_reason),
+        )
+        notify_sd("STATUS=bonsai2-manager: main-only (budget_zero)")
+        if args.settle > 0:
+            # The settle path exits 0 after settle_s, but still marks
+            # readiness FIRST: under a user-scope Type=notify start (the
+            # @gpu harness shape) an exit-0 with no prior READY=1 is a
+            # FAILED START in systemd notify semantics — consistent with
+            # the non-settle path below and the instances settle path
+            # (G3 PR #10 round 5 P1).
+            notify_sd("READY=1")
+            return run_probe_loop(
+                cfg,
+                [],
+                health_dir,
+                states,
+                args.settle,
+                main_only_reason,
+                _log,
+            )
+        notify_sd("READY=1")
+        return EXIT_OK
+
+    # --- first health.json (states from the spawn outcome) -------------
+    # A unit whose `systemctl start` returned non-zero reflects its S1.5
+    # bfailed path DIRECTLY in health.json (the start_rc the spawn
+    # sequence surfaces) instead of re-deriving by probing a possibly-dead
+    # unit. A clean start that has not gone healthy yet is `degraded`
+    # (alive-but-unproven), not bfailed.
+    states = []
+    for i in spawned:
+        if start_rc.get(i, 0) != 0:
+            states.append("bfailed")
+        else:
+            port = _port(cfg, i)
+            states.append(
+                "healthy"
+                if instance_healthy(port, cfg["alias"], cfg["api_key"])
+                else "degraded"
+            )
+    write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
+    notify_sd(f"STATUS=bonsai2-manager: booted {len(spawned)} instance(s)")
+
+    if args.settle > 0:
+        # Readiness before the settle window: same user-scope Type=notify
+        # FAILED-START rationale as the main-only settle branch above
+        # (G3 PR #10 round 5 P1) — a settle run is a normal, ready boot.
+        notify_sd("READY=1")
+        return run_probe_loop(
+            cfg,
+            spawned,
+            health_dir,
+            states,
+            args.settle,
+            main_only_reason,
+            _log,
+        )
+
+    # systemd Type=notify: signal readiness, then run the probe loop forever.
+    notify_sd("READY=1")
+    run_probe_loop(cfg, spawned, health_dir, states, 0.0, main_only_reason, _log)
+    # Unreachable in production: run_probe_loop(settle_s=0.0) is an infinite
+    # loop — the process ends by systemd's SIGTERM (a normal stop, not a
+    # failure; READY=1 was already sent). EXIT_OK (not a boot-path variable):
+    # the exit-4 boot path already returned, so by the time we reach the
+    # probe loop the spawn outcome is always the normal 0 (G3 PR #10 r6 P2;
+    # variable renamed r11 P2 for reader clarity).
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

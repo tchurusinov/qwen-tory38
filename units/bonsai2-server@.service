@@ -20,6 +20,11 @@
 #     {image_pin.tag} \
 #       /opt/bonsai2/bin/llama-server {S1.3 flags, --port {port_base+i}}
 #
+# where the S1.3 flags are the image's baked CMD verbatim (probed
+# 2026-09-22: `docker run img --flag` replaces the baked CMD and dies
+# under the nvidia entrypoint — the full command must be passed).
+# The S1.4 allocation tier (pre-spawn gate, run by the manager, MAP 2.3)
+# is what admits an instance to `systemctl start` in the first place.
 #   Restart=on-failure / RestartSec=5 / StartLimitBurst=3 (then bfailed)
 #   / CPUQuota=64%
 #

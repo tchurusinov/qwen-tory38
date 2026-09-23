@@ -288,14 +288,23 @@ model); S0's default on this box is N = 2 (worked example:
 **Boot-time OOM policy (two-tier check, actor = the instance manager):**
 S2.3's budget (`floor(free_gb / per_instance_budget_gb)`) is a *planning*
 tier that decides N' before anything boots. On top of it, before the
-manager actually spawns instance i, it runs a *stricter allocation* tier:
-`nvidia-smi`/cgroup free ≥ `instance_footprint_GB + 1.0 GB` (the true
-footprint + a 1.0 GB spike margin, not the 14.78 GB planning budget).
-The free-memory read is bounded: 5 s timeout per probe, one retry; on
-a second timeout the tier treats free as 0 for that spawn (the i > 0
-partial-load rule applies; the value is re-read on the S2.5 5-min
-recheck and on any reload) — a wedged probe must never deadlock the
-manager.
+manager actually spawns instance i, it runs a *stricter allocation*
+tier: `nvidia-smi`/cgroup free ≥
+`max(instance_footprint_GB + 1.0 GB, per_instance_budget_gb)` — the
+true footprint + a 1.0 GB spike margin, floored at the S2.2 container
+cap. The floor reconciles S1.4 with S2.2 (pin-reality delta
+2026-09-23, G3 PR #10 round 2, spec follows code): S2.2 caps each
+container at `per_instance_budget_gb` (= footprint + 5% margin), so on
+a box where that 5% margin exceeds 1.0 GB the cap is the larger term
+and the tier must gate on the cap — a free pool between
+`footprint + 1.0` and the cap would pass the margin term but not fit
+the container. On this box the margin term is the max
+(15.08 > 14.78), so the floor is a no-op; it binds on any box where
+`budget > footprint + 1.0`. The free-memory read is bounded: 5 s
+timeout per probe, one retry; on a second timeout the tier treats free
+as 0 for that spawn (the i > 0 partial-load rule applies; the value is
+re-read on the S2.5 5-min recheck and on any reload) — a wedged probe
+must never deadlock the manager.
 - If the allocation tier fails at i > 0: stop at i−1, log
   `WARN_VRAM_SHORTFALL {i, free, need}`, proceed with the partial load,
   exit 0 (a valid state).
@@ -315,7 +324,7 @@ manager.
 | condition | behavior | code |
 |---|---|---|
 | artifact missing/corrupt (hash mismatch, partial download) | retry download ×3 (10 s backoff); then fail boot of that instance only | `ERR_HASH_MISMATCH` / `ERR_DOWNLOAD`, exit 4 (process), systemd `Restart=on-failure` max 3 → `bfailed` |
-| port in use at instance boot | instance skipped, others proceed | `ERR_PORT_IN_USE`, exit 3 |
+| port in use at instance boot | instance skipped, others proceed; the index is recorded in health.json as `bfailed` (S3.1) so `bonsai2-status` shows it and S3.2 `reload` can target it; "skipped" means *not started at this boot moment*, not "unassigned" — a later reload re-runs the S1.4 allocation tier for that index (the P3 reload semantics) | `ERR_PORT_IN_USE`, exit 3 |
 | instance OOM at load | two observers, two *exclusive* paths, in priority order: (1) the S1.4 allocation tier (pre-allocation gate, run by the manager) catches it first → the manager exits 4 before the instance's KV allocation; (2) only if the tier passed and free memory moved in the gap (concurrent allocation) does the kernel OOM-kill mid-load instead — systemd sees SIGKILL (no process exit code), `Restart=on-failure` ×3 → `bfailed`, harness routes around it | `ERR_VRAM_OOM`, exit 4 (path 1, manager) / unit-failure (path 2, systemd) |
 | engine crash mid-request | systemd `Restart=on-failure` (5 s delay); harness sees connection error → task `engine_retried` (one retry, next instance); second failure → task `failed` | `ERR_ENGINE_DOWN` |
 | request > ctx-size | engine HTTP 400; harness surfaces `ERR_CTX_TOO_LONG` to main | exit 5 |
@@ -354,6 +363,11 @@ instances:
   max_num_seqs: 8
   per_instance_budget_gb: 14.78   # S1.4: 14.08 GB measured q4_0 footprint + 5% margin
 kv_cache: q4_0                   # S1.3 --cache-type-k/v (the S1.4 re-anchor; FP16 default doubles the footprint)
+#                                       # Manager validation (delta 2026-09-23, G3 PR #10 r13):
+#                                       # load_config ERR_CONFIGs (exit 2) a missing kv_cache or a
+#                                       # dtype with no LOCKED S1.4 constant (today: q4_0 only) —
+#                                       # the footprint must never silently gate on a constant the
+#                                       # config didn't ask for.
 sampling:                          # locked from model card
   temperature: 1.0
   top_p: 0.9
@@ -465,11 +479,26 @@ that a main-stack fix might need.
   unified-memory driver charges the instance's GPU allocations to its
   cgroup, so this bounds the instance's total footprint; `--memory-swap`
   = same value, no swap escape, matching the main stack's pattern).
+
+  > Pin reality (delta 2026-09-22, S2.5 live spawn test, spec follows
+  > code): docker parses the `g` suffix as **GiB (2^30)**, not decimal
+  > GB, and truncates the float parse to bytes — so
+  > `--memory 14.78g --memory-swap 14.78g` caps at
+  > `int(14.78 * 2^30)` = 15,869,904,158 B, ~0.91% above the S1.4
+  > decimal-GB budget. The S1.4 formula and the allocation tier stay
+  > decimal-GB end-to-end; the container cap is a hair looser than the
+  > budget, which can only help the tier (never hurt it). No change to
+  > the budget value — the `g` flag is verbatim the main-stack pattern
+  > (`--memory 100g` is 100 GiB there too).
 - Per-instance unit hardening (same class as the main unit's
   `Requires=docker.service`): `ExecStartPre=` `docker rm -f
   bonsai2-server-i` (clean stale container, verbatim the main unit's
   pattern); `Restart=on-failure`, `RestartSec=5`,
-  `StartLimitBurst=3` (then `bfailed`), `CPUQuota=64%` (a ceiling ≈
+  `StartLimitIntervalSec=300`, `StartLimitBurst=3` (then `bfailed` —
+  3 failed starts within a 300 s window; the interval is the shipped
+  unit's explicit window, not systemd's 10 s default, so a slow boot
+  sequence (two 27 B loads) doesn't exhaust the burst; spec delta
+  2026-09-23, G3 PR #10 round 6 P2), `CPUQuota=64%` (a ceiling ≈
   12.8 of this 20-core box's cores — a bound on one instance's
   worst-case hog, not a reserved allocation; the N instances share the
   20 cores by demand alongside the main stack, overridable). The
@@ -526,7 +555,12 @@ In main-only mode the
 manager stays up, health.json reports `{"instances": 0, "mode":
 "main-only", "reason": "budget_zero"}` — `reason` names the cause:
 `"budget_zero"` (the S2.3 formula came out 0, possibly after the PTQ1_0
-retry) or `"user_unloaded"` (all instances explicitly unloaded via
+retry — the S3.2 unload path and the planning/fallback zero share this
+one reason in v1; a `fallback_zero` distinguishing "PTQ1_0 was tried
+and still 0" from "PQ2_0 was 0 before the retry" is a candidate for
+the MAP 2.7 PTQ1_0 implementation, which is where the retry actually
+runs, and the S3.1 schema is open to new reason values) or
+`"user_unloaded"` (all instances explicitly unloaded via
 `bonsai2-unload`, S3.2 — a mode the user asked for, not a budget
 outcome). harness scripts operate with all subagent commands
 returning exit 80 (S3.4) with a JSON `{"reason": ...}` echoing the
