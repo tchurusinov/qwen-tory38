@@ -755,7 +755,11 @@ def spawn_sequence(
         # inline. A not-yet-healthy instance is still spawned (the probe
         # loop / MAP 2.6 will restart it per the S2.2 restart policy); the
         # ordering guarantee is that the NEXT systemctl start is gated on
-        # this one's wait, which it is by construction.
+        # this one's wait, which it is by construction. Skeleton scope: a
+        # slow load that exceeds boot_target_s is left 'degraded' by the
+        # first health.json and re-probed every health_poll_s; the restart
+        # for one that never recovers is MAP 2.6's (the S2.2 five-fail
+        # escalation), not the skeleton's (G3 PR #10 r9 P2).
     return (
         EXIT_OK,
         spawned,
@@ -771,9 +775,19 @@ def _refresh_states(
     cfg: dict, spawned: list[int], states: list[str], log=_log
 ) -> list[str]:
     """Re-probe each spawned instance every cycle; map to an S3.1 state.
-    The skeleton keeps the last state on a probe miss (the S2.2 two-fail ->
-    degraded / five-fail -> restart escalation is MAP 2.6); a fresh
-    healthy probe clears a degraded mark. `states` in, aligned states out.
+
+    Skeleton miss-mapping (a fresh healthy probe always wins):
+      * healthy probe  -> healthy (clears any degraded mark)
+      * miss, was healthy -> degraded. This is a deliberate skeleton
+        OVER-REPORT: S2.2's locked rule is *two consecutive* fails ->
+        degraded, but the skeleton flips on the first miss (no per-instance
+        fail counter yet). A transient single-cycle probe miss therefore
+        shows degraded in health.json for one `health_poll_s` cycle. MAP 2.6
+        replaces this with the two-fail counter and the five-fail -> restart
+        escalation.
+      * miss, was degraded/bdown/bfailed -> keep the prior state (only a
+        fresh healthy probe clears it).
+    `states` in, aligned states out.
     (No main_ok param — instance liveness is probed per-instance; the main
     stack's health is the probe loop's own job, not this one; G3 PR #10
     r6 P2.)"""
@@ -785,8 +799,9 @@ def _refresh_states(
         if instance_healthy(port, cfg["alias"], cfg["api_key"]):
             new_states[idx] = "healthy"
         else:
-            # Keep the prior state for the skeleton; MAP 2.6 increments a
-            # per-instance fail counter here and escalates at 2/5.
+            # Skeleton over-report (G3 PR #10 r9 P2): first miss -> degraded
+            # (S2.2's two-consecutive-fail rule is a MAP 2.6 counter); a
+            # degraded/bdown/bfailed instance keeps its state on a miss.
             new_states[idx] = (
                 "degraded" if new_states[idx] == "healthy" else new_states[idx]
             )

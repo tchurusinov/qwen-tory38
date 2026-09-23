@@ -382,12 +382,18 @@ class TestMainExitCodes(unittest.TestCase):
         """G3 round-5 P1: a --settle boot (instances or main-only) exits 0
         after the settle window — but it still sends READY=1 BEFORE the
         window. Under a user-scope Type=notify start an exit-0 with no
-        prior READY=1 is a FAILED START in systemd notify semantics."""
+        prior READY=1 is a FAILED START in systemd notify semantics.
+        G3 round 9 P2: also verify the S3.1 document the first health.json
+        write carries (states correct, not just the READY ordering)."""
         cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
         notified: list[str] = []
+        health_docs: list[dict] = []
 
         def fake_notify(state):
             notified.append(state)
+
+        def fake_write_health(health_dir, doc):
+            health_docs.append(doc)
 
         td = tempfile.mkdtemp()
         try:
@@ -410,7 +416,7 @@ class TestMainExitCodes(unittest.TestCase):
                     ),
                 ),
                 mock.patch.object(mgr, "instance_healthy", return_value=True),
-                mock.patch.object(mgr, "write_health"),
+                mock.patch.object(mgr, "write_health", side_effect=fake_write_health),
                 mock.patch.object(mgr, "notify_sd", side_effect=fake_notify),
                 mock.patch.object(mgr, "run_probe_loop", return_value=0),
             ):
@@ -424,6 +430,20 @@ class TestMainExitCodes(unittest.TestCase):
         ready_idx = notified.index("READY=1")
         booted_idx = next(i for i, s in enumerate(notified) if "booted" in s)
         self.assertGreater(ready_idx, booted_idx, "READY=1 after the booted STATUS=")
+        # G3 round 9 P2: the first health.json must carry the S3.1 states
+        # for the spawned instance (healthy — the mocked probe + clean
+        # start_rc), stack=healthy, and no main_only_reason (S2.4: only at
+        # zero instances).
+        self.assertTrue(health_docs, "settle boot must write health.json")
+        doc = health_docs[0]
+        self.assertEqual(doc["stack"], "healthy")
+        self.assertEqual(
+            [inst["state"] for inst in doc["instances"]],
+            ["healthy"],
+            "S3.1: first health.json reflects the spawn outcome",
+        )
+        self.assertNotIn("main_only_reason", doc)
+        self.assertIs(doc["main_healthy"], True)
 
 
 # --------------------------------------------------------------------------
