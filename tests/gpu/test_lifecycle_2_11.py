@@ -401,13 +401,18 @@ def _engine_pid_in_container(name: str) -> int:
     return int(pids[0])
 
 
-def _port_holder(port: int):
+def _port_holder(port: int, wait_s: float = 15.0):
     """G3 PR#11 r1 (DOD #4, #2 root cause): a bounded HOST-SIDE port
     holder — binds 127.0.0.1:`port` in a daemon thread and refuses the
     port to whoever else wants it (the restarted engine's
     `--port` bind fails -> the unit's Restart=on-failure loop keeps
     the instance DOWN across probe cycles, so the manager's S2.2
     two-consecutive-fails -> degraded rule is actually reachable).
+
+    The bind is RETRIED within a bounded window: right after the
+    kill the old engine's port may still be closing (or the unit's
+    RestartSec=5 restart may have rebound it for one cycle); EADDRINUSE
+    is retryable, not fatal (the 2026-09-23 re-run proved that).
 
     Returns a handle with `.release()`: closes the socket, the thread
     exits, the port is free for the restarted engine. The holder is
@@ -418,7 +423,16 @@ def _port_holder(port: int):
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", port))
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            s.bind(("127.0.0.1", port))
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                s.close()
+                raise
+            time.sleep(1.0)
     s.listen(1)
 
     state = {"stopped": False}
@@ -505,34 +519,73 @@ def _inject_cgroup_pressure(
     except (OSError, ValueError):
         return False
     n = int(target_bytes)
-    r = subprocess.run(
+    # 2nd iteration (2026-09-23 re-run): the first attempt stored the
+    # allocation in a SHELL VARIABLE (`x=$(yes A | head -c N)`) — the
+    # shell copies that string into its own buffers (~2x the bytes), so
+    # a 13.7 GB target actually peaked ~27 GB inside a 15.87 GB kernel
+    # cap -> the holder was OOM-killed (rc=137) before the charge
+    # sustained. A regular FILE on the container rootfs is allocated
+    # ONCE (no copy amplification): `oflag=sync` faults the pages in
+    # immediately and they stay charged to the container's cgroup
+    # until the rm. (Not /dev/shm: the unit's --shm-size is 4g.)
+    #
+    # 3rd iteration: the exec must run DETACHED (the old blocking run
+    # returned only AFTER the `rm` had released the pages, so the
+    # re-read saw the post-release value: landed=False despite the
+    # charge having landed). The holder therefore runs in the
+    # background; the re-read happens at hold_s/2, WHILE the pin is
+    # held — and it must also be the value the manager's 6 s drift
+    # rechecks see over the S2.5 30 s sustained window.
+    holder = subprocess.Popen(
         [
             "docker",
             "exec",
             container,
             "sh",
             "-c",
-            f"x=$(yes A 2>/dev/null | head -c {n}); sleep {int(hold_s)}",
+            (
+                f"dd if=/dev/zero of=/bonsai2-drift-pin bs=1M "
+                f"count=$((n / 1048576)) oflag=sync status=none && "
+                f"sleep {int(hold_s)}; rm -f /bonsai2-drift-pin"
+            ),
         ],
-        capture_output=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
-        timeout=hold_s + 30.0,
     )
-    if r.returncode != 0:
-        # The exec itself failed (bad image toolset) — but the charge
-        # may still have landed before the failure; fall through to the
-        # re-read below and let it decide.
-        print(
-            f"[2.11 #4] pressure holder rc={r.returncode}: "
-            f"{(r.stderr or r.stdout)[:200]}"
-        )
-    # Let the kernel settle the charge, then re-read.
-    time.sleep(2.0)
     try:
-        after = int((cg / "memory.current").read_text().strip())
-    except (OSError, ValueError):
-        return False
+        # dd at ~300 MB/s takes ~45 s for 13.7 GB — read the cgroup
+        # repeatedly until the charge is visible or the hold window is
+        # nearly over (never after it).
+        deadline = time.monotonic() + hold_s - 10.0
+        after = before
+        while time.monotonic() < deadline:
+            try:
+                cur = int((cg / "memory.current").read_text().strip())
+            except (OSError, ValueError):
+                cur = before
+            if cur - before >= int(0.5 * n):
+                after = cur
+                break
+            time.sleep(2.0)
+        else:
+            try:
+                after = int((cg / "memory.current").read_text().strip())
+            except (OSError, ValueError):
+                after = before
+    finally:
+        try:
+            holder.wait(timeout=hold_s + 120.0)
+        except subprocess.TimeoutExpired:
+            # The pin file may outlive the docker exec if the engine
+            # restarts mid-hold; force-kill and clean the file.
+            holder.kill()
+            holder.wait(timeout=30.0)
+            subprocess.run(
+                ["docker", "exec", container, "rm", "-f", "/bonsai2-drift-pin"],
+                capture_output=True,
+                check=False,
+            )
     landed = after - before >= int(0.5 * n)
     print(
         f"[2.11 #4] cgroup charge: {before} B -> {after} B "
@@ -851,21 +904,20 @@ class TestS28Acceptance(unittest.TestCase):
                         f"inside bonsai2-server-0 + holding port {PORT_BASE} down"
                     )
 
-                    # G3 PR#11 r1 (DOD #4, #2 root cause): the unit's own
-                    # Restart=on-failure + RestartSec=5 recovered the
-                    # engine in ~10-15 s (warm-cache reload) BETWEEN the
-                    # manager's 10 s probe cycles, so the S2.2
-                    # two-consecutive-fails -> degraded rule never saw 2
-                    # fails (the 2026-09-23 run: sequence ['healthy']
-                    # for 120 s). The kill now lands WITH a bounded
-                    # host-side port holder on 30101: while it binds,
-                    # the restarted engine cannot take its port, the
-                    # unit's restart loop keeps failing, down-time spans
-                    # >= 2 probe cycles -> degraded IS witnessed. The
-                    # holder releases only AFTER degraded is seen (the
-                    # reload half = the engine's bind+load+first healthy
-                    # probe — the same S1.8 #4 budget as before, so the
-                    # reload_s arithmetic is unchanged).
+                    # G3 PR#11 r1 (DOD #4, #2 root cause, 2nd iteration):
+                    # the holder must be in place BEFORE the kill — the
+                    # unit's Restart=on-failure + RestartSec=5 is fast
+                    # enough that the engine REBINDS 30101 within the
+                    # window between the kill and any later bind
+                    # (iteration 1: the post-kill bind got
+                    # EADDRINUSE against the restarted engine). The
+                    # holder occupies 30101 for ~30 s (>= 2 probe
+                    # cycles at the 10 s cadence) so the S2.2
+                    # two-consecutive-fails -> degraded rule fires;
+                    # then it releases, the unit's next restart
+                    # attempt binds + loads, and the RELOAD half is
+                    # measured from the release moment.
+                    holder = _port_holder(PORT_BASE)
                     kill_t0 = time.monotonic()
                     subprocess.run(
                         [
@@ -880,60 +932,49 @@ class TestS28Acceptance(unittest.TestCase):
                         text=True,
                         check=True,
                     )
-                    holder = _port_holder(PORT_BASE)
-                    # Witness the S2.2 state sequence on the document:
-                    # healthy -> degraded (two consecutive fails at the
-                    # 10 s probe cadence, reachable ONLY while the
-                    # holder keeps the restarted engine from binding)
-                    # -> healthy (holder released at the degraded
-                    # witness; the unit's next restart attempt binds,
-                    # loads, and the manager's next probe clears it;
-                    # the five-fail escalation is the backstop).
-                    # Poll the 0.2 s witness window.
-                    seq: list[str] = []
-                    degraded_at: float | None = None
-                    recovered_at: float | None = None
-                    deadline = time.monotonic() + 120.0
-                    while time.monotonic() < deadline:
-                        h = _read_health(health_dir)
-                        if h is not None:
-                            st = _health_states(h).get(0, ("?", None, False))[0]
-                            if not seq or seq[-1] != st:
-                                seq.append(st)
-                            if degraded_at is None and "degraded" in seq:
-                                degraded_at = time.monotonic()
-                                # Release the port NOW: the degraded
-                                # state is witnessed; the restarted
-                                # engine can bind + load, and the
-                                # manager's next probe clears it to
-                                # healthy. The RELOAD half below is
-                                # measured from this moment.
-                                holder.release()
-                            if st == "healthy" and "degraded" in seq:
-                                recovered_at = time.monotonic()
-                                break
-                        time.sleep(POLL_S)
-                    self.assertIsNotNone(
-                        degraded_at,
-                        f"S2.8 #2: never witnessed degraded (sequence: {seq})",
+                    # Witness the degraded state first (2 fails at the
+                    # 10 s probe cadence — reachable only while the
+                    # holder keeps the restarted engine from binding).
+                    _poll_until(
+                        health_dir,
+                        60.0,
+                        lambda h: (
+                            _health_states(h).get(0, ("?", None, False))[0]
+                            == "degraded"
+                        ),
+                        "S2.8 #2 degraded witness",
                     )
-                    holder.release()  # idempotent — safety on the early path
+                    degraded_at = time.monotonic()
+                    print(
+                        f"[2.11 #2] degraded witnessed at {degraded_at - kill_t0:.1f} s"
+                    )
+                    # Release the port: the restarted engine can now
+                    # bind + load; the manager's next probe clears it.
+                    holder.release()
+                    # The S1.8 #4 15 s budget is the RELOAD half,
+                    # measured from the moment the engine may come
+                    # back (the prefix — the probe-cadence degraded
+                    # lag + the holder window — is measured, not
+                    # charged; the MAP 1.11 convention).
+                    reload_t0 = time.monotonic()
+                    health = _poll_until(
+                        health_dir,
+                        90.0,
+                        lambda h: (
+                            _health_states(h).get(0, ("?", None, False))[0] == "healthy"
+                        ),
+                        "S2.8 #2 instance 0 healthy after the crash",
+                    )
+                    recovered_at = time.monotonic()
                     total_s = recovered_at - kill_t0
-                    # The S1.8 #4 15 s budget is the RELOAD half (the
-                    # MAP 1.11 convention: the prefix is measured, not
-                    # charged). The prefix is the 10 s probe-cadence
-                    # degraded lag + systemd's RestartSec=5; the
-                    # reload half = total - prefix, with the
-                    # decomposition logged for the S2.7 reboot test.
-                    prefix_s = 10.0 + 5.0
-                    reload_s = total_s - prefix_s
+                    reload_s = recovered_at - reload_t0
                     self.assertLess(
                         reload_s,
                         RELOAD_BUDGET_S,
                         f"S2.8 #2: reload half {reload_s:.1f} s > "
-                        f"{RELOAD_BUDGET_S:.0f} s (total {total_s:.1f} s = "
-                        f"{prefix_s:.0f} s degraded-lag+RestartSec prefix "
-                        f"+ reload; sequence {seq})",
+                        f"{RELOAD_BUDGET_S:.0f} s (total {total_s:.1f} s "
+                        f"= degraded-witness {degraded_at - kill_t0:.1f} s "
+                        f"prefix + reload; sequence witness complete)",
                     )
                     host_pid_after = _container_host_pid("bonsai2-server-0")
                     self.assertGreater(
@@ -955,7 +996,7 @@ class TestS28Acceptance(unittest.TestCase):
                     print(
                         f"[2.11 #2] kill -> healthy in {total_s:.1f} s "
                         f"(reload half {reload_s:.1f} s < {RELOAD_BUDGET_S:.0f} s; "
-                        f"sequence {seq}; instance 0 host pid now "
+                        f"degraded witnessed; instance 0 host pid now "
                         f"{host_pid_after}; main PIDs intact)"
                     )
                 finally:
@@ -1150,7 +1191,6 @@ class TestS28Acceptance(unittest.TestCase):
     def test_4_drift_ctx_halve(self):
         self._preconditions(2 * self.budget + 1.0)
         cap_bytes = int(self.budget * 1e9)  # the S2.2 --memory cap, decimal GB
-        pressure_bytes = cap_bytes + 1024 * 1024 * 1024  # 1 GiB over cap
         halved_ctx = self.ctx // 2  # the S2.5 halve at the template ctx
         try:
             self._install_units()
@@ -1182,20 +1222,37 @@ class TestS28Acceptance(unittest.TestCase):
                     self.assertGreater(pid1_before, 0, "instance 1 not running")
                     cg0 = _cgroup_dir_for("bonsai2-server-0")
                     self.assertIsNotNone(cg0, "instance 0 cgroup not found")
-                    print(
-                        f"\n[2.11 #4] healthy; charging "
-                        f"{pressure_bytes} B (> cap {cap_bytes} B) into "
-                        f"instance 0's cgroup (real in-container allocation)"
+                    # G3 PR#11 r1 (DOD #4, #4 root cause, 2nd iteration):
+                    # the allocation must land memory.current STRICTLY
+                    # BETWEEN the manager's decimal cap (budget_gb * 1e9,
+                    # what the drift watch compares against) and the
+                    # kernel's BINARY cgroup cap (memory.max — the
+                    # docker `g` suffix parses GiB, 14.78g = 15.87e9
+                    # bytes). The first re-run's target of
+                    # cap+1 GiB = 15.85e9 already exceeded the kernel
+                    # cap once base usage (~1.35 GB) was added -> the
+                    # holder got OOM-killed (rc=137) and the charge
+                    # never sustained. So: read the live current,
+                    # target 95% of the kernel cap, allocate the delta.
+                    kernel_cap = int((cg0 / "memory.max").read_text().strip())
+                    base_now = int((cg0 / "memory.current").read_text().strip())
+                    target_now = int(0.95 * kernel_cap)
+                    alloc_bytes = target_now - base_now
+                    self.assertGreater(
+                        alloc_bytes,
+                        cap_bytes - base_now,
+                        f"allocation {alloc_bytes} B would not clear the "
+                        f"manager cap {cap_bytes} B (base {base_now} B)",
                     )
-                    # G3 PR#11 r1 (DOD #4, #4 root cause): the old direct
-                    # `memory.current` write got EACCES on this box's
-                    # root-owned system.slice scopes — the charge is now
-                    # REAL memory allocated inside the container, and we
-                    # ASSERT it landed (the helper re-reads the cgroup).
+                    print(
+                        f"\n[2.11 #4] healthy; charging {alloc_bytes} B "
+                        f"(base {base_now} B -> target {target_now} B; "
+                        f"kernel cap {kernel_cap} B > manager cap "
+                        f"{cap_bytes} B) into instance 0's cgroup "
+                        f"(real in-container allocation)"
+                    )
                     self.assertTrue(
-                        _inject_cgroup_pressure(
-                            "bonsai2-server-0", cg0, pressure_bytes
-                        ),
+                        _inject_cgroup_pressure("bonsai2-server-0", cg0, alloc_bytes),
                         "S2.8 #4: the cgroup charge did not land — "
                         "memory.current did not rise over cap; the "
                         "drift watch cannot see it",

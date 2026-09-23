@@ -694,6 +694,34 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 PR #11 r1 disposition iteration 2: @gpu #2/#4 test-harness fixes, verification PENDING (branch `phase2-lifecycle`)
+
+- agent/model: Hermes qwen3.8-27b (user-directed: fixes -> log -> commit -> push -> r1 disposition comment -> r2 review -> stop)
+- phase(s): P2 (2.11 @gpu DOD #4; G3 r1 disposition + r2 review on PR #11)
+- items checked: none new — 2.11 stays [x] in the ledger; DOD #4 (19/19 @gpu) is PARTIAL: 17/19 verified green, #2 + #4 fixed but NOT yet re-verified live this session (the user ordered: log -> commit -> disposition -> r2 review; the @gpu re-run is the next step, see "next").
+- machine state:
+  * branch `phase2-lifecycle` — tip = this commit; only `tests/gpu/test_lifecycle_2_11.py` changed since `beef201`. Hermetic 216/216 OK, gate.sh PASS (ruff clean), py_compile OK. Machine clean: ports 30101/30102 free, no bonsai2 containers, tracked `etc/*.yaml` at template values (boot_target_s: 180).
+- @gpu evidence this session (full-discovery run, log `test-logs/gpu-20260923-230632.log`, 17/19):
+  * #1 cold boot GREEN: T=35.0 s (boot_target_s 180).
+  * #3 N=0 + S2.4 fallback GREEN (the live-MemTotal fix, commit beef201): half A footprint 118.54 (free 1.00 -> N'=0 clamp, main-only budget_zero, zero containers); half B footprint 105.42 (free 14.12 -> N'=0 at PQ2_0, PTQ1_0 instance 0 live at the 13.46 g cap, quant_in_use recorded). Box MemTotal is 127.54 GB, not the SPEC's 121.6.
+  * #5 unload/reload GREEN: reload --all in 12.5 s <= boot_target_s (the read value at run time, 14 s — the manager's S2.6 write-back from the #1 phase, since the tracked template is the @gpu harness's deploy path); the 13.0 s > 11.0 s failure of the 20:19 run was the boot_target_s: 11 state leak, guarded by the template snapshot/restore in 1036e8e. No new code.
+  * #2 crash-recovery FAILED x3 iterations, then re-fixed:
+    - iter 1 (beef201): post-kill port holder -> EADDRINUSE (the unit's Restart=on-failure + RestartSec=5 rebinds 30101 before the holder binds).
+    - iter 2: pre-kill holder + retry-bind -> still EADDRINUSE at bind (the engine binds ~0-5 s after the kill; a holder that lands AFTER the kill always races the restarted engine).
+    - iter 3 (this commit): holder bound BEFORE the kill (while the healthy engine holds the port? NO — the holder binds 30101 while the healthy engine already owns it: the healthy engine binds at boot, so the pre-kill bind ALSO EADDRINUSEs — PROBED: the engine exits rc=1 within ~1 s when it cannot bind (probe 2026-09-23, /tmp/bindprobe), and the unit restarts it; the holder stays, so every restart attempt fails to bind until release). Reload half measured from holder release; degraded witnessed while held (>= 2 probe cycles at the 10 s cadence). VERDICT ON THE MECHANICS: I DON'T KNOW for certain whether the first restart attempt after the pre-kill holder binds wins or the holder does — the probe shows the engine bind-fail is fast, the holder's accept-loop refuses connections, and systemd's restart loop keeps trying; the degraded window = holder lifetime, which the test controls. Live re-run will settle it.
+  * #4 drift FAILED x3 iterations, then re-fixed:
+    - iter 1 (beef201): target = manager cap + 1 GiB = 15.85e9 B > the kernel's BINARY cgroup cap (memory.max = 15.8699e9 B — docker's `g` suffix parses GiB; the manager's decimal cap 14.78e9 is what the drift watch compares against). Base usage ~1.35 GB + 15.85e9 allocation -> OOM-kill rc=137; charge never sustained.
+    - iter 2: allocation = 95% kernel cap - base (13.72e9) via shell variable `x=$(yes A | head -c N)` -> the shell COPIES the string (~2x) -> OOM-kill rc=137 again.
+    - iter 3a: dd-file on the container rootfs (no copy amplification; NOT /dev/shm — the unit's --shm-size is 4 g) -> no OOM-kill, but the blocking `docker exec` returned only after the holder's `rm` had released the pages -> re-read saw base (1357045760 -> 1358413824), landed=False.
+    - iter 3b (this commit): the holder runs DETACHED (Popen), the cgroup is polled WHILE the pin is held (dd ~45 s at ~300 MB/s, then sleep + rm), the assert reads the sustained value; the pin file is cleaned on timeout/kill. VERDICT: I DON'T KNOW if dd's ~45 s write + the 6 s recheck cadence + the S2.5 30 s sustained clock fit the test's 90 s poll window with margin — the math says yes (charge visible from ~t+45 s, held until t+90 s, the 6 s rechecks bracket it), but it has not been observed live.
+  * Root-cause probes recorded (this session): cgroup `memory.current` write = EACCES as uid 1000 AND via privileged root (`/sys/fs/cgroup/system.slice/docker-<id>.scope` is root-owned) -> simulation by write is not viable on this box; real allocation charges it (probe: 1.1 GB exec-alloc moved memory.current 1.5 MB -> 1.1 GB). Engine bind-fail = rc=1 in <1 s (probe /tmp/bindprobe). Image toolset: bash/yes/dd/head/sleep present, no python.
+- blockers/intricacies:
+  * DOD #4 is owed a final live re-run of tests/gpu/test_lifecycle_2_11.py #2 + #4 (then the full 19/19 if green). The next agent: run the two tests, iterate on the SAME root causes only (do not re-derive: the cap is the manager's DECIMAL budget, the kernel cap is GiB-parsed; the charge must be sustained > 30 s between the manager's 6 s rechecks; the holder owns 30101 from before the kill until the degraded witness).
+  * #4 leaves a 13.7 GB pin file on the container rootfs during the hold — the teardown's `docker rm -f` reclaims it; a mid-run crash leaves no trace (the container goes).
+  * `boot_target_s` in the tracked `etc/serving.yaml` is MEASURED (S2.6 write-backs under the @gpu harness); the snapshot/restore guards make the normal path clean, a mid-run crash can still leak it (restore it with `git checkout -- etc/serving.yaml` before re-running).
+- spec deltas: none (all fixes are test-harness; the S2.3/S2.4/S2.5 arithmetic is unchanged — the box-size re-anchor is a test-reading of the live /proc/meminfo, which is what S2.3 prescribes).
+- next: (1) re-run #2 + #4 live -> iterate on the mechanics above if needed -> (2) full tests/run_gpu.sh 19/19 -> (3) the r1 disposition comment already notes #2/#4 as "fixed, verification pending" -> (4) the r2 review comment is posted on the branch as of this commit.
+
 ### 2026-09-23 — G3 PR #11 round-1 disposition + @gpu root-cause/fix pass (branch `phase2-lifecycle`, handoff — 4 @gpu failures remain, exact next steps below)
 
 - agent/model: Hermes qwen3.8-27b (session 20260923_162420_e055bd; user-directed handoff commit — the round is NOT ready for a fresh review yet: @gpu DOD #4 still has 4 live failures, all root-caused below)
