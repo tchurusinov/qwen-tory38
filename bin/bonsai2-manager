@@ -552,13 +552,16 @@ def systemctl_start_instance(i: int, base: list[str] | None = None) -> int:
 
 
 def systemctl_state(i: int, base: list[str] | None = None) -> dict:
-    """`systemctl show -p SubState -p Result` for the unit — maps a unit to
-    the S3.1 instance state (active->healthy pending probe, failed->bfailed,
-    inactive->bdown/bunloaded). FORWARD-HOOK (G3 PR #10 r6 P2): not called
-    by the skeleton's boot/probe paths — the S1.5 bfailed routing comes from
-    the `systemctl start` rc (start_rc), and steady state comes from the port
-    probe. MAP 2.6's restart escalation re-derives a unit's state from
-    `systemctl show` after a restart, which is where this is consumed."""
+    """`systemctl show -p SubState -p Result` for the unit. Returns the RAW
+    systemd values (e.g. SubState="exited"/"running", Result="success"),
+    NOT S3.1 state strings — the SubState/Result -> S3.1 mapping
+    (active->healthy pending probe, failed->bfailed,
+    inactive->bdown/bunloaded) is applied by the CONSUMER. FORWARD-HOOK
+    (G3 PR #10 r6 P2; r7 P2): not called by the skeleton's boot/probe
+    paths — the S1.5 bfailed routing comes from the `systemctl start` rc
+    (start_rc), and steady state comes from the port probe. MAP 2.6's
+    restart escalation is where this is consumed + the S3.1 mapping is
+    wired."""
     unit = f"bonsai2-server@{i}"
     r = subprocess.run(
         (base or systemctl_base()) + ["show", "-p", "SubState", "-p", "Result", unit],
