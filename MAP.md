@@ -606,6 +606,45 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 11 reviewed — 0 P0/1 P1/4 P2; P1 (main_healthy 4xx) + P2#1 (S2.8 #1 shared boot deadline) REAL + FIXED + pinned, P2#2-4 closed, P2#5 naming (commit ed273d3) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 11 (commit ed273d3, disposition comment 650 + @gpu append):
+  0 P0 + 1 P1 + 4 P2. P1 (main_healthy classified all 4xx as up; a
+  404/410 on a moved/removed /v1/models misreports healthy, contradicting
+  S3.1's exit-82 liveness contract) CONFIRMED + FIXED — semantics
+  tightened: 2xx = up; 401 = up (auth-walled, expected healthy shape);
+  404/410 = DOWN (route moved/removed; health.json main_healthy feeds
+  the exit-82 gate); other 4xx = up (route-level error, server alive);
+  5xx/refused/timeout = down. Pinned with test_main_healthy_4xx_semantics
+  (6 codes). P2#1 (per-instance boot_target_s deadline → N×180 s worst
+  case vs S2.8 #1's 180 s WHOLE-boot acceptance) CONFIRMED + FIXED —
+  wait_instance_healthy now takes an optional boot_deadline_s; main()
+  sets ONE shared boot_deadline_s = monotonic()+boot_target_s before the
+  spawn sequence (the whole boot is capped at boot_target_s, not N × it);
+  None → per-instance. Pinned with test_wait_instance_healthy_shared_boot_
+  deadline. P2#2 (build_health main-only positional main_only_reason
+  brittle to reorder) — the n_prime==0 write_health call now uses the
+  explicit main_only_reason= kwarg. P2#3 (unreachable return exit_code
+  after the infinite probe loop) — now `return EXIT_OK` with the why
+  (exit-4 path already returned; r6 annotation retained). P2#4 (@gpu cap
+  assertion is a docker-parse drift detector but the test name doesn't
+  say so) — extracted to _assert_memory_cap_is_gib_truncation(ins,
+  budget, name) whose docstring carries the pin-reality delta +
+  drift-detector contract; the test calls the named helper (kept in the
+  one @gpu test, not a 2nd — a standalone cap test would re-boot 2 real
+  27B instances to re-inspect containers the first already inspects).
+  Hermetic 178/178 OK (+2 new tests). @gpu green post-fix (43.3 s, 2
+  healthy, stack=healthy, branch tip ed273d3 — this run now exercises
+  the shared S2.8 #1 boot-deadline path live).
+- next: round-12 review (convergence pass #3); P1 + P2#1 confirmed +
+  fixed + pinned, P2s all closed — expect REVIEW CLEAN, then G4 human
+  merge.
+- spec deltas: none new (S2.8 #1's 180 s whole-boot budget is now ENFORCED
+  by the shared deadline, not amended; S3.1's main-endpoint probe
+  contract is now IMPLEMENTED by main_healthy's 404/410-down semantics,
+  not changed).
+
 ### 2026-09-23 — G3 loop PR #10: round 10 reviewed — 0 P0/1 P1/2 P2; P1 REFUTED by probe + pinned, P2 STOPPING= fixed + pinned (commit 0a83c06) + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
