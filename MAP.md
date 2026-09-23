@@ -606,6 +606,34 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 10 reviewed — 0 P0/1 P1/2 P2; P1 REFUTED by probe + pinned, P2 STOPPING= fixed + pinned (commit 0a83c06) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 10 (commit 0a83c06, disposition comment 644 + @gpu append 645):
+  0 P0 + 1 P1 + 2 P2. P1 (failed i=0 start "permanently masks instance 1's
+  health in health.json") REFUTED BY PROBE — ran the real
+  spawn_sequence + main() first-health.json build + _refresh_states over
+  3 cycles with i=0's start rc=5 and i=1 healthy: spawned=[0,1],
+  start_rc={0:5,1:0}, first health.json ['bfailed','healthy'], after 3
+  cycles i=1 stays 'healthy' (probes port_base+1 independently; i=0's
+  dead port drives only i=0's own state; the reviewer's own round-10 walk
+  observed the same ['bfailed','healthy'] outcome). Pinned with new
+  hermetic test test_steady_loop_does_not_mask_later_instance_after_
+  failed_start (asserts i=1 healthy over 3 cycles + stack=degraded per
+  S3.1). P2#1 (exit-4 returns before any STOPPING= → Type=notify stop of
+  the still-"starting" unit deadlocks until TimeoutStopSec) FIXED — all
+  3 pre-READY exits (exit-4 ERR_VRAM_OOM + both ERR_CONFIG paths: config
+  ValueError, MemTotal OSError) now emit STOPPING=1 after STATUS=; module
+  docstring exit-4 section records it; pinned in both exit-code tests
+  (assert STOPPING=1 in notified). P2#2 (dead `return exit_code` after
+  the infinite probe loop) already annotated in round 6 — no change.
+  Hermetic 176/176 OK (+1). @gpu green post-fix (68.2 s, 2 healthy,
+  stack=healthy, branch tip 0a83c06).
+- next: round-11 review (convergence pass #2); P1 refuted + pinned, P2s
+  closed/pinned — expect REVIEW CLEAN, then G4 human merge.
+- spec deltas: none new (STOPPING= is an implementation detail of the
+  pre-READY exits, not a spec value; S2.2/S1.4/S1.5/S2.4 carry).
+
 ### 2026-09-23 — G3 loop PR #10: round 9 reviewed — 0 P0/0 P1/3 P2 (reviewer self-downgraded 2 P1s to P2) + P2 pass + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
