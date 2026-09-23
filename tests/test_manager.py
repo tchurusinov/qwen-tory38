@@ -438,6 +438,58 @@ class TestMainExitCodes(unittest.TestCase):
             "STOPPING=1", notified, "exit-4 boot must send STOPPING= (pre-READY)"
         )
 
+    def test_i0_oom_health_document_uses_the_reprobed_main_state(self):
+        """G3 round-15 P2: the S2.1 main_ok is probed BEFORE the spawn
+        sequence; the exit-4 health document must carry a FRESH probe, so
+        a main that dies during the tier rejection is not recorded as
+        healthy in the final (terminal) OOM document."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        written: dict = {}
+        main_calls: list[int] = []
+        side = [True, False]  # S2.1 probe: up; exit-4 re-probe: down
+
+        def fake_main_healthy(endpoint, timeout=5.0):
+            main_calls.append(1)
+            return side[min(len(main_calls) - 1, len(side) - 1)]
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(os.environ, self._env(td), clear=False),
+            mock.patch.object(mgr, "load_config", return_value=cfg),
+            mock.patch.object(mgr, "read_total_gb", return_value=121.6),
+            mock.patch.object(
+                mgr, "main_used_gb", return_value=(76.4, "recorded footprint")
+            ),
+            mock.patch.object(mgr, "main_healthy", side_effect=fake_main_healthy),
+            mock.patch.object(
+                mgr,
+                "spawn_sequence",
+                return_value=(
+                    mgr.EXIT_VRAM_OOM,
+                    [],
+                    "ERR_VRAM_OOM: free 5.00 GB < need 15.08 GB",
+                    {},
+                ),
+            ),
+            mock.patch.object(
+                mgr,
+                "write_health",
+                side_effect=lambda d, doc: written.update(doc=doc),
+            ),
+            mock.patch.object(mgr, "notify_sd"),
+        ):
+            rc = mgr.main([])
+        self.assertEqual(rc, mgr.EXIT_VRAM_OOM)
+        self.assertGreaterEqual(
+            len(main_calls), 2, "the exit-4 path must re-probe main after spawn"
+        )
+        self.assertIs(
+            written["doc"]["main_healthy"],
+            False,
+            "the OOM document must carry the RE-PROBED main state, not the "
+            "pre-spawn one",
+        )
+
     def test_boot_deadline_starts_before_the_main_probe(self):
         """G3 round-14 P1: the S2.8 #1 shared whole-boot deadline starts
         BEFORE the S2.1 main_healthy probe — the probe is part of

@@ -416,8 +416,16 @@ class TestManagerSpawnLive(unittest.TestCase):
                 # main stack asleep (cgroup ~2 GB, not the 76.4 fresh-load
                 # default) -> free well above the pool -> N'=min(N=2,
                 # floor(free/budget)) = 2. The manager log records it.
+                # G3 PR #10 r15 P2: the trailing space pins the boundary —
+                # the bare `N'=2` substring would also match `N'=20` (or
+                # any N ending in 2). The log line is `N'=<n>` followed by
+                # a newline; the space-before-linebreak is the delimiter.
                 self.assertIn("S2.3:", r.stderr)
-                self.assertIn("N'=2", r.stderr)
+                self.assertRegex(
+                    r.stderr,
+                    r"N'=2(\s|$)",
+                    "S2.3 must grant exactly N'=2 (not N'=20 / N'=12 ...)",
+                )
 
                 # ---- S1.4: the allocation tier ran, at the formula
                 #      need (footprint + 1.0) -------------------------

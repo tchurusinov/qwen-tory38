@@ -1029,6 +1029,17 @@ def main(argv: list[str] | None = None) -> int:
     n_yaml = int(cfg["count"])
     budget_gb = float(cfg["budget_gb"])
 
+    # --- S2.8 #1 shared whole-boot deadline (STARTS NOW) ----------------
+    # ONE shared budget for the whole boot: every step from here — the
+    # S2.3 reads (MemTotal, the main cgroup read incl. its docker
+    # inspect), the S1.4 footprint, the S2.1 main probe, and the S2.5
+    # spawn sequence — counts against boot_target_s. G3 PR #10 r14 P1
+    # moved the start before the main probe; r15 P1 moves it before the
+    # S2.3 reads too, so an un-bounded docker inspect or a wedged cgroup
+    # read lives INSIDE the budget, not on top of it. (S2.8 #1: 'Cold
+    # boot → main + N healthy ≤ 180 s'.)
+    boot_deadline_s = time.monotonic() + cfg["boot_target_s"]
+
     # --- S2.3 boot-time budget check -----------------------------------
     try:
         total_gb = read_total_gb()
@@ -1074,15 +1085,6 @@ def main(argv: list[str] | None = None) -> int:
         f"cap {budget_gb:.2f} GB); kv_cache={cfg['kv_cache']})"
     )
 
-    # --- S2.8 #1 shared whole-boot deadline (STARTS NOW) ----------------
-    # ONE shared budget for the whole boot: main probe + N instances
-    # healthy <= boot_target_s (G3 PR #10 r14 P1: it must start BEFORE
-    # the S2.1 main_healthy probe — the probe is part of S2.8 #1's
-    # 'main + N healthy' window, and a black-holed main costs its 5 s
-    # cap inside the budget, not on top of it). The r11 fix made the
-    # deadline shared across instances; this moves the START earlier.
-    boot_deadline_s = time.monotonic() + cfg["boot_target_s"]
-
     # --- S2.1 boot order: main stack first -----------------------------
     main_ok = main_healthy(cfg["main_endpoint"])
     _log(
@@ -1124,7 +1126,12 @@ def main(argv: list[str] | None = None) -> int:
     #     START -> Restart=on-failure + RestartSec=5 (the unit's policy).
     if exit_code == EXIT_VRAM_OOM:
         _log("S1.4: i=0 allocation OOM -> exit 4 (ERR_VRAM_OOM), no READY sent")
-        write_health(health_dir, build_health(cfg, [], main_ok, "ERR_VRAM_OOM"))
+        # G3 PR #10 r15 P2: the S2.1 main_ok was probed BEFORE the spawn
+        # sequence — re-probe now, so the OOM health document reports the
+        # main stack's CURRENT state (a main that died during the tier
+        # rejection is not silently recorded as healthy).
+        main_ok_now = main_healthy(cfg["main_endpoint"])
+        write_health(health_dir, build_health(cfg, [], main_ok_now, "ERR_VRAM_OOM"))
         notify_sd(f"STATUS=bonsai2-manager: {detail}")
         # Pre-READY exit: emit STOPPING= so a `systemctl stop` issued during
         # this still-"starting" window has Type=notify bookkeeping to
