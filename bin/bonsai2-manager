@@ -83,6 +83,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -203,9 +204,24 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
                 f"ERR_CONFIG: subagent-engine.yaml: instances.{key} missing"
             )
     model = eng.get("model")
-    if not isinstance(model, dict) or not isinstance(model.get("size_bytes"), int):
+    if not isinstance(model, dict):
         raise ValueError(  # noqa: TRY004
-            "ERR_CONFIG: subagent-engine.yaml: model.size_bytes missing/not int"
+            "ERR_CONFIG: subagent-engine.yaml: model: block missing"
+        )
+    # Byte sizes: uniform numeric edge (G3 PR #10 r14 P2) — int OR
+    # positive float, bool excluded (same shape as
+    # per_instance_budget_gb above), normalized to int at load. Bytes
+    # are an integral quantity, so the int() normalization is exact for
+    # whole-byte floats; a hand-edited `7.2e9` is still accepted and
+    # normalized, matching the budget key's leniency.
+    size_bytes = model.get("size_bytes")
+    if not isinstance(size_bytes, (int, float)) or isinstance(size_bytes, bool):
+        raise ValueError(  # noqa: TRY004
+            "ERR_CONFIG: subagent-engine.yaml: model.size_bytes missing/not a number"
+        )
+    if size_bytes <= 0:
+        raise ValueError(
+            "ERR_CONFIG: subagent-engine.yaml: model.size_bytes not positive"
         )
     # Numeric instance keys: validate the TYPE at config-load (ERR_CONFIG)
     # instead of letting `int(cfg[...])` / `float(cfg[...])` in main()
@@ -250,13 +266,16 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
     # of the MAP 2.1–2.5 skeleton — the fallback RETRY logic lands in
     # MAP 2.7 — but it is surfaced now so a malformed/missing fallback
     # quant is caught at config-load (ERR_CONFIG) or explicitly logged,
-    # not discovered mid-N=0-handoff.
+    # not discovered mid-N=0-handoff. Same uniform numeric edge as
+    # size_bytes above (r14 P2).
     fallback_size_bytes = model.get("fallback_size_bytes")
     if fallback_size_bytes is not None and not (
-        isinstance(fallback_size_bytes, int) and fallback_size_bytes > 0
+        isinstance(fallback_size_bytes, (int, float))
+        and not isinstance(fallback_size_bytes, bool)
+        and fallback_size_bytes > 0
     ):
         raise ValueError(
-            "ERR_CONFIG: subagent-engine.yaml: model.fallback_size_bytes not a positive int"
+            "ERR_CONFIG: subagent-engine.yaml: model.fallback_size_bytes not a positive number"
         )
 
     main_stack = srv.get("main_stack")
@@ -289,11 +308,11 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
         "serving": srv,
         "alias": alias,
         "api_key": api_key,
-        "weights_bytes": model["size_bytes"],
-        "weights_gb": model["size_bytes"] / 1e9,  # decimal GB (S1.4 convention)
+        "weights_bytes": int(size_bytes),  # normalized (r14 P2)
+        "weights_gb": size_bytes / 1e9,  # decimal GB (S1.4 convention)
         "fallback_size_bytes": (
-            fallback_size_bytes if fallback_size_bytes is not None else None
-        ),
+            int(fallback_size_bytes) if fallback_size_bytes is not None else None
+        ),  # normalized (r14 P2)
         "count": inst["count"],
         "port_base": inst["port_base"],
         "ctx_size": inst["ctx_size"],
@@ -324,17 +343,49 @@ def _mem_available_gb() -> float:
     raise OSError("MemAvailable not in /proc/meminfo")
 
 
+def _mem_available_gb_bounded() -> float:
+    """_mem_available_gb with a REAL wall-clock cap (G3 PR #10 r14 P0).
+
+    The S1.4 contract is '5 s timeout per probe' — a wedged probe must
+    never deadlock the manager. /proc reads are normally instant, so a
+    post-hoc deadline check would be nominal (the reviewer's point);
+    the only stdlib way to genuinely bound a synchronous local read is
+    a daemon thread + join(timeout): a wedged reader keeps spinning in
+    the background (harmless — a pure file read, no resources of its
+    own) while the caller gets its TimeoutError on time."""
+    result: dict = {}
+
+    def _run() -> None:
+        try:
+            result["v"] = _mem_available_gb()
+        except BaseException as exc:  # noqa: BLE001 — re-raised below
+            result["e"] = exc
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(FREE_PROBE_TIMEOUT_S)
+    if t.is_alive():
+        raise TimeoutError(
+            f"free-memory probe exceeded {FREE_PROBE_TIMEOUT_S:.0f}s (wedged /proc read)"
+        )
+    if "e" in result:
+        raise result["e"]
+    return result["v"]
+
+
 def read_free_gb() -> float:
     """The S1.4 allocation-tier free read, bounded: one probe, one retry,
     then free = 0 (S1.4: "5 s timeout per probe, one retry; on a second
-    timeout the tier treats free as 0"). The 5 s bound (
-    FREE_PROBE_TIMEOUT_S) is the S1.4 contract on the PROBE; the current
-    /proc/meminfo reader is instant, so the bound is nominal here — the
-    load-bearing part is the retry-once-then-zero shape, which the
-    hermetic test drives with a failing reader."""
+    timeout the tier treats free as 0"). The 5 s bound
+    (FREE_PROBE_TIMEOUT_S) is ENFORCED per probe (r14 P0: a wedged
+    reader raises TimeoutError at exactly the cap, inside the retry
+    loop below); the load-bearing shape is retry-once-then-zero, which
+    the hermetic test drives with a failing reader (the reader is
+    injectable, so the thread-bounded real reader is exercised only
+    live)."""
     for attempt in range(FREE_PROBE_RETRIES + 1):
         try:
-            return _mem_available_gb()
+            return _mem_available_gb_bounded()
         except (OSError, TimeoutError) as exc:
             _log(
                 f"free-memory probe {attempt + 1} failed: {exc} "
@@ -1011,18 +1062,26 @@ def main(argv: list[str] | None = None) -> int:
         int(cfg["ctx_size"]),
         cfg["per_slot_per_token_gb"],
     )
-    need_gb = allocation_need_gb(
-        cfg["weights_gb"],
-        int(cfg["slots"]),
-        int(cfg["ctx_size"]),
-        budget_gb,
-        cfg["per_slot_per_token_gb"],
-    )
+    # Pinned single source of truth (G3 PR #10 r14 P2): the tier need is
+    # derived from the SAME `footprint` value the log prints — no second
+    # independent recomputation that could silently diverge (the
+    # allocation_need_gb module function stays for the pure-formula
+    # tests; main() is the live caller).
+    need_gb = max(footprint + TIER_MARGIN_GB, budget_gb)
     _log(
         f"S1.4 allocation tier need: {need_gb:.2f} GB "
         f"(max(footprint {footprint:.2f} + {TIER_MARGIN_GB:.1f} GB margin, "
         f"cap {budget_gb:.2f} GB); kv_cache={cfg['kv_cache']})"
     )
+
+    # --- S2.8 #1 shared whole-boot deadline (STARTS NOW) ----------------
+    # ONE shared budget for the whole boot: main probe + N instances
+    # healthy <= boot_target_s (G3 PR #10 r14 P1: it must start BEFORE
+    # the S2.1 main_healthy probe — the probe is part of S2.8 #1's
+    # 'main + N healthy' window, and a black-holed main costs its 5 s
+    # cap inside the budget, not on top of it). The r11 fix made the
+    # deadline shared across instances; this moves the START earlier.
+    boot_deadline_s = time.monotonic() + cfg["boot_target_s"]
 
     # --- S2.1 boot order: main stack first -----------------------------
     main_ok = main_healthy(cfg["main_endpoint"])
@@ -1034,10 +1093,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- S2.5 spawn path (ordered) --------------------------------------
     sysctl_base = systemctl_base()
-    # S2.8 #1: ONE shared whole-boot budget for the whole spawn sequence
-    # (main + N healthy ≤ boot_target_s). A per-instance boot_target_s
-    # deadline would allow N × boot_target_s (G3 PR #10 r11 P2).
-    boot_deadline_s = time.monotonic() + cfg["boot_target_s"]
     exit_code, spawned, detail, start_rc = spawn_sequence(
         cfg,
         n_prime,

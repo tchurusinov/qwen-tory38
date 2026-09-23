@@ -75,6 +75,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -437,6 +438,61 @@ class TestMainExitCodes(unittest.TestCase):
             "STOPPING=1", notified, "exit-4 boot must send STOPPING= (pre-READY)"
         )
 
+    def test_boot_deadline_starts_before_the_main_probe(self):
+        """G3 round-14 P1: the S2.8 #1 shared whole-boot deadline starts
+        BEFORE the S2.1 main_healthy probe — the probe is part of
+        'main + N healthy <= boot_target_s', so its (up to 5 s) cost
+        lives INSIDE the budget, not on top of it. Pin the ordering:
+        record the monotonic() time inside the mocked main_healthy; the
+        boot_deadline_s passed to spawn_sequence must satisfy
+        deadline - boot_target_s <= probe_time (i.e. it was computed
+        first)."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        probe_time: list[float] = []
+        deadline_seen: list[float] = []
+
+        def fake_main_healthy(endpoint, timeout=5.0):
+            probe_time.append(time.monotonic())
+            return True
+
+        def fake_spawn_sequence(*args, **kwargs):
+            deadline_seen.append(float(kwargs["boot_deadline_s"]))
+            return (mgr.EXIT_OK, [0], "full load: 1 instance(s) spawned", {0: 0})
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(os.environ, self._env(td), clear=False),
+            mock.patch.object(mgr, "load_config", return_value=cfg),
+            mock.patch.object(mgr, "read_total_gb", return_value=121.6),
+            mock.patch.object(
+                mgr, "main_used_gb", return_value=(76.4, "recorded footprint")
+            ),
+            mock.patch.object(mgr, "main_healthy", side_effect=fake_main_healthy),
+            mock.patch.object(
+                mgr,
+                "spawn_sequence",
+                side_effect=fake_spawn_sequence,
+            ),
+            mock.patch.object(mgr, "write_health"),
+            mock.patch.object(mgr, "notify_sd"),
+            # run_probe_loop re-probes main every cycle (it would add
+            # extra probe_time entries); the settle path is out of
+            # scope for this ordering pin.
+            mock.patch.object(mgr, "run_probe_loop", return_value=mgr.EXIT_OK),
+        ):
+            rc = mgr.main([])
+        self.assertEqual(rc, mgr.EXIT_OK)
+        self.assertEqual(len(probe_time), 1)
+        self.assertEqual(len(deadline_seen), 1)
+        start_of_budget = deadline_seen[0] - cfg["boot_target_s"]
+        self.assertLessEqual(
+            start_of_budget,
+            probe_time[0],
+            "the shared boot deadline must start BEFORE the main probe "
+            "(S2.8 #1: 'main + N healthy' — the probe is inside the "
+            "budget, not after it)",
+        )
+
     def test_settle_run_sends_ready_1_before_settle_window(self):
         """G3 round-5 P1: a --settle boot (instances or main-only) exits 0
         after the settle window — but it still sends READY=1 BEFORE the
@@ -675,6 +731,53 @@ class TestAllocationTier(unittest.TestCase):
             self.assertEqual(mgr.read_free_gb(), 42.0)
         finally:
             mgr._mem_available_gb = real
+
+    def test_mem_available_gb_bounded_raises_timeout_on_wedged_reader(self):
+        """G3 round-14 P0: the S1.4 '5 s timeout per probe' is ENFORCED,
+        not nominal — a wedged reader must raise TimeoutError at the cap
+        (the pre-r14 docstring admitted the bound was nominal; a wedged
+        /proc read would have deadlocked the boot, violating S1.4's
+        'wedged probe must never deadlock the manager')."""
+        import threading as _threading
+
+        gate = _threading.Event()
+
+        def wedged():
+            gate.wait(60)  # simulates a stuck /proc read
+
+        real = mgr._mem_available_gb
+        old_cap = mgr.FREE_PROBE_TIMEOUT_S
+        mgr._mem_available_gb = wedged
+        mgr.FREE_PROBE_TIMEOUT_S = 0.2  # short for the hermetic run
+        try:
+            t0 = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                mgr._mem_available_gb_bounded()
+            elapsed = time.monotonic() - t0
+        finally:
+            mgr._mem_available_gb = real
+            mgr.FREE_PROBE_TIMEOUT_S = old_cap
+            gate.set()  # release the wedged thread
+        self.assertLessEqual(elapsed, 2.0, "the cap must fire, not wait for the reader")
+
+    def test_read_free_gb_timeout_counts_as_a_failed_probe(self):
+        """G3 round-14 P0: a TimeoutError from the bounded reader goes
+        through the SAME retry-once-then-zero path as an OSError —
+        one probe + one retry, then free = 0 (S1.4)."""
+        calls = []
+
+        def wedged():
+            calls.append(1)
+            raise TimeoutError("wedged (injected)")
+
+        real = mgr._mem_available_gb
+        mgr._mem_available_gb = wedged
+        try:
+            free = mgr.read_free_gb()
+        finally:
+            mgr._mem_available_gb = real
+        self.assertEqual(free, 0.0, "second timeout must treat free as 0")
+        self.assertEqual(len(calls), 2, "one probe + one retry, no more")
 
 
 # --------------------------------------------------------------------------

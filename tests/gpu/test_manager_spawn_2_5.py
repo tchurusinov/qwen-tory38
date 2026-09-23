@@ -252,6 +252,16 @@ def _instance_unit_text(
     )
 
 
+def _count_from_template() -> int:
+    """instances.count from the engine YAML (G3 PR #10 r14 P2: the @gpu
+    test is written for exactly 2 instances — the precondition asserts
+    this so a template count bump fails fast, not as a silent drift)."""
+    text = ENGINE_YAML.read_text()
+    m = re.search(r"(?m)^[ \t]*count:[ \t]*(\d+)", text)
+    assert m, "instances.count not found in the template"
+    return int(m.group(1))
+
+
 def _ctx_kv_from_template() -> tuple[int, str, int]:
     text = ENGINE_YAML.read_text()
 
@@ -312,6 +322,19 @@ class TestManagerSpawnLive(unittest.TestCase):
             "ports 30101/30102 busy — leftover container?",
         )
         self.assertTrue(_no_bonsai_containers(), "stale bonsai2-server containers")
+        # G3 PR #10 r14 P2: the test is written for EXACTLY 2 instances
+        # (2 user units, ports 30101/30102, 2x the pool check above). A
+        # template `count` bump to >=3 would let the manager grant N'=2
+        # (truncated by the pool check) while this test still asserts
+        # 'full load: 2 instance(s)' — a silent drift. Guard the count
+        # at precondition time: fail fast with a clear message instead.
+        self.assertEqual(
+            _count_from_template(),
+            2,
+            "engine YAML instances.count != 2 — this @gpu test installs "
+            "exactly 2 units/ports; update it (or the pool check) if "
+            "the template count changes",
+        )
         # A stray USER-scope bonsai2-sglang.service (e.g. left by a manual
         # run) would re-run the manager on boot and race the units this
         # test installs — assert it is absent and remove it in finally.
