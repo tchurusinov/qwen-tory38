@@ -531,6 +531,10 @@ class TestMainExitCodes(unittest.TestCase):
             # extra probe_time entries); the settle path is out of
             # scope for this ordering pin.
             mock.patch.object(mgr, "run_probe_loop", return_value=mgr.EXIT_OK),
+            # MAP 2.9: the measured-boot write-back targets the serving
+            # yaml — patch it so the tracked template is not rewritten
+            # by this hermetic ordering pin.
+            mock.patch.object(mgr, "write_boot_target_s", return_value=True),
         ):
             rc = mgr.main([])
         self.assertEqual(rc, mgr.EXIT_OK)
@@ -586,6 +590,10 @@ class TestMainExitCodes(unittest.TestCase):
                 mock.patch.object(mgr, "write_health", side_effect=fake_write_health),
                 mock.patch.object(mgr, "notify_sd", side_effect=fake_notify),
                 mock.patch.object(mgr, "run_probe_loop", return_value=0),
+                # MAP 2.9: the measured-boot write-back targets the
+                # serving yaml — patch it so the tracked template is not
+                # rewritten by this hermetic settle test.
+                mock.patch.object(mgr, "write_boot_target_s", return_value=True),
             ):
                 rc = mgr.main(["--settle", "0.1"])
         finally:
@@ -757,6 +765,23 @@ class TestAllocationTier(unittest.TestCase):
         # ... but grants free = 12.0.
         granted, _, _ = mgr.allocation_tier(gate, lambda: 12.0)
         self.assertTrue(granted)
+
+    def test_tier_pre_charge_reduces_available(self):
+        """G3 PR#11 r1 P1: the S3.2 reload loop charges each in-pass start
+        against the shared pool (pre_charge_gb), the way spawn_sequence's
+        post-spawn re-read does at boot. A static pool that is enough for
+        ONE instance must reject the second target once the first start
+        is charged against it."""
+        need = 15.08
+        # Pool is enough for exactly one instance.
+        granted, _, _ = mgr.allocation_tier(need, lambda: 15.10, pre_charge_gb=0.0)
+        self.assertTrue(granted, "first target: free >= need")
+        # After the first start is charged, the pool drops below need.
+        granted2, _, detail = mgr.allocation_tier(
+            need, lambda: 15.10, pre_charge_gb=need
+        )
+        self.assertFalse(granted2, "second target: free - in-pass charge < need")
+        self.assertIn("in-pass charge", detail, "the detail names the in-pass charge")
 
     def test_read_free_gb_retries_once_then_zero(self):
         """S1.4: '5 s timeout per probe, one retry; on a second timeout
@@ -1019,36 +1044,39 @@ class TestSpawnSequence(unittest.TestCase):
         port_base = int(cfg["port_base"])
         start_rc = {0: 1, 1: 0}
         spawned = [0, 1]
-        # main()'s first-health.json state build (reproduced verbatim):
+        # main()'s first-health.json state build (initial_states):
         # start_rc != 0 -> bfailed, else a probe.
-        states = []
-        for i in spawned:
-            if start_rc.get(i, 0) != 0:
-                states.append("bfailed")
-            else:
-                states.append("healthy")  # i=1's probe: healthy
+        with mock.patch.object(
+            mgr,
+            "instance_healthy",
+            side_effect=lambda port, a, k: port == port_base + 1,
+        ):
+            states = mgr.initial_states(spawned, start_rc, cfg)
         self.assertEqual(states, ["bfailed", "healthy"])
         self.assertEqual(mgr.stack_summary(states), "degraded")
-        # i=0's port dead, i=1's port healthy: run several cycles.
+        # i=0's port dead, i=1's port healthy: run several cycles on the
+        # steady-loop Runtime (MAP 2.6 replaced the skeleton's
+        # `states`-list refresh with per-instance entries BY INDEX).
+        runtime = mgr.Runtime(cfg, spawned, states)
         with mock.patch.object(
             mgr,
             "instance_healthy",
             side_effect=lambda port, a, k: port == port_base + 1,
         ):
             for _ in range(3):
-                states = mgr._refresh_states(cfg, spawned, states)
+                mgr._refresh_states(runtime, list(runtime.running))
         self.assertEqual(
-            states[1],
+            runtime.entries[1].state,
             "healthy",
             "a healthy instance after a failed i=0 start must NOT be masked",
         )
         self.assertEqual(
-            states[0],
+            runtime.entries[0].state,
             "bfailed",
             "a bfailed start stays bfailed on probe misses (only a fresh "
             "healthy probe clears it; MAP 2.6 restarts it)",
         )
-        self.assertEqual(mgr.stack_summary(states), "degraded")
+        self.assertEqual(mgr.stack_summary(runtime.states_for_health()), "degraded")
 
     def test_main_healthy_4xx_semantics(self):
         """G3 round-11 P1: main_healthy treats a moved/removed /v1/models
@@ -1144,6 +1172,905 @@ class TestSpawnSequence(unittest.TestCase):
         # 1e-6 GB = ~1 MiB of slack, still 3+ orders of magnitude below
         # any realistic constant change.
         self.assertAlmostEqual(need, 15.078536032, places=6)
+
+
+# --------------------------------------------------------------------------
+# MAP 2.6 — S2.2 escalation (two-fail -> degraded, five-fail -> restart)
+# --------------------------------------------------------------------------
+class TestEscalation(unittest.TestCase):
+    """2.6 / S2.2: `Two consecutive fails -> degraded; five -> restart
+    attempt.` The steady-loop per-instance state machine drives it."""
+
+    def _cfg(self):
+        return mgr.load_config(ENGINE_YAML, SERVING_YAML)
+
+    def _runtime(self, cfg):
+        return mgr.Runtime(cfg, [0], ["healthy"])
+
+    def test_two_consecutive_fails_degrades(self):
+        """A single miss does NOT degrade (the S2.2 two-consecutive rule);
+        a second consecutive miss does (health -> degraded)."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        with mock.patch.object(mgr, "instance_healthy", return_value=False):
+            mgr._refresh_states(rt, [0])  # miss 1
+        self.assertEqual(rt.entries[0].state, "healthy")
+        self.assertEqual(rt.entries[0].fails, 1)
+        with mock.patch.object(mgr, "instance_healthy", return_value=False):
+            mgr._refresh_states(rt, [0])  # miss 2
+        self.assertEqual(rt.entries[0].state, "degraded")
+        self.assertEqual(rt.entries[0].fails, 2)
+
+    def test_healthy_probe_resets_the_fail_counter(self):
+        """A healthy probe resets `fails` to 0 (the rule counts
+        CONSECUTIVE fails; a recovering instance never reaches the streak)."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        with mock.patch.object(mgr, "instance_healthy", return_value=False):
+            mgr._refresh_states(rt, [0])
+        self.assertEqual(rt.entries[0].fails, 1)
+        with mock.patch.object(mgr, "instance_healthy", return_value=True):
+            mgr._refresh_states(rt, [0])
+        self.assertEqual(rt.entries[0].state, "healthy")
+        self.assertEqual(rt.entries[0].fails, 0)
+
+    def test_five_fails_issues_a_restart(self):
+        """fails >= RESTART_FAILS (5) + no systemd-side restart -> the
+        manager issues `systemctl restart bonsai2-server@i` and counts it
+        in the instance's restart budget (S2.5 / global #5)."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        rt.entries[0].fails = 5
+        rt.entries[0].state = "degraded"
+        restarts = []
+        with (
+            mock.patch.object(mgr, "instance_healthy", return_value=False),
+            mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]),
+        ):
+            mgr.check_escalation(
+                rt,
+                1000.0,
+                base=["systemctl"],
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=0\n"),
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+        self.assertEqual(restarts, [0], "the five-fail restart is issued")
+        self.assertEqual(rt.entries[0].restarts, 1)
+        self.assertEqual(rt.entries[0].state, "degraded")
+
+    def test_systemd_side_restart_is_deferred(self):
+        """If the unit already restarted on ITS OWN since the streak began
+        (NRestarts incremented, the unit's Restart=on-failure already acted),
+        the manager defers — no double restart, the streak resets."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        rt.entries[0].fails = 5
+        rt.entries[0].state = "degraded"
+        rt.entries[0].last_nrestarts = 0  # baseline at streak start
+        restarts = []
+        with (
+            mock.patch.object(mgr, "instance_healthy", return_value=False),
+            mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]),
+        ):
+            mgr.check_escalation(
+                rt,
+                1000.0,
+                base=["systemctl"],
+                # systemd itself bumped NRestarts to 1 since the baseline
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=1\n"),
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+        self.assertEqual(restarts, [], "deferred — no manager restart")
+        self.assertEqual(rt.entries[0].restarts, 0)
+        self.assertEqual(rt.entries[0].fails, 0)
+
+    def test_baseline_frozen_after_streak_start(self):
+        """G3 PR#11 r1 P1: the NRestarts baseline is captured ONCE at the
+        streak start (fails 0 -> 1) and NOT re-advanced on later
+        sub-threshold cycles. A systemd-side restart that lands while
+        fails is still < RESTART_FAILS must still be caught by the defer
+        check at the threshold — so the baseline stays at the streak-start
+        value, not the post-restart value."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        restarts = []
+
+        def restart(i, base):
+            restarts.append(i)
+            return 0
+
+        # streak start: fails 0 -> 1, baseline -1 -> captured (NRestarts=7)
+        rt.entries[0].fails = 1
+        with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+            mgr.check_escalation(
+                rt,
+                1000.0,
+                base=["systemctl"],
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=7\n"),
+                restart=restart,
+                log=lambda *a: None,
+            )
+        self.assertEqual(
+            rt.entries[0].last_nrestarts, 7, "baseline captured at streak start"
+        )
+
+        # later sub-threshold cycle: baseline must NOT be re-read/advanced
+        rt.entries[0].fails = 3
+        with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+            mgr.check_escalation(
+                rt,
+                1010.0,
+                base=["systemctl"],
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=8\n"),
+                restart=restart,
+                log=lambda *a: None,
+            )
+        self.assertEqual(
+            rt.entries[0].last_nrestarts,
+            7,
+            "baseline frozen at the streak-start value (not advanced mid-streak)",
+        )
+        # at the threshold: systemd already restarted (8 > 7) -> defer
+        rt.entries[0].fails = 5
+        with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+            mgr.check_escalation(
+                rt,
+                1020.0,
+                base=["systemctl"],
+                unit_show=lambda *a, **k: mock.Mock(stdout="NRestarts=8\n"),
+                restart=restart,
+                log=lambda *a: None,
+            )
+        self.assertEqual(restarts, [], "systemd-side restart mid-streak is deferred")
+
+
+# --------------------------------------------------------------------------
+# MAP 2.7 — S2.4 N=0 PTQ1_0 fallback + ctx-halve retry + bookkeeping
+# --------------------------------------------------------------------------
+class TestFallback(unittest.TestCase):
+    """2.7 / S2.4: `install retries once with the PTQ1_0 fallback` at its
+    footprint; a ctx-halve retry on an allocation-tier fail; the quant +
+    reduced ctx recorded in subagent-engine.yaml."""
+
+    def _cfg(self):
+        return mgr.load_config(ENGINE_YAML, SERVING_YAML)
+
+    def test_fallback_budget_is_ptq1_footprint_plus_5pct(self):
+        """S2.4 verbatim: the PTQ1_0 budget is the formula footprint
+        (PTQ1_0 weights + the unchanged q4_0 KV at the same ctx/slots) +
+        the S1.4 5% margin — ~13.46 GB, NOT floored at the PQ2_0 cap."""
+        cfg = self._cfg()
+        fb_fp = vram.instance_footprint_gb(
+            cfg["fallback_size_bytes"] / 1e9,
+            int(cfg["slots"]),
+            int(cfg["ctx_size"]),
+            mgr.KV_PER_SLOT_PER_TOKEN_GB[cfg["kv_cache"]],
+        )
+        self.assertAlmostEqual(mgr.fallback_footprint_gb(cfg), fb_fp)
+        self.assertAlmostEqual(mgr.fallback_budget_gb(cfg), fb_fp * 1.05, places=6)
+        # the fallback budget is strictly smaller than the PQ2_0 cap
+        self.assertLess(mgr.fallback_budget_gb(cfg), float(cfg["budget_gb"]))
+
+    def test_fallback_quant_available(self):
+        cfg = self._cfg()
+        self.assertTrue(mgr.fallback_quant_available(cfg))
+        cfg2 = dict(cfg)
+        cfg2["fallback_size_bytes"] = None
+        self.assertFalse(mgr.fallback_quant_available(cfg2))
+
+    def _tmp_engine_yaml(self):
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        os.close(fd)
+        Path(path).write_text(ENGINE_YAML.read_text())
+        return Path(path)
+
+    def test_record_quant_in_use_is_surgical(self):
+        p = self._tmp_engine_yaml()
+        try:
+            self.assertTrue(mgr.record_quant_in_use(p, "PTQ1_0", log=lambda *a: None))
+            text = p.read_text()
+            self.assertIn("quant_in_use: PTQ1_0", text)
+            # idempotent + replaces the previous marker, not a duplicate
+            self.assertTrue(mgr.record_quant_in_use(p, "PTQ1_0", log=lambda *a: None))
+            self.assertEqual(p.read_text().count("quant_in_use:"), 1)
+        finally:
+            p.unlink(missing_ok=True)
+
+    def test_record_ctx_in_use_rewrites_the_instances_key(self):
+        p = self._tmp_engine_yaml()
+        try:
+            self.assertTrue(mgr.record_ctx_in_use(p, 131072, log=lambda *a: None))
+            text = p.read_text()
+            self.assertIn("ctx_size: 131072", text)
+            # still valid YAML with the new value
+            import yaml
+
+            data = yaml.safe_load(text)
+            self.assertEqual(data["instances"]["ctx_size"], 131072)
+        finally:
+            p.unlink(missing_ok=True)
+
+    def test_record_ctx_in_use_matches_unspaced_key(self):
+        """G3 PR#11 r1 P2: `ctx_size:262144` (no space after the colon,
+        valid YAML) must be matched by the replace path — otherwise the
+        replace misses and the insert path appends a DUPLICATE ctx_size
+        key under instances:."""
+        import tempfile
+
+        d = Path(tempfile.mkdtemp())
+        try:
+            p = d / "eng.yaml"
+            p.write_text("instances:\n  ctx_size:262144\n  count: 2\n")
+            self.assertTrue(mgr.record_ctx_in_use(p, 131072, log=lambda *a: None))
+            text = p.read_text()
+            self.assertEqual(
+                text.count("ctx_size:"), 1, f"duplicate ctx_size key: {text!r}"
+            )
+            import yaml
+
+            self.assertEqual(yaml.safe_load(text)["instances"]["ctx_size"], 131072)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_rewrite_unit_model_and_memory_are_surgical(self):
+        import tempfile
+
+        d = Path(tempfile.mkdtemp())
+        try:
+            unit = d / "u.service"
+            unit.write_text(
+                "[Service]\n"
+                "ExecStart=/usr/bin/docker run --rm "
+                "--memory 14.78g --memory-swap 14.78g "
+                "/opt/bonsai2/bin/llama-server "
+                "--model /opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf "
+                "--ctx-size 262144 \n"
+            )
+            self.assertTrue(
+                mgr.rewrite_unit_model(
+                    unit, "bonsai-2-27b-gguf-PTQ1_0.gguf", log=lambda *a: None
+                )
+            )
+            self.assertTrue(
+                mgr.rewrite_unit_memory(unit, 14.78, 13.46, log=lambda *a: None)
+            )
+            text = unit.read_text()
+            self.assertIn(
+                "--model /opt/bonsai2/models/bonsai-2-27b-gguf-PTQ1_0.gguf",
+                text,
+            )
+            self.assertNotIn("PQ2_0", text)
+            self.assertIn("--memory 13.46g", text)
+            self.assertIn("--memory-swap 13.46g", text)
+            self.assertNotIn("--memory 14.78g", text)
+            # the ctx-size flag is untouched by these two rewrites
+            self.assertIn("--ctx-size 262144", text)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_fallback_retry_spawns_at_default_ctx(self):
+        """When the S1.4 tier grants the fallback instance at the default
+        ctx, fallback_retry returns 0 + [0] and records the quant."""
+        cfg = self._cfg()
+        p = self._tmp_engine_yaml()
+        spawned_calls = []
+
+        def fake_spawn(c, n, need, **kw):
+            spawned_calls.append((n, round(need, 3)))
+            return (
+                mgr.EXIT_OK,
+                [0],
+                "full load: 1 instance(s) spawned",
+                {0: 0},
+            )
+
+        try:
+            with (
+                mock.patch.object(mgr, "_instance_unit_path", return_value=p),
+                mock.patch.object(mgr, "rewrite_unit_model", return_value=True),
+                mock.patch.object(mgr, "rewrite_unit_memory", return_value=True),
+            ):
+                rc, spawned, _detail, _start_rc, ctx = mgr.fallback_retry(
+                    cfg, p, ["systemctl"], 1000.0, spawn=fake_spawn, log=lambda *a: None
+                )
+        finally:
+            p.unlink(missing_ok=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(spawned, [0])
+        self.assertEqual(ctx, int(cfg["ctx_size"]))
+        self.assertEqual(len(spawned_calls), 1)
+
+    def test_fallback_retry_ctx_halves_on_tier_fail(self):
+        """S2.4: a tier fail at the default ctx -> the ctx is halved
+        (multiple of 8192, floor 8192) and the tier re-run; a grant at the
+        reduced ctx returns 0 + [0] with ctx_reduced and records the ctx."""
+        cfg = self._cfg()
+        p = self._tmp_engine_yaml()
+        needs = []
+
+        def fake_spawn(c, n, need, **kw):
+            needs.append(round(need, 3))
+            if len(needs) == 1:
+                # first attempt (default ctx) defeats the tier at i=0
+                return (mgr.EXIT_VRAM_OOM, [], "ERR_VRAM_OOM: short", {})
+            # second attempt (halved ctx) grants
+            return (mgr.EXIT_OK, [0], "full load: 1 instance(s)", {0: 0})
+
+        try:
+            with (
+                mock.patch.object(mgr, "_instance_unit_path", return_value=p),
+                mock.patch.object(mgr, "rewrite_unit_model", return_value=True),
+                mock.patch.object(mgr, "rewrite_unit_memory", return_value=True),
+                mock.patch.object(mgr, "rewrite_unit_ctx", return_value=True),
+            ):
+                rc, spawned, _detail, _start_rc, ctx = mgr.fallback_retry(
+                    cfg, p, ["systemctl"], 1000.0, spawn=fake_spawn, log=lambda *a: None
+                )
+        finally:
+            text = p.read_text() if p.exists() else ""
+            p.unlink(missing_ok=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(spawned, [0])
+        self.assertEqual(ctx, mgr.halve_ctx(int(cfg["ctx_size"])))
+        self.assertEqual(len(needs), 2)
+        # the reduced ctx was recorded in the engine yaml
+        self.assertIn(f"ctx_size: {mgr.halve_ctx(int(cfg['ctx_size']))}", text)
+
+    def test_fallback_retry_exit_4_when_both_ctx_fail(self):
+        """If BOTH the default and the halved ctx are defeated by the tier,
+        the S1.4 ERR_VRAM_OOM exit 4 applies (S2.4 live-margin OOM)."""
+        cfg = self._cfg()
+        p = self._tmp_engine_yaml()
+        calls = []
+
+        def fake_spawn(c, n, need, **kw):
+            calls.append(1)
+            return (mgr.EXIT_VRAM_OOM, [], "ERR_VRAM_OOM: short", {})
+
+        try:
+            with (
+                mock.patch.object(mgr, "_instance_unit_path", return_value=p),
+                mock.patch.object(mgr, "rewrite_unit_model", return_value=True),
+                mock.patch.object(mgr, "rewrite_unit_memory", return_value=True),
+                mock.patch.object(mgr, "rewrite_unit_ctx", return_value=True),
+            ):
+                rc, spawned, _detail, _start_rc, _ctx = mgr.fallback_retry(
+                    cfg, p, ["systemctl"], 1000.0, spawn=fake_spawn, log=lambda *a: None
+                )
+        finally:
+            p.unlink(missing_ok=True)
+        self.assertEqual(rc, mgr.EXIT_VRAM_OOM)
+        self.assertEqual(spawned, [])
+        self.assertEqual(len(calls), 2, "default + halved ctx, then give up")
+
+
+# --------------------------------------------------------------------------
+# MAP 2.8 — S2.5 drift watch (30 s sustained cgroup pressure -> ctx halve)
+# --------------------------------------------------------------------------
+class TestDriftWatch(unittest.TestCase):
+    """2.8 / S2.5: cgroup pressure sustained > 30 s over the --memory cap
+    -> halve that instance's ctx + restart in place; bunloaded never
+    re-spawned; no context-grow."""
+
+    def _cfg(self):
+        return mgr.load_config(ENGINE_YAML, SERVING_YAML)
+
+    def _runtime(self, cfg):
+        return mgr.Runtime(cfg, [0], ["healthy"])
+
+    def test_sustained_pressure_halves_and_restarts(self):
+        """Two rechecks over cap, spaced > DRIFT_PRESSURE_S, halve the ctx,
+        rewrite the unit, restart in place, set ctx_reduced, count a
+        restart; the cap is decimal-GB * 1e9 bytes (the S2.2 --memory cap)."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        cap = mgr._drift_cap_bytes(float(cfg["budget_gb"]))
+        rewrites = []
+        restarts = []
+        over = int(float(cfg["budget_gb"]) * 1e9) + 1  # strictly over the cap
+
+        def fake_cgroup_read(path):
+            return over
+
+        def fake_cgroup_path(name):
+            return Path("/sys/fs/cgroup/fake")
+
+        with mock.patch.object(
+            mgr, "_instance_unit_path", return_value=Path("/u.service")
+        ):
+            # recheck 1: over cap -> start the pressure clock (no halve
+            # yet — the 30 s sustained window has just opened)
+            mgr.check_drift(
+                rt,
+                1000.0,
+                cap,
+                base=["systemctl"],
+                cgroup_path=fake_cgroup_path,
+                cgroup_read=fake_cgroup_read,
+                rewrite=lambda u, nc, cc, log=None: rewrites.append(nc) or True,
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+            self.assertIsNotNone(rt.entries[0].pressure_start)
+            self.assertEqual(rt.entries[0].ctx, int(cfg["ctx_size"]))  # not yet
+            # recheck 2 (> 30 s later): still over cap -> the halve fires
+            mgr.check_drift(
+                rt,
+                1000.0 + mgr.DRIFT_PRESSURE_S + 1,
+                cap,
+                base=["systemctl"],
+                cgroup_path=fake_cgroup_path,
+                cgroup_read=fake_cgroup_read,
+                rewrite=lambda u, nc, cc, log=None: rewrites.append(nc) or True,
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+        self.assertEqual(rt.entries[0].ctx, mgr.halve_ctx(int(cfg["ctx_size"])))
+        self.assertTrue(rt.entries[0].ctx_reduced)
+        self.assertEqual(restarts, [0])
+        self.assertEqual(len(rewrites), 1)
+
+    def test_pressure_below_cap_resets_the_clock(self):
+        """A reading at/below the cap resets the pressure clock — the
+        `> 30 s sustained` rule needs the over-cap condition CONTINUOUS."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        cap = mgr._drift_cap_bytes(float(cfg["budget_gb"]))
+        under = int(float(cfg["budget_gb"]) * 1e9) - 1
+        with mock.patch.object(
+            mgr, "_instance_unit_path", return_value=Path("/u.service")
+        ):
+            # start over cap...
+            mgr.check_drift(
+                rt,
+                1000.0,
+                cap,
+                base=["systemctl"],
+                cgroup_path=lambda n: Path("/x"),
+                cgroup_read=lambda p: under + 2,
+                rewrite=lambda *a, **k: True,
+                restart=lambda *a, **k: 0,
+                log=lambda *a: None,
+            )
+            self.assertIsNotNone(rt.entries[0].pressure_start)
+            # ...then drop back under cap -> the clock resets
+            mgr.check_drift(
+                rt,
+                1000.0 + 5,
+                cap,
+                base=["systemctl"],
+                cgroup_path=lambda n: Path("/x"),
+                cgroup_read=lambda p: under,
+                rewrite=lambda *a, **k: True,
+                restart=lambda *a, **k: 0,
+                log=lambda *a: None,
+            )
+        self.assertIsNone(rt.entries[0].pressure_start)
+        self.assertEqual(rt.entries[0].ctx, int(cfg["ctx_size"]))
+
+    def test_bunloaded_instance_is_not_rechecked(self):
+        """`bunloaded` instances are not in runtime.running — the drift
+        watch never re-spawns / re-checks an explicitly-unloaded index."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        rt.entries[0].state = "bunloaded"
+        cgroup_calls = []
+        with mock.patch.object(
+            mgr, "_instance_unit_path", return_value=Path("/u.service")
+        ):
+            mgr.check_drift(
+                rt,
+                1000.0,
+                1,
+                base=["systemctl"],
+                cgroup_path=lambda n: cgroup_calls.append(n) or Path("/x"),
+                cgroup_read=lambda p: 99999999999,
+                rewrite=lambda *a, **k: True,
+                restart=lambda *a, **k: 0,
+                log=lambda *a: None,
+            )
+        self.assertEqual(cgroup_calls, [], "bunloaded index not cgroup-read")
+
+    def test_drift_at_ctx_floor_is_a_noop_no_restart(self):
+        """G3 PR#11 r1 P2: when the ctx is already at the floor, the
+        sustained pressure window fires but the halve is a no-op — no
+        unit rewrite, no in-place restart (no restart-budget count
+        burned); the pressure clock still resets."""
+        cfg = self._cfg()
+        rt = self._runtime(cfg)
+        rt.entries[0].ctx = mgr.CTX_FLOOR  # already at the floor
+        cap = mgr._drift_cap_bytes(float(cfg["budget_gb"]))
+        over = int(float(cfg["budget_gb"]) * 1e9) + 1
+        rewrites = []
+        restarts = []
+        with mock.patch.object(
+            mgr, "_instance_unit_path", return_value=Path("/u.service")
+        ):
+            mgr.check_drift(
+                rt,
+                1000.0,
+                cap,
+                base=["systemctl"],
+                cgroup_path=lambda n: Path("/x"),
+                cgroup_read=lambda p: over,
+                rewrite=lambda u, nc, cc, log=None: rewrites.append(nc) or True,
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+            # > 30 s later, still over cap: the window fires but the
+            # floor makes the halve a no-op.
+            mgr.check_drift(
+                rt,
+                1000.0 + mgr.DRIFT_PRESSURE_S + 1,
+                cap,
+                base=["systemctl"],
+                cgroup_path=lambda n: Path("/x"),
+                cgroup_read=lambda p: over,
+                rewrite=lambda u, nc, cc, log=None: rewrites.append(nc) or True,
+                restart=lambda i, base: restarts.append(i) or 0,
+                log=lambda *a: None,
+            )
+        self.assertEqual(rewrites, [], "no ctx rewrite at the floor")
+        self.assertEqual(restarts, [], "no in-place restart at the floor")
+        self.assertEqual(rt.entries[0].restarts, 0, "no restart-budget count")
+        self.assertEqual(rt.entries[0].ctx, mgr.CTX_FLOOR)
+        self.assertIsNone(rt.entries[0].pressure_start, "the pressure clock reset")
+
+
+# --------------------------------------------------------------------------
+# MAP 2.9 — S2.6 serving.yaml writer (measured boot_target_s write-back)
+# --------------------------------------------------------------------------
+class TestServingWriter(unittest.TestCase):
+    """2.9 / S2.6: `boot_target_s` is measured, not guessed — written back
+    to serving.yaml from the measured boot (the S2.7 reboot test's T)."""
+
+    def test_write_boot_target_s_rewrites_the_key(self):
+        import tempfile
+
+        d = Path(tempfile.mkdtemp())
+        try:
+            sy = d / "serving.yaml"
+            sy.write_text(
+                "main_stack:\n  container: qwen38-sglang\n"
+                "  endpoint: http://localhost:30001\n  footprint_gb: 76.4\n"
+                "os_reserved_gb: 8.0\nboot_target_s: 180   # measured\n"
+            )
+            self.assertTrue(mgr.write_boot_target_s(sy, 61.4, log=lambda *a: None))
+            text = sy.read_text()
+            self.assertIn("boot_target_s: 61", text)
+            self.assertNotIn("boot_target_s: 180", text)
+            # idempotent + no duplicate key
+            mgr.write_boot_target_s(sy, 62.0, log=lambda *a: None)
+            self.assertEqual(sy.read_text().count("boot_target_s:"), 1)
+            import yaml
+
+            data = yaml.safe_load(sy.read_text())
+            self.assertEqual(data["boot_target_s"], 62)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_write_boot_target_s_missing_file_is_not_fatal(self):
+        self.assertFalse(
+            mgr.write_boot_target_s(
+                Path("/nonexistent/bonsai2/serving.yaml"), 50.0, log=lambda *a: None
+            )
+        )
+
+
+# --------------------------------------------------------------------------
+# MAP 2.10 — S3.2 unload/reload manager-level semantics (control/ queue)
+# --------------------------------------------------------------------------
+class TestControlQueue(unittest.TestCase):
+    """2.10 / S3.2: the manager is the sole pool actor — it drains the
+    control/ request queue (unload -> stop + bunloaded + user_unloaded;
+    reload -> S1.4 tier + start + health re-probe, partial on a tier
+    fail) and writes a timestamped ack the command polls."""
+
+    def _cfg(self):
+        return mgr.load_config(ENGINE_YAML, SERVING_YAML)
+
+    def _req(self, d, rtype, targets, rid="req1"):
+        f = d / f"{rid}.json"
+        f.write_text(
+            json.dumps({"type": rtype, "instances": targets, "request_id": rid})
+        )
+        return f
+
+    def test_unload_all_stops_and_marks_bunloaded(self):
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "unload", "all", "u1")
+            stopped = []
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    stop=lambda i, base: stopped.append(i) or 0,
+                    wait_down=lambda *a, **k: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(sorted(stopped), [0, 1])
+            self.assertEqual(rt.entries[0].state, "bunloaded")
+            self.assertEqual(rt.entries[1].state, "bunloaded")
+            self.assertEqual(rt.spawned, [])
+            self.assertEqual(rt.main_only_reason, "user_unloaded")
+            ack = json.loads((d / "control" / "ack-u1.json").read_text())
+            self.assertEqual(sorted(ack["unloaded"]), [0, 1])
+            self.assertEqual(ack["state"], "ok")
+            # the request was marked done
+            self.assertTrue((d / "control" / "u1.json.done").exists())
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_reload_grants_through_the_tier_and_reprobes(self):
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        # unload both first
+        for i in (0, 1):
+            rt.entries[i].state = "bunloaded"
+        rt.spawned = []
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "reload", "all", "r1")
+            started = []
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    free_reader=lambda: 100.0,
+                    start=lambda i, base: started.append(i) or 0,
+                    wait_healthy=lambda i, c, dl: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(sorted(started), [0, 1])
+            self.assertEqual(rt.entries[0].state, "healthy")
+            self.assertIsNone(rt.main_only_reason)
+            ack = json.loads((d / "control" / "ack-r1.json").read_text())
+            self.assertEqual(sorted(ack["reloaded"]), [0, 1])
+            self.assertEqual(ack["state"], "ok")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_reload_partial_on_tier_fail_stays_bunloaded(self):
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        for i in (0, 1):
+            rt.entries[i].state = "bunloaded"
+        rt.spawned = []
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "reload", "all", "rp")
+            # free is enough for ONE instance (need ~15 GB); the real
+            # cgroup would show less free after i=0 starts, so model a
+            # decreasing read (16.0 grants i=0, 10.0 rejects i=1).
+            free_vals = [16.0, 10.0]
+
+            def _free():
+                return free_vals.pop(0) if free_vals else 0.0
+
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    free_reader=_free,
+                    start=lambda i, base: 0,
+                    wait_healthy=lambda i, c, dl: True,
+                    log=lambda *a: None,
+                )
+            # only i=0 is reloaded; i=1 stays bunloaded (the S1.4 partial)
+            self.assertEqual(rt.entries[0].state, "healthy")
+            self.assertEqual(rt.entries[1].state, "bunloaded")
+            ack = json.loads((d / "control" / "ack-rp.json").read_text())
+            self.assertEqual(ack["state"], "partial")
+            self.assertEqual(ack.get("detail"), "WARN_VRAM_SHORTFALL")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_bad_request_gets_an_error_ack(self):
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0], ["healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            f = d / "control" / "bad.json"
+            f.write_text(
+                json.dumps({"type": "bogus", "instances": "all", "request_id": "b1"})
+            )
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control", rt, 1000.0, base=["systemctl"], log=lambda *a: None
+                )
+            ack = json.loads((d / "control" / "ack-b1.json").read_text())
+            self.assertEqual(ack["state"], "error")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_list_of_all_strings_and_bare_int_are_error_acks(self):
+        """G3 PR#11 r1 P0: the mixed-operator validation let a list like
+        ["all"] through (crashing on int("all") after the ack was
+        decided) and rejected a bare int target. The explicit
+        validation: valid = the string "all" OR a list of ints;
+        everything else gets an error ack, the request is marked done,
+        no crash."""
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            for rid, targets in (("la", ["all"]), ("bi", 0)):
+                f = d / "control" / f"{rid}.json"
+                f.write_text(
+                    json.dumps(
+                        {"type": "unload", "instances": targets, "request_id": rid}
+                    )
+                )
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control", rt, 1000.0, base=["systemctl"], log=lambda *a: None
+                )
+            for rid in ("la", "bi"):
+                ack = json.loads((d / "control" / f"ack-{rid}.json").read_text())
+                self.assertEqual(ack["state"], "error", f"{rid}: {ack}")
+                self.assertTrue((d / "control" / f"{rid}.json.done").exists())
+            # nothing was touched
+            self.assertEqual(rt.entries[0].state, "healthy")
+            self.assertEqual(rt.entries[1].state, "healthy")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_unload_unspawned_index_is_a_noop(self):
+        """G3 PR#11 r1 P0: an index the manager never spawned (not in
+        runtime.spawned) is a no-op for that index — no systemctl stop,
+        no state change, not in the ack's unloaded list (the next reload
+        must not have to re-admit an index the manager did not manage)."""
+        import tempfile
+
+        cfg = self._cfg()
+        # only i=0 was spawned; i=1 is configured but not running
+        rt = mgr.Runtime(cfg, [0], ["healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "unload", "all", "u2")
+            stopped = []
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    stop=lambda i, base: stopped.append(i) or 0,
+                    wait_down=lambda *a, **k: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(stopped, [0], "only the spawned index is stopped")
+            self.assertEqual(rt.entries[1].state, "bdown", "unspawned index untouched")
+            ack = json.loads((d / "control" / "ack-u2.json").read_text())
+            self.assertEqual(ack["unloaded"], [0])
+            self.assertEqual(ack["state"], "ok")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_unload_failed_stop_keeps_prior_state(self):
+        """G3 PR#11 r1 P1: a non-zero stop rc means the container may
+        still be running — the manager keeps the prior state (the probe
+        loop re-observes it) instead of believing a failed stop; the
+        index stays in spawned so a later pass can retry."""
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "unload", [0], "u3")
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    stop=lambda i, base: 1,  # the stop did not land
+                    wait_down=lambda *a, **k: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(
+                rt.entries[0].state, "healthy", "state kept on failed stop"
+            )
+            self.assertIn(0, rt.spawned, "index stays spawned for the retry")
+            ack = json.loads((d / "control" / "ack-u3.json").read_text())
+            self.assertNotIn(
+                0, ack.get("unloaded", []), "failed stop not reported unloaded"
+            )
+            self.assertEqual(ack["state"], "ok", "the pass itself completes")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_reload_static_pool_charges_in_pass_starts(self):
+        """G3 PR#11 r1 P1: a reload pass gates each target on the SAME
+        shared pool — a static free reading that fits only ONE instance
+        must grant i=0 and reject i=1 (the in-pass charge), even though
+        the pool is not re-read between targets. (The pre-charge test in
+        TestAllocationTier pins the tier half; this pins the reload
+        loop's use of it end-to-end.)"""
+        import tempfile
+
+        cfg = self._cfg()
+        rt = mgr.Runtime(cfg, [0, 1], ["healthy", "healthy"])
+        for i in (0, 1):
+            rt.entries[i].state = "bunloaded"
+        rt.spawned = []
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "control").mkdir()
+            self._req(d / "control", "reload", "all", "r2")
+            started = []
+            with mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]):
+                mgr.process_control(
+                    d / "control",
+                    rt,
+                    1000.0,
+                    base=["systemctl"],
+                    free_reader=lambda: 15.10,  # static: fits exactly one
+                    start=lambda i, base: started.append(i) or 0,
+                    wait_healthy=lambda i, c, dl: True,
+                    log=lambda *a: None,
+                )
+            self.assertEqual(started, [0], "i=0 reloaded; i=1 rejected by the charge")
+            self.assertEqual(rt.entries[1].state, "bunloaded")
+            ack = json.loads((d / "control" / "ack-r2.json").read_text())
+            self.assertEqual(ack["reloaded"], [0])
+            self.assertEqual(ack["state"], "partial")
+            self.assertEqual(ack.get("detail"), "WARN_VRAM_SHORTFALL")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_wait_port_down_default_is_bounded_at_5s(self):
+        """G3 PR#11 r1 P2: the unload drain defaults to 5 s (the stop is
+        `docker rm -f`, near-instant); a port that never frees must
+        return False around the 5 s cap, not 30 s — the 10 s probe
+        cadence cannot stall 30 s x N behind the drain."""
+        import time as _time
+
+        calls = []
+
+        def slow_check(port):
+            calls.append(_time.monotonic())
+            return False
+
+        t0 = _time.monotonic()
+        out = mgr.wait_port_down(30101, check=slow_check)
+        elapsed = _time.monotonic() - t0
+        self.assertFalse(out)
+        # ~5 s cap: the drain polled until the deadline (poll 0.5 s), not
+        # the old 30 s default.
+        self.assertLess(elapsed, 7.0, f"drain took {elapsed:.1f} s — cap moved?")
+        self.assertGreaterEqual(elapsed, 4.5, f"drain exited early at {elapsed:.1f} s")
 
 
 if __name__ == "__main__":
