@@ -606,6 +606,29 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 6 reviewed + 7 P2s disposed (0 P0/0 P1) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 6 (commit 6e9dc8b, disposition comment pending):
+  0 P0 + 0 P1 + 7 P2 (all "minor, note for later"). DOD met on P0/P1.
+  All 7 P2s disposed (fixed, not just noted): removed 3 vestigial params
+  (`wait_instance_healthy` base, `run_probe_loop` main_ok,
+  `_refresh_states` main_ok — main is re-probed per-cycle in the loop),
+  merged the double failed-start log into one line, annotated
+  `systemctl_state` as a MAP-2.6 forward-hook + fixed its return
+  annotation (`-> dict`, was `-> str`), annotated the unreachable
+  non-settle `return exit_code` (SIGTERM is the real path). P2#6
+  (`StartLimitIntervalSec=300` not in S2.2 spec): the reviewer
+  misread it as @gpu-only — the SYSTEM unit ships it (line 39), so S2.2
+  is amended to record it (spec-follows-code, a 300 s window for 3
+  restarts so a slow two-27 B-load boot doesn't exhaust the burst) +
+  pinned in `test_server_unit_shape`. Hermetic 173/173 OK. @gpu green
+  post-fix (43.3 s, 2 healthy, stack=healthy).
+- next: round-7 review (launching); expect CLEAN (0 P0/0 P1, P2s now all
+  annotated/disposed), then G4 human merge.
+- spec deltas: S2.2 (record StartLimitIntervalSec=300; spec-follows-code,
+  G3 PR #10 round 6 P2). No locked-value moves.
+
 ### 2026-09-23 — G3 loop PR #10: round 5 reviewed + 4 findings disposed (1 P1 fixed, 3 P2 doc-amended/note-only) + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
