@@ -606,6 +606,17 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 15 reviewed — 0 P0/1 P1/2 P2; P1 (boot deadline started AFTER the S2.3 reads — extends r14 P1) + both P2s real, all fixed + pinned (commit 24d801a, @gpu r15 52.2 s)
+
+- **Review: 0 P0 / 1 P1 / 2 P2.**
+  - P1: the S2.8 #1 `boot_deadline_s` was still computed AFTER the S2.3 reads (MemTotal, the main cgroup read incl. its un-bounded `docker inspect`) and the S1.4 footprint computation — r14 had moved only the main probe inside the window. **REAL (extends r14 P1).** FIXED: `boot_deadline_s` now sits immediately after `load_config`, before every boot step (S2.3 reads, S1.4 footprint, S2.1 probe, S2.5 spawn). The r14 pin stays valid as a lower bound. No green-path behavior change — the accounting window only widens.
+  - P2#1: exit-4 (ERR_VRAM_OOM) health doc carried the pre-spawn `main_ok`; the doc is terminal (no probe loop follows), so a main that died during the tier rejection was recorded healthy. **REAL.** FIXED: the exit-4 path re-probes `main_healthy` before `write_health`. Scope check: the N=0 main-only path has the same transient value but the steady probe loop refreshes it next cycle — exit-4 alone was the right scope. New pin: `test_i0_oom_health_document_uses_the_reprobed_main_state` (main_healthy side-effect True→False; asserts ≥2 probes + doc carries `main_healthy: false`).
+  - P2#3: @gpu `assertIn("N'=2", stderr)` matches `N'=20` (substring). **REAL.** FIXED: `assertRegex(r"N'=2(\s|$)")`.
+- **Verified:** 186/186 hermetic OK (185 + the new reprobe pin); ruff check+format clean; gate PASS; commit `24d801a` pushed.
+- **@gpu r15:** 52.2 s manager boot+spawn+settle (free 48.2 GB; 2 instances healthy; stack=healthy), exit 0; no leftover bonsai2 containers.
+- **MAP/PR:** raw + disposition → PR #10 comment 677.
+- **Next:** round 16 confirmation.
+
 ### 2026-09-23 — G3 loop PR #10: round 14 reviewed — 1 P0/1 P1/3 P2; P0 (free-probe 5 s cap nominal → ENFORCED via daemon thread + join(timeout)) + P1 (shared boot deadline started AFTER main_healthy → now BEFORE) REAL + fixed + pinned, P2s closed (commit 51fa6ae)
 - G3 PR #10 (MAP 2.1–2.5). Round 14: 1 P0 / 1 P1 / 3 P2 (raw: /tmp/review-phase2-manager-skeleton-r14.txt; stdout /tmp/review-10-stdout-r14.txt, review.sh rc=0).
   - P0 the S1.4 "5 s timeout per probe" was NOMINAL (docstring admitted it): a wedged /proc/meminfo read would deadlock the boot, violating "wedged probe must never deadlock the manager". REAL — fixed: new `_mem_available_gb_bounded()` = daemon thread + join(FREE_PROBE_TIMEOUT_S) → genuine TimeoutError at the cap; TimeoutError feeds the SAME retry-once-then-zero path as OSError (S1.4). 2 new hermetic tests (wedged reader → TimeoutError ≤ cap; TimeoutError counts as failed probe).
