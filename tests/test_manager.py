@@ -598,6 +598,7 @@ class TestUnitFiles(unittest.TestCase):
         )  # S2.2 verbatim (clean stale container)
         self.assertIn("Restart=on-failure", text)  # S2.2
         self.assertIn("RestartSec=5", text)  # S2.2
+        self.assertIn("StartLimitIntervalSec=300", text)  # S2.2 (300 s window)
         self.assertIn("StartLimitBurst=3", text)  # S2.2 (then bfailed)
         self.assertIn("CPUQuota=64%", text)  # S2.2
         # The template is the placeholder install.sh renders — it must be
@@ -623,7 +624,7 @@ class TestSpawnSequence(unittest.TestCase):
             order.append(f"start-{i}")
             return 0
 
-        def fake_wait(i, cfg, base=None):
+        def fake_wait(i, cfg):
             order.append(f"wait-{i}")
             return True
 
@@ -660,7 +661,7 @@ class TestSpawnSequence(unittest.TestCase):
             15.08,
             free_reader=free_reader,
             systemctl_start=fake_start,
-            wait_healthy=lambda i, cfg, base=None: True,
+            wait_healthy=lambda i, cfg: True,
             log=lambda *_: None,
         )
         self.assertEqual(exit_code, 0, "i > 0 partial load is exit 0 (S1.4)")
@@ -683,7 +684,7 @@ class TestSpawnSequence(unittest.TestCase):
             15.08,
             free_reader=lambda: 5.0,  # free < need on the very first probe
             systemctl_start=fake_start,
-            wait_healthy=lambda i, cfg, base=None: True,
+            wait_healthy=lambda i, cfg: True,
             log=lambda *_: None,
         )
         self.assertEqual(exit_code, 4, "i = 0 allocation fail = exit 4 (S1.4)")
@@ -701,7 +702,7 @@ class TestSpawnSequence(unittest.TestCase):
             15.08,
             free_reader=lambda: 5.0,
             systemctl_start=lambda i, base=None: started.append(i) or 0,
-            wait_healthy=lambda i, cfg, base=None: True,
+            wait_healthy=lambda i, cfg: True,
             log=lambda *_: None,
         )
         self.assertEqual(exit_code, 0)
@@ -721,7 +722,7 @@ class TestSpawnSequence(unittest.TestCase):
             order.append(f"start-{i}")
             return 1 if i == 0 else 0
 
-        def fake_wait(i, cfg, base=None):
+        def fake_wait(i, cfg):
             waits.append(i)
             return True
 

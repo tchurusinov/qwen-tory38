@@ -489,7 +489,11 @@ that a main-stack fix might need.
   `Requires=docker.service`): `ExecStartPre=` `docker rm -f
   bonsai2-server-i` (clean stale container, verbatim the main unit's
   pattern); `Restart=on-failure`, `RestartSec=5`,
-  `StartLimitBurst=3` (then `bfailed`), `CPUQuota=64%` (a ceiling ≈
+  `StartLimitIntervalSec=300`, `StartLimitBurst=3` (then `bfailed` —
+  3 failed starts within a 300 s window; the interval is the shipped
+  unit's explicit window, not systemd's 10 s default, so a slow boot
+  sequence (two 27 B loads) doesn't exhaust the burst; spec delta
+  2026-09-23, G3 PR #10 round 6 P2), `CPUQuota=64%` (a ceiling ≈
   12.8 of this 20-core box's cores — a bound on one instance's
   worst-case hog, not a reserved allocation; the N instances share the
   20 cores by demand alongside the main stack, overridable). The

@@ -551,10 +551,14 @@ def systemctl_start_instance(i: int, base: list[str] | None = None) -> int:
     return r.returncode
 
 
-def systemctl_state(i: int, base: list[str] | None = None) -> str:
-    """`systemctl show -p ...State` for the unit — used to map a unit to
-    the S3.1 instance state (active->healthy pending probe, failed->
-    bfailed, inactive->bdown/bunloaded)."""
+def systemctl_state(i: int, base: list[str] | None = None) -> dict:
+    """`systemctl show -p SubState -p Result` for the unit — maps a unit to
+    the S3.1 instance state (active->healthy pending probe, failed->bfailed,
+    inactive->bdown/bunloaded). FORWARD-HOOK (G3 PR #10 r6 P2): not called
+    by the skeleton's boot/probe paths — the S1.5 bfailed routing comes from
+    the `systemctl start` rc (start_rc), and steady state comes from the port
+    probe. MAP 2.6's restart escalation re-derives a unit's state from
+    `systemctl show` after a restart, which is where this is consumed."""
     unit = f"bonsai2-server@{i}"
     r = subprocess.run(
         (base or systemctl_base()) + ["show", "-p", "SubState", "-p", "Result", unit],
@@ -570,14 +574,15 @@ def systemctl_state(i: int, base: list[str] | None = None) -> str:
     return state
 
 
-def wait_instance_healthy(i: int, cfg: dict, base: list[str] | None = None) -> bool:
+def wait_instance_healthy(i: int, cfg: dict) -> bool:
     """Wait for instance i to reach the S2.2 'healthy' definition, polling
     every HEALTH_PROBE_POLL_S up to `boot_target_s` (S2.5: 'waits each to
     healthy before the next'). Returns True iff it went healthy in time.
 
     Polling is the health probe itself (models + completion), not just a
     unit-state poll: a unit that is 'active' but whose engine is
-    alive-but-stuck is not 'healthy' by S2.2."""
+    alive-but-stuck is not 'healthy' by S2.2. (No systemctl base param —
+    the wait is a port probe, not a unit-state poll; G3 PR #10 r6 P2.)"""
     port = cfg["port_base"] + i
     deadline = time.monotonic() + cfg["boot_target_s"]
     last = False
@@ -706,26 +711,24 @@ def spawn_sequence(
             return EXIT_OK, spawned, f"partial load at i={i}: {detail}", start_rc
         rc = systemctl_start(i, sysctl_base)
         start_rc[i] = rc
+        spawned.append(i)
         if rc != 0:
             # A unit that fails to START (docker missing, port collision the
             # unit can't clear) is not a VRAM condition — S1.5 routes it to
             # the unit's bfailed path. Record it as a spawned index (the
             # start_rc surfaces the failure to the caller for health.json)
-            # but keep going: later instances are independent (S2.1).
-            log(f"i={i} systemctl start rc={rc} (recorded, continuing to next)")
-        spawned.append(i)
-        if start_rc.get(i, 0) != 0:
-            # A failed start is already `bfailed` in health.json (S1.5
-            # routing) — polling its port for up to boot_target_s is
-            # wasted time (the engine is not up; the S2.5 "wait each to
-            # healthy before the next" guarantee is still met because the
-            # NEXT start is gated on this index's bookkeeping, not on a
-            # healthy probe). The MAP 2.6 escalation will restart it.
+            # but keep going: later instances are independent (S2.1). Skip
+            # the healthy wait: polling a dead engine's port for up to
+            # boot_target_s is wasted time (the S2.5 "wait each to healthy
+            # before the next" guarantee still holds — the NEXT start is
+            # gated on this index's bookkeeping, not a healthy probe).
+            # MAP 2.6's escalation restarts the bfailed unit.
             log(
-                f"i={i} start failed (rc={start_rc[i]}), skipping healthy wait (S1.5 bfailed)"
+                f"i={i} systemctl start rc={rc} (recorded as bfailed, "
+                f"skipping healthy wait, continuing to next)"
             )
             continue
-        ok = wait_healthy(i, cfg, sysctl_base)
+        ok = wait_healthy(i, cfg)
         log(f"i={i} healthy={ok} (S2.5: wait before next)")
         # S2.5: 'waits each to healthy BEFORE the next' — the wait happens
         # inline. A not-yet-healthy instance is still spawned (the probe
@@ -744,12 +747,15 @@ def spawn_sequence(
 # steady probe loop (S2.2; MAP 2.6 owns the degraded->restart escalation)
 # --------------------------------------------------------------------------
 def _refresh_states(
-    cfg: dict, spawned: list[int], main_ok: bool, states: list[str], log=_log
+    cfg: dict, spawned: list[int], states: list[str], log=_log
 ) -> list[str]:
     """Re-probe each spawned instance every cycle; map to an S3.1 state.
     The skeleton keeps the last state on a probe miss (the S2.2 two-fail ->
     degraded / five-fail -> restart escalation is MAP 2.6); a fresh
-    healthy probe clears a degraded mark. `states` in, aligned states out."""
+    healthy probe clears a degraded mark. `states` in, aligned states out.
+    (No main_ok param — instance liveness is probed per-instance; the main
+    stack's health is the probe loop's own job, not this one; G3 PR #10
+    r6 P2.)"""
     if len(states) != len(spawned):
         states = ["healthy"] * len(spawned)
     new_states = list(states)
@@ -771,7 +777,6 @@ def run_probe_loop(
     spawned: list[int],
     health_dir: Path,
     states: list[str],
-    main_ok: bool,
     settle_s: float,
     main_only_reason: str | None = None,
     log=_log,
@@ -779,12 +784,14 @@ def run_probe_loop(
     """The steady state: every `health_poll_s`, re-probe each instance +
     main, atomically rewrite health.json (S2.2). Runs forever under
     systemd (settle_s == 0); exits 0 after settle_s when non-zero (the
-    @gpu test harness + a manual run). Returns the process exit code."""
+    @gpu test harness + a manual run). Returns the process exit code.
+    (No main_ok param — the main stack's health is re-probed fresh every
+    cycle inside the loop; G3 PR #10 r6 P2.)"""
     cycle = 0
     t0 = time.monotonic()
     while True:
         main_ok = main_healthy(cfg["main_endpoint"])
-        states = _refresh_states(cfg, spawned, main_ok, states, log)
+        states = _refresh_states(cfg, spawned, states, log)
         write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
         if settle_s > 0 and (time.monotonic() - t0) >= settle_s:
             log(f"probe loop: settled {settle_s:.0f}s (cycle {cycle}), exit 0")
@@ -954,7 +961,6 @@ def main(argv: list[str] | None = None) -> int:
                 [],
                 health_dir,
                 states,
-                main_ok,
                 args.settle,
                 main_only_reason,
                 _log,
@@ -992,7 +998,6 @@ def main(argv: list[str] | None = None) -> int:
             spawned,
             health_dir,
             states,
-            main_ok,
             args.settle,
             main_only_reason,
             _log,
@@ -1000,9 +1005,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # systemd Type=notify: signal readiness, then run the probe loop forever.
     notify_sd("READY=1")
-    run_probe_loop(
-        cfg, spawned, health_dir, states, main_ok, 0.0, main_only_reason, _log
-    )
+    run_probe_loop(cfg, spawned, health_dir, states, 0.0, main_only_reason, _log)
+    # Unreachable in production: run_probe_loop(settle_s=0.0) is an infinite
+    # loop — the process ends by systemd's SIGTERM (a normal stop, not a
+    # failure; READY=1 was already sent). The return is kept so every
+    # path in main() is visibly terminated (G3 PR #10 round 6 P2).
     return exit_code
 
 
