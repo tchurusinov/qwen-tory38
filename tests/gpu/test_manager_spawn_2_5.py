@@ -211,9 +211,15 @@ def _instance_unit_text(
     """The S2.2 unit shape, rendered for instance i (the S2.2 verbatim
     docker-run flags; user scope: the `Requires=docker.service` line is
     the documented deviation — see the module doc). model/alias/key/
-    reasoning come from the engine YAML (G3 PR #10 r12 P2) so the unit
-    the test installs cannot silently diverge from the flags the
-    manager's probes expect."""
+    model_file, alias, key, and reasoning come from the engine YAML
+    (G3 PR #10 r12 P2) so the unit the test installs cannot silently
+    diverge from the flags the manager's probes expect.
+    `--batch-size 2048` stays hardcoded (G3 PR #10 r13 P3): it is
+    S1.3's locked command value but is NOT an S1.6 config key (S1.6
+    lists ctx_size / max_num_seqs, not batch size) — if batch size ever
+    becomes configurable this line must be sourced from the YAML like
+    the others (the manager's probes don't check batch size, so a drift
+    here would be silent)."""
     exec_start = (
         "ExecStart=/usr/bin/docker run --rm --name bonsai2-server-%i "
         "--gpus all "

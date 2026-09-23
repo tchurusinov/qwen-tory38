@@ -224,6 +224,52 @@ class TestConfigLoading(unittest.TestCase):
             cfg = mgr.load_config(ok, SERVING_YAML)
             self.assertEqual(cfg["budget_gb"], 12)
 
+    def test_kv_cache_q4_0_feeds_the_s1_4_constant(self):
+        """G3 round-13 P1: the S1.6 `kv_cache` key now feeds the S1.4
+        footprint — q4_0 (the template default, the S1.4 re-anchor) must
+        load and carry its LOCKED measured constant."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        self.assertEqual(cfg["kv_cache"], "q4_0")
+        self.assertAlmostEqual(cfg["per_slot_per_token_gb"], 0.000003277)
+
+    def test_kv_cache_missing_is_err_config(self):
+        """G3 round-13 P1: an edited-away `kv_cache` key must fail at
+        config-load (ERR_CONFIG, exit 2), not silently gate on the q4_0
+        constant mid-boot."""
+        with tempfile.TemporaryDirectory() as td:
+            bad = Path(td) / "subagent-engine.yaml"
+            bad.write_text(ENGINE_YAML.read_text().replace("kv_cache: q4_0", ""))
+            with self.assertRaises(ValueError) as ctx:
+                mgr.load_config(bad, SERVING_YAML)
+            self.assertIn("kv_cache missing", str(ctx.exception))
+
+    def test_kv_cache_unknown_dtype_is_err_config(self):
+        """G3 round-13 P1: a dtype with no LOCKED S1.4 constant (e.g. f16)
+        must be an ERR_CONFIG at load — there is no measured FP16 value in
+        the spec to fall back to, so guessing at boot is forbidden."""
+        with tempfile.TemporaryDirectory() as td:
+            bad = Path(td) / "subagent-engine.yaml"
+            bad.write_text(
+                ENGINE_YAML.read_text().replace("kv_cache: q4_0", "kv_cache: f16")
+            )
+            with self.assertRaises(ValueError) as ctx:
+                mgr.load_config(bad, SERVING_YAML)
+            self.assertIn("no locked S1.4", str(ctx.exception))
+
+    def test_allocation_need_gb_honours_the_kv_constant(self):
+        """G3 round-13 P1: allocation_need_gb threads
+        per_slot_per_token_gb into the footprint — a hypothetical larger
+        KV constant must raise the need (the default-constant call is
+        unchanged, so existing callers keep their value)."""
+        default = mgr.allocation_need_gb(7.21, 8, 262144, 14.78)
+        self.assertAlmostEqual(default, 15.08, places=2)
+        # ~2x constant (an FP16-ish value) must raise the need past the
+        # margin term — the cap floor (14.78) no longer dominates.
+        bigger = mgr.allocation_need_gb(
+            7.21, 8, 262144, 14.78, per_slot_per_token_gb=0.0000070
+        )
+        self.assertGreater(bigger, default)
+
 
 class TestHealthJson(unittest.TestCase):
     """2.1: /run/bonsai2/health.json in the S3.1 schema (S2.2)."""
