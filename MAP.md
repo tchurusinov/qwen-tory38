@@ -606,6 +606,26 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 7 reviewed + 1 P2 disposed (0 P0/0 P1, docstring-precision fix) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 7 (commit f22cad0, disposition comment pending):
+  0 P0 + 0 P1 + 1 P2. Loop has converged — P0/P1 clean since round 5,
+  P2 trend 7 (r6) -> 1 (r7). The lone P2 re-flags the `systemctl_state`
+  forward-hook site (first surfaced r6 P2): the r6 docstring said 'maps a
+  unit to the S3.1 instance state', but the function returns the RAW
+  `systemctl show -p SubState -p Result` values (SubState='exited'/
+  'running', Result='success'); the SubState/Result -> S3.1 string mapping
+  is applied by the consumer (MAP 2.6 restart escalation), where the
+  forward-hook is wired. Fixed the docstring to state exactly that
+  (docstring-only; no behavior delta). Hermetic 173/173 OK. @gpu green
+  on branch tip.
+- next: final @gpu on f22cad0 + post disposition; a final reviewer pass
+  is expected to return REVIEW CLEAN (no P0/P1 open, P2s all annotated/
+  disposed), then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–6; round 7 is a docstring-precision fix, not a spec change).
+
 ### 2026-09-23 — G3 loop PR #10: round 6 reviewed + 7 P2s disposed (0 P0/0 P1) + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
