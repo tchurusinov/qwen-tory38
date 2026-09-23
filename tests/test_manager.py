@@ -809,9 +809,11 @@ class TestSpawnSequence(unittest.TestCase):
         index's dead port cannot mask a neighbour. Pin the invariant:
         main()'s first-health.json build marks i=0 bfailed from start_rc
         (not by probing), and _refresh_states over several cycles keeps
-        i=1 'healthy' while i=0 settles to the skeleton's degraded
-        over-report (its probe misses; bfailed only comes from the
-        start_rc path)."""
+        i=1 'healthy' while i=0 STAYS 'bfailed' (a probe miss preserves
+        the prior state — only a fresh healthy probe clears it; the
+        skeleton never silently degrades a bfailed unit, and MAP 2.6's
+        restart is what transitions it — G3 PR #10 r12 P1#2 + r12 P2#3
+        docstring correction)."""
         cfg = self._cfg()
         port_base = int(cfg["port_base"])
         start_rc = {0: 1, 1: 0}
@@ -825,7 +827,7 @@ class TestSpawnSequence(unittest.TestCase):
             else:
                 states.append("healthy")  # i=1's probe: healthy
         self.assertEqual(states, ["bfailed", "healthy"])
-        self.assertEqual(mgr.stack_summary(states)[0], "degraded")
+        self.assertEqual(mgr.stack_summary(states), "degraded")
         # i=0's port dead, i=1's port healthy: run several cycles.
         with mock.patch.object(
             mgr,
@@ -839,8 +841,13 @@ class TestSpawnSequence(unittest.TestCase):
             "healthy",
             "a healthy instance after a failed i=0 start must NOT be masked",
         )
-        self.assertIn(states[0], ("bfailed", "degraded"))
-        self.assertEqual(mgr.stack_summary(states)[0], "degraded")
+        self.assertEqual(
+            states[0],
+            "bfailed",
+            "a bfailed start stays bfailed on probe misses (only a fresh "
+            "healthy probe clears it; MAP 2.6 restarts it)",
+        )
+        self.assertEqual(mgr.stack_summary(states), "degraded")
 
     def test_main_healthy_4xx_semantics(self):
         """G3 round-11 P1: main_healthy treats a moved/removed /v1/models

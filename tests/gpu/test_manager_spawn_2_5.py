@@ -73,9 +73,9 @@ ENGINE_YAML = REPO_ROOT / "etc" / "subagent-engine.yaml"
 SERVING_YAML = REPO_ROOT / "etc" / "serving.yaml"
 RUNTIME_IMAGE = "bonsai2-server:1.0"
 PORT_BASE = 30101
-API_KEY = "bonsai2-local"
-ALIAS = "qwen38-27b-subagent"
-MAIN_CONTAINER = "qwen38-sglang"
+# model/alias/api_key/reasoning_format are read LIVE from the engine YAML
+# in _model_alias_key_reasoning_from_template (G3 PR #10 r12 P2: no more
+# hardcoded copies that can drift from the S1.3/S1.6 template).
 SETTLE_S = 20  # post-boot probe-loop window (3 cycles at 10 s)
 MANAGER_TIMEOUT_S = 300
 
@@ -196,11 +196,24 @@ def _assert_memory_cap_is_gib_truncation(ins, budget, name):
 
 
 def _instance_unit_text(
-    i: int, image: str, budget_gb: float, ctx: int, parallel: int, kv: str, port: int
+    i: int,
+    image: str,
+    budget_gb: float,
+    ctx: int,
+    parallel: int,
+    kv: str,
+    port: int,
+    model_file: str,
+    alias: str,
+    api_key: str,
+    reasoning_format: str,
 ) -> str:
     """The S2.2 unit shape, rendered for instance i (the S2.2 verbatim
     docker-run flags; user scope: the `Requires=docker.service` line is
-    the documented deviation — see the module doc)."""
+    the documented deviation — see the module doc). model/alias/key/
+    reasoning come from the engine YAML (G3 PR #10 r12 P2) so the unit
+    the test installs cannot silently diverge from the flags the
+    manager's probes expect."""
     exec_start = (
         "ExecStart=/usr/bin/docker run --rm --name bonsai2-server-%i "
         "--gpus all "
@@ -208,11 +221,11 @@ def _instance_unit_text(
         "--shm-size 4g --network host --ipc=host "
         f"{image} "
         f"/opt/bonsai2/bin/llama-server "
-        f"--model /opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf "
+        f"--model /opt/bonsai2/models/{model_file} "
         f"--ctx-size {ctx} --parallel {parallel} --batch-size 2048 "
         f"--cache-type-k {kv} --cache-type-v {kv} "
-        f"--port {port} --api-key {API_KEY} "
-        f"--reasoning-format deepseek --alias {ALIAS}"
+        f"--port {port} --api-key {api_key} "
+        f"--reasoning-format {reasoning_format} --alias {alias}"
     )
     return (
         "[Unit]\n"
@@ -245,6 +258,31 @@ def _ctx_kv_from_template() -> tuple[int, str, int]:
     kv = _grab(r"(?m)^[ \t]*kv_cache:[ \t]*(\S+)")
     par = int(_grab(r"(?m)^[ \t]*max_num_seqs:[ \t]*(\d+)"))
     return ctx, kv, par
+
+
+def _model_alias_key_reasoning_from_template() -> tuple[str, str, str, str]:
+    """model.file, alias, api_key, reasoning_format from the engine YAML.
+
+    G3 PR #10 r12 P2: the @gpu test's unit must not hardcode the model
+    file / alias / api-key / reasoning-format — those live in
+    subagent-engine.yaml (S1.3/S1.6), and a YAML edit must not silently
+    diverge the unit the test installs from the flags the manager's
+    probes expect (alias + api_key feed _probe_models/_probe_completion;
+    model.file + reasoning_format feed the S2.2 ExecStart shape).
+    Reading live values here is the drift guard; a template edit now
+    flows through to the unit automatically."""
+    text = ENGINE_YAML.read_text()
+
+    def _grab(pattern: str) -> str:
+        m = re.search(pattern, text)
+        assert m, f"pattern {pattern!r} not found in the template"
+        return m.group(1)
+
+    model_file = _grab(r"(?m)^[ \t]*file:[ \t]*(\S+)")
+    alias = _grab(r"(?m)^[ \t]*alias:[ \t]*(\S+)")
+    api_key = _grab(r"(?m)^[ \t]*api_key:[ \t]*(\S+)")
+    reasoning = _grab(r"(?m)^[ \t]*reasoning_format:[ \t]*(\S+)")
+    return model_file, alias, api_key, reasoning
 
 
 class TestManagerSpawnLive(unittest.TestCase):
@@ -289,6 +327,9 @@ class TestManagerSpawnLive(unittest.TestCase):
         baseline_pids = set(_gpu_compute_apps_mib())
 
         ctx, kv, par = _ctx_kv_from_template()
+        model_file, alias, api_key, reasoning_format = (
+            _model_alias_key_reasoning_from_template()
+        )
         user_unit_dir = Path.home() / ".config" / "systemd" / "user"
         unit_files = []
         try:
@@ -298,7 +339,17 @@ class TestManagerSpawnLive(unittest.TestCase):
                 uf = user_unit_dir / f"bonsai2-server@{i}.service"
                 uf.write_text(
                     _instance_unit_text(
-                        i, RUNTIME_IMAGE, budget, ctx, par, kv, PORT_BASE + i
+                        i,
+                        RUNTIME_IMAGE,
+                        budget,
+                        ctx,
+                        par,
+                        kv,
+                        PORT_BASE + i,
+                        model_file,
+                        alias,
+                        api_key,
+                        reasoning_format,
                     )
                 )
                 unit_files.append(uf)

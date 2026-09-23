@@ -535,7 +535,20 @@ def main_healthy(endpoint: str, timeout: float = 5.0) -> bool:
     moved' hedge that over-reported a genuinely gone route as up);
     other 4xx (405 etc.) = up (a route-level error — the server
     answered, so the route exists and the engine is answering); 5xx,
-    connection refused, timeout, non-HTTP error = down. Timeout: a
+    connection refused, timeout, non-HTTP error = down.
+
+    Accepted limitation (G3 PR #10 r12 P1, note for later): the probe
+    sends no Authorization header, so a dead-but-listening proxy that
+    answers 401 is indistinguishable from a healthy auth-walled main —
+    the harness exit-82 gate (S3.1/S3.6 `main_endpoint_healthy_probe`)
+    will not fire on auth-only breakage. Accepted: S2.1 says the main
+    stack is independent infrastructure (the pool's probes carry the key;
+    the manager's liveness probe deliberately does not), and a dead main
+    that still answers 401 is a main-stack problem, not a pool one. A
+    keyed probe is a MAP 2.6 candidate if the exit-82 gate ever proves
+    to under-fire.
+
+    Timeout: a
     single hard 5 s urlopen cap (no separate read/connect split) —
     noted in the docstring only; the probe-loop blocking cost of a
     black-holed main is accepted in the skeleton (G3 PR #10 r5 P2,
@@ -656,20 +669,23 @@ def _instance_entry(cfg: dict, i: int, state: str) -> dict:
     }
 
 
-def stack_summary(instance_states: list[str]) -> tuple[str, str | None]:
-    """Derive (stack, main_only_reason) from the instance states.
+def stack_summary(instance_states: list[str]) -> str:
+    """Derive the S3.1 `stack` from the instance states.
 
     S3.1: `stack` in {healthy, degraded, main-only}; `main_only_reason`
-    present ONLY when instances: 0 (S2.4). Zero instances -> main-only
-    (the reason is the caller's: budget_zero vs user_unloaded); any
-    bdown/bfailed -> degraded; any degraded -> degraded; else healthy."""
+    present ONLY when instances: 0 (S2.4) — the reason is the caller's
+    (budget_zero / user_unloaded / ERR_VRAM_OOM), not derived here.
+    Zero instances -> main-only; any bdown/bfailed -> degraded; any
+    degraded -> degraded; else healthy. (Returned as a bare str — the
+    main-only reason is the caller's to supply; the former tuple second
+    was always None, G3 PR #10 r12 P1.)"""
     if not instance_states:
-        return "main-only", None  # reason set by the caller
+        return "main-only"
     if any(s in ("bdown", "bfailed") for s in instance_states):
-        return "degraded", None
+        return "degraded"
     if any(s == "degraded" for s in instance_states):
-        return "degraded", None
-    return "healthy", None
+        return "degraded"
+    return "healthy"
 
 
 def build_health(
@@ -677,7 +693,7 @@ def build_health(
 ) -> dict:
     """The S3.1 schema, one document. `states` is a list of S3.1 instance
     states aligned to i=0..len-1 (empty = main-only)."""
-    stack, reason = stack_summary(states)
+    stack = stack_summary(states)
     doc: dict = {
         "stack": stack,
         "instances": [_instance_entry(cfg, i, st) for i, st in enumerate(states)],
@@ -685,11 +701,12 @@ def build_health(
         "main_healthy": bool(main_ok),
     }
     # S2.4: main_only_reason present only when instances: 0 — echo the
-    # caller's cause (budget_zero / user_unloaded), else the derived one.
+    # caller's cause (budget_zero / user_unloaded / ERR_VRAM_OOM); the
+    # stack summary never supplies it for >=1 instance (the S3.1
+    # 'reason present when instances: 0' contract — G3 PR #10 r12 P1
+    # removed a vestigial `elif reason:` branch that could never fire).
     if not states:
         doc["main_only_reason"] = main_only_reason or "budget_zero"
-    elif reason:
-        doc["main_only_reason"] = reason
     return doc
 
 
