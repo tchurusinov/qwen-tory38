@@ -606,6 +606,42 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 9 reviewed — 0 P0/0 P1/3 P2 (reviewer self-downgraded 2 P1s to P2) + P2 pass + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 9 (commit d80264c, disposition comment 639 + @gpu append):
+  0 P0 + 0 P1 + 3 P2. The two items the reviewer first raised as P1
+  both self-downgraded to P2 in its own reasoning ('Net: P2' / 'Weak
+  test, not a defect. P2'). DOD met: no P0 open, no P1 open. P2 pass:
+  (a) P2#1 unit_files teardown — note-only (the finally already unlinks
+  every unit before any late assert; preconditions re-check pool/port/
+  stray per run; systemctl stop on a never-loaded unit is a no-op).
+  (b) P2#2 settle test weak — FIXED: test_settle_run_sends_ready_1_before_
+  settle_window now captures write_health via side_effect and asserts the
+  S3.1 document of the first health.json write (stack=healthy, instance
+  state=healthy, main_healthy=True, main_only_reason absent per S2.4) —
+  the test now guards states, not just the READY ordering.
+  (c) P2#3 _refresh_states single-miss -> degraded over-reports vs S2.2
+  two-consecutive — CONFIRMED docstring/code/spec gap; old docstring said
+  'keeps the last state on a probe miss' while the code flips
+  healthy->degraded on the FIRST miss. Fixed the docstring to state the
+  exact skeleton miss-mapping (marked over-report vs S2.2's locked rule;
+  MAP 2.6 replaces with the 2-fail counter + 5-fail -> restart) + pinned
+  the same intent in the branch comment.
+  (d) P2#4 spawn_sequence slow-load left permanently degraded — note-only;
+  pinned restart-path ownership to MAP 2.6 (S2.2 five-fail escalation).
+  (e) P2#5 cap_bytes assertEqual brittleness — disposed as documented
+  intent (the exact-equal IS the docker-g-parse drift detector; integer
+  budgets make the truncation a no-op so the brittleness doesn't fire).
+  Hermetic 175/175 OK. @gpu green post-P2-pass (73.3 s, 2 healthy,
+  stack=healthy, branch tip d80264c).
+- next: round-10 review (convergence pass); P0/P1 clean since round 5,
+  P2 trend 3 (all notes/hardening) — expect REVIEW CLEAN, then G4 human
+  merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–8; round 9 is docstring + test-hardening + notes, no
+  locked-value spec moves).
+
 ### 2026-09-23 — G3 loop PR #10: round 8 reviewed + 3 findings disposed (1 P1/2 P2) + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
