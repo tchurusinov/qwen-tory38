@@ -606,6 +606,29 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 5 reviewed + 4 findings disposed (1 P1 fixed, 3 P2 doc-amended/note-only) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 5 (commit f84b0f0, disposition comment 619 + @gpu append):
+  0 P0 + 1 P1 + 3 P2. P1 (settle paths skip READY=1) FIXED — both
+  --settle branches (instances + main-only budget_zero) now notify
+  READY=1 BEFORE the settle window; under a user-scope Type=notify
+  start an exit-0 with no prior READY=1 is a FAILED START in systemd
+  notify semantics, so a --settle run (a normal ready boot) would have
+  reported failed. New hermetic test asserts rc=0, READY=1 present,
+  and READY=1 ordered AFTER the 'booted N instance(s)' STATUS= line.
+  P2#1 (probe-loop 5 s urlopen blocks single-threaded loop) — note-only,
+  documented in main_healthy docstring (single hard 5 s cap, revisit if
+  MAP 2.6 adds concurrent probes). P2#2 (4xx broader than docstring)
+  FIXED by docstring — any 4xx = up (liveness, S2.1), incl. a moved
+  /v1/models route; behavior unchanged. P2#3 (test import shadowing) —
+  note-only, comment at the module-level load site (bin/ is the deploy
+  layout; accepted). Hermetic 173/173 OK. @gpu green post-fix
+  (63.6 s, 2 healthy).
+- next: round-6 review (launching); loop until clean, then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–2; round-5 changes are behavior/doc clarifications, not spec).
+
 ### 2026-09-23 — G3 loop PR #10: rounds 3–4 reviewed + disposed (round 3: 1 P1/2 P2, both P2 refuted-by-read + 1 P1 refuted-by-probe, cap_bytes documented; round 4: 1 P0/2 P1/1 P2, 3 fixed + 1 refuted-by-probe) + @gpu re-verify green x2 (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
