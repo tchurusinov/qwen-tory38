@@ -606,6 +606,13 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G4 MERGED: PR #10 (MAP 2.1–2.5 manager skeleton) merged to main as 27e7271; G3 loop closed after 16 rounds; frontier → MAP 2.6
+
+- **G4 human gate:** approved on PR #10 comment 683 ("approved. feel free to merge"). Merged via Gitea API (`POST /pulls/10/merge`, do=merge, delete_source_branch=false) → merge commit `27e7271` on `main` (2026-09-23T07:13:59Z). Feature branch `phase2-manager-skeleton` deleted local + remote; `git fetch --prune`.
+- **Scope merged:** `bin/bonsai2-manager` (S2.1 sd_notify + two-YAML loader, S2.3 boot tier w/ live main-cgroup read, S1.4 allocation tier, S2.5 ordered spawn, S3.1 health.json), `units/bonsai2-server@.service` + `bonsai2-sglang.service`, hermetic `tests/test_manager.py` (52 methods; suite 186) + live `tests/gpu/test_manager_spawn_2_5.py`. 16 G3 review rounds (603→683); last code commit `24d801a` (r15); @gpu green ×14.
+- **Next:** MAP 2.6 (S2.2 escalation: 2-fail → restart, 5-fail → unit reset; S3.2 reload; the MAP 2.7 hooks noted in r15/r16 dispositions).
+- spec deltas: SPEC.md S1.4/S1.6/S2.2/S2.4 amendments landed within the PR (recorded in the PR body `## Spec amendments`).
+
 ### 2026-09-23 — G3 loop PR #10: round 16 reviewed — 0 P0/1 P1/2 P2, ALL THREE refuted by pin-reality/code/design-split → DOD met, G3 loop complete (no code changes; last code commit 24d801a)
 
 - **Review: 0 P0 / 1 P1 / 2 P2 (raw: /tmp/review-phase2-manager-skeleton-r16.txt; stdout /tmp/review-10-stdout-r16.txt, review.sh rc=0).** All three refuted:
