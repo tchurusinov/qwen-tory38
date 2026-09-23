@@ -606,6 +606,36 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 8 reviewed + 3 findings disposed (1 P1/2 P2) + @gpu re-verify green (branch `phase2-manager-skeleton`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 2)
+- phase(s): P2 (G3 review loop for MAP 2.1–2.5)
+- round 8 (commit f6a3be1, disposition comment 634 + @gpu append):
+  0 P0 + 1 P1 + 2 P2. P1 (@gpu docstring overstates 'byte-identical to
+  S2.2 shape') FIXED — diffed the @gpu user-scope unit against the system
+  template line-by-line; the reviewer was right the claim was overstated.
+  Beyond the Requires= drop, the @gpu unit ALSO shortens After= (user
+  units can't order against system units; the test's manager subprocess
+  handles S2.1 main-first ordering) and adds a `, @gpu test` Description
+  marker. Module docstring now ENUMERATES the exact 3 user-scope deltas +
+  lists everything else that stays byte-for-byte — the shape claim is now
+  checkable line-by-line. P2 (load_config coerces non-numeric instance
+  key to cryptic int()/float() ValueError mid-boot) FIXED — numeric
+  instance keys type-validated at config-load (count/port_base/ctx_size/
+  max_num_seqs int, per_instance_budget_gb int-or-float, bool excluded)
+  -> named ERR_CONFIG exit 2; range checks stay the S1.7 render-config
+  tool's. +2 hermetic tests. P2 (baseline_pids timing) DISPOSED by
+  comment — the assertion targets S2.1 'main stack unaffected' (spawn
+  didn't kill/replace the main stack); 'not lost' is the right direction,
+  a pid appearing after capture is out of scope by construction; comment
+  documents the scope. Hermetic 175/175 OK. @gpu green post-fix
+  (64.2 s, 2 healthy, stack=healthy, branch tip f6a3be1).
+- next: round-9 review (launching); P0/P1 have been the convergence target
+  — no P0 open, no P1 open now (r8's P1 was the last). Expect CLEAN or
+  only P2 notes, then G4 human merge.
+- spec deltas: none new this session (S2.2/S1.4/S1.5/S2.4 carry from
+  rounds 1–7; round 8 is docstring + config-validation + a test-scope
+  comment, no locked-value spec moves).
+
 ### 2026-09-23 — G3 loop PR #10: round 7 reviewed + 1 P2 disposed (0 P0/0 P1, docstring-precision fix) + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
