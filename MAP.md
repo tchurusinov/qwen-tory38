@@ -606,6 +606,16 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 12 reviewed — 0 P0/2 P1/3 P2; P1#1 vestigial (fixed), P1#2 refuted by probe + pin tightened, P2s closed (commit 0f0cf4e)
+- G3 PR #10 (MAP 2.1–2.5). Round 12: 0 P0 / 2 P1 / 3 P2 (raw: /tmp/review-phase2-manager-skeleton-r12.txt; stdout /tmp/review-10-stdout-r12.txt, review.sh rc=0).
+  - P1#1 `stack_summary` tuple second always None → `build_health` `elif reason:` dead (behavior already correct: `main()` sets `main_only_reason` only in the n_prime==0 branch). REAL vestige — fixed: bare-str return, branch removed, S3.1 contract stated in both docstrings; hermetic callers updated.
+  - P1#2 "permanently-bfailed unit flips to degraded on the next cycle" — REFUTED by /tmp/probe_r12_p1b.py: i=0 stays `bfailed` across 3 `_refresh_states` cycles (cycle 1–3: `['bfailed','healthy']`; VERDICT both True). Reviewer's "first miss → degraded" applies only to `healthy`-on-entry (the documented r9 skeleton over-report); non-healthy states are preserved on a miss. r10 pin tightened: `states[0] == "bfailed"` (was `in ("bfailed","degraded")`) + docstring corrected.
+  - P2#1 401 auth-wall indistinguishable from healthy → accepted limitation documented in `main_healthy` docstring (S2.1: main = independent infra; pool probes carry the key); keyed probe = MAP 2.6 candidate if the exit-82 gate under-fires.
+  - P2#2 @gpu test hardcoded model/alias/api_key/reasoning → new `_model_alias_key_reasoning_from_template()` reads them LIVE from subagent-engine.yaml; `_instance_unit_text` now 11-arg; stale API_KEY/ALIAS/MAIN_CONTAINER module constants deleted (PORT_BASE stays, asserted vs unit at install).
+  - P2#3 r10-pin docstring said "i=0 settles to degraded over-report" (wrong) → corrected to "i=0 STAYS bfailed (probe miss preserves prior state; only a fresh healthy probe clears it; MAP 2.6 restarts it)".
+  - Verified: 178/178 OK; ruff check+format clean; gate PASS; commit 0f0cf4e pushed. @gpu r12: 39.3 s (2 instances healthy, stack=healthy) — first run with YAML-derived unit text. Disposition posted → PR #10 comment 659 (PATCH-corrected probe quote, verified via /issues/10/comments).
+  - P2 trend: 7(r1) → 1(r4) → 3(r5) → 2(r6) → 4(r11) → 3(r12). P1s since r9: r11 = 1 (4xx main_healthy, real), r12 = 2 (1 vestigial fixed / 1 refuted+pinned). Round 13 = confirmation pass on the new surface (bare-str stack_summary + YAML-sourced @gpu unit).
+
 ### 2026-09-23 — G3 loop PR #10: round 11 reviewed — 0 P0/1 P1/4 P2; P1 (main_healthy 4xx) + P2#1 (S2.8 #1 shared boot deadline) REAL + FIXED + pinned, P2#2-4 closed, P2#5 naming (commit ed273d3) + @gpu re-verify green (branch `phase2-manager-skeleton`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 2)
 - phase(s): P2 (G3 review loop for MAP 2.1–2.5)
