@@ -682,7 +682,7 @@ class TestSpawnSequence(unittest.TestCase):
             order.append(f"start-{i}")
             return 0
 
-        def fake_wait(i, cfg):
+        def fake_wait(i, cfg, deadline):
             order.append(f"wait-{i}")
             return True
 
@@ -719,7 +719,7 @@ class TestSpawnSequence(unittest.TestCase):
             15.08,
             free_reader=free_reader,
             systemctl_start=fake_start,
-            wait_healthy=lambda i, cfg: True,
+            wait_healthy=lambda i, cfg, deadline: True,
             log=lambda *_: None,
         )
         self.assertEqual(exit_code, 0, "i > 0 partial load is exit 0 (S1.4)")
@@ -742,7 +742,7 @@ class TestSpawnSequence(unittest.TestCase):
             15.08,
             free_reader=lambda: 5.0,  # free < need on the very first probe
             systemctl_start=fake_start,
-            wait_healthy=lambda i, cfg: True,
+            wait_healthy=lambda i, cfg, deadline: True,
             log=lambda *_: None,
         )
         self.assertEqual(exit_code, 4, "i = 0 allocation fail = exit 4 (S1.4)")
@@ -760,7 +760,7 @@ class TestSpawnSequence(unittest.TestCase):
             15.08,
             free_reader=lambda: 5.0,
             systemctl_start=lambda i, base=None: started.append(i) or 0,
-            wait_healthy=lambda i, cfg: True,
+            wait_healthy=lambda i, cfg, deadline: True,
             log=lambda *_: None,
         )
         self.assertEqual(exit_code, 0)
@@ -780,7 +780,7 @@ class TestSpawnSequence(unittest.TestCase):
             order.append(f"start-{i}")
             return 1 if i == 0 else 0
 
-        def fake_wait(i, cfg):
+        def fake_wait(i, cfg, deadline):
             waits.append(i)
             return True
 
@@ -841,6 +841,80 @@ class TestSpawnSequence(unittest.TestCase):
         )
         self.assertIn(states[0], ("bfailed", "degraded"))
         self.assertEqual(mgr.stack_summary(states)[0], "degraded")
+
+    def test_main_healthy_4xx_semantics(self):
+        """G3 round-11 P1: main_healthy treats a moved/removed /v1/models
+        route as DOWN, not up. 2xx + 401 = up (the engine is answering,
+        auth-walled); 404/410 = down (route gone); other 4xx (405 etc.) =
+        up (a route-level error, server alive); 5xx = down. This feeds
+        health.json `main_healthy` -> the harness exit-82 gate (S3.1)."""
+        import urllib.error
+
+        cfg = self._cfg()
+        ep = cfg["main_endpoint"]
+
+        def http(code):
+            return urllib.error.HTTPError(
+                ep + "/v1/models",
+                code,
+                "x",
+                {},
+                None,  # type: ignore[arg-type]
+            )
+
+        # 401 (auth-walled, expected healthy shape) -> up
+        with mock.patch.object(mgr.urllib.request, "urlopen", side_effect=http(401)):
+            self.assertTrue(mgr.main_healthy(ep), "401 = up")
+        # 404 (route moved/removed) -> down (the r11 P1 fix)
+        with mock.patch.object(mgr.urllib.request, "urlopen", side_effect=http(404)):
+            self.assertFalse(mgr.main_healthy(ep), "404 = down")
+        # 410 (route removed) -> down
+        with mock.patch.object(mgr.urllib.request, "urlopen", side_effect=http(410)):
+            self.assertFalse(mgr.main_healthy(ep), "410 = down")
+        # 405 (route-level error, server alive) -> up
+        with mock.patch.object(mgr.urllib.request, "urlopen", side_effect=http(405)):
+            self.assertTrue(mgr.main_healthy(ep), "405 = up")
+        # 503 (server error) -> down
+        with mock.patch.object(mgr.urllib.request, "urlopen", side_effect=http(503)):
+            self.assertFalse(mgr.main_healthy(ep), "503 = down")
+
+        # 2xx handled by urlopen returning normally -> up
+        class _Resp:
+            def read(self, n):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch.object(mgr.urllib.request, "urlopen", return_value=_Resp()):
+            self.assertTrue(mgr.main_healthy(ep), "2xx = up")
+
+    def test_wait_instance_healthy_shared_boot_deadline(self):
+        """G3 round-11 P2: a shared boot_deadline_s caps the whole spawn
+        sequence at boot_target_s, so N instances cannot each burn the
+        full per-instance budget (S2.8 #1: 'Cold boot → main + N healthy
+        ≤ 180 s'). When the deadline has already passed, the wait returns
+        immediately (last probe) instead of looping until a fresh
+        per-instance boot_target_s. None falls back to per-instance."""
+        cfg = self._cfg()
+        # A probe that is always down; with a shared deadline in the past,
+        # the wait must return quickly (last=False), not sleep a full
+        # boot_target_s.
+        with mock.patch.object(mgr, "instance_healthy", return_value=False):
+            out = mgr.wait_instance_healthy(
+                0,
+                cfg,
+                boot_deadline_s=0.0,  # already passed
+            )
+        self.assertFalse(out)
+        # None -> per-instance deadline (returns the last probe, which was
+        # down) — the behaviour the hermetic test can observe without a GPU.
+        with mock.patch.object(mgr, "instance_healthy", return_value=True):
+            out2 = mgr.wait_instance_healthy(0, cfg)
+        self.assertTrue(out2, "a healthy probe with no deadline returns True")
 
     def test_needs_use_vram_formula_not_a_hardcoded_number(self):
         """The need the main() computes must equal the S1.4 formula

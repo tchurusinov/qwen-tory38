@@ -525,16 +525,20 @@ def instance_healthy(port: int, alias: str, api_key: str) -> bool:
 def main_healthy(endpoint: str, timeout: float = 5.0) -> bool:
     """The main endpoint is UP (liveness probe, S2.1). `GET /v1/models`
     on the main stack returns 401 (up, demanding the main's api key) or
-    200 — both mean 'the engine is answering'. Any other 4xx is also
-    treated as UP (the server answered; a 404/409 there means the route
-    moved, not that the engine is down — liveness, not auth/route check,
-    is all S2.1 requires of this probe; a strict 401-only shape would
-    misreport a healthy main whose /v1/models moved). 5xx, connection
-    refused, timeout, non-HTTP error = down. The manager does not hold
-    the main stack's key, so 401 is the expected healthy shape here.
-    Timeout: a single hard 5 s urlopen cap (no separate read/connect
-    split) — noted in the docstring only; the probe-loop blocking cost
-    of a black-holed main is accepted in the skeleton (G3 PR #10 r5 P2,
+    200 — both mean 'the engine is answering'. Semantics: 2xx = up; 401 =
+    up (auth-walled, the expected healthy shape — the manager does not
+    hold the main stack's key); 404/410 = DOWN (the route was moved or
+    removed — a moved /v1/models is NOT liveness: the manager's
+    health.json `main_healthy` feeds the harness exit-82 gate, SPEC
+    S3.1, and S3.1 treats the main-endpoint probe as a 2xx liveness
+    contract — G3 PR #10 r11 P1; earlier any-4xx-as-up was a 'route
+    moved' hedge that over-reported a genuinely gone route as up);
+    other 4xx (405 etc.) = up (a route-level error — the server
+    answered, so the route exists and the engine is answering); 5xx,
+    connection refused, timeout, non-HTTP error = down. Timeout: a
+    single hard 5 s urlopen cap (no separate read/connect split) —
+    noted in the docstring only; the probe-loop blocking cost of a
+    black-holed main is accepted in the skeleton (G3 PR #10 r5 P2,
     revisit if MAP 2.6 adds concurrent probes)."""
     req = urllib.request.Request(endpoint.rstrip("/") + "/v1/models", method="GET")
     try:
@@ -542,7 +546,9 @@ def main_healthy(endpoint: str, timeout: float = 5.0) -> bool:
             resp.read(64)
         return True
     except urllib.error.HTTPError as e:
-        return 200 <= e.code < 500  # 4xx (incl. 401) = up; 5xx = degraded
+        # 2xx handled above. 404/410 = route moved/removed = down
+        # (r11 P1); 401 + other 4xx = up (the server answered).
+        return (200 <= e.code < 500) and e.code not in (404, 410)
     except (urllib.error.URLError, OSError, TimeoutError):
         return False
 
@@ -596,17 +602,31 @@ def systemctl_state(i: int, base: list[str] | None = None) -> dict:
     return state
 
 
-def wait_instance_healthy(i: int, cfg: dict) -> bool:
+def wait_instance_healthy(
+    i: int, cfg: dict, boot_deadline_s: float | None = None
+) -> bool:
     """Wait for instance i to reach the S2.2 'healthy' definition, polling
-    every HEALTH_PROBE_POLL_S up to `boot_target_s` (S2.5: 'waits each to
-    healthy before the next'). Returns True iff it went healthy in time.
+    every HEALTH_PROBE_POLL_S. Returns True iff it went healthy in time.
+
+    Deadline: `boot_deadline_s` (an absolute monotonic() deadline) when
+    given — the SHARED S2.8 #1 whole-boot budget (S2.5: 'waits each to
+    healthy before the next'; S2.8 #1: 'Cold boot → main + N healthy ≤
+    180 s (recorded T)'). A per-instance `boot_target_s` deadline would
+    let N instances each burn the full budget (N × 180 s for N=8 =
+    1440 s, far beyond S2.8 #1's 180 s whole-boot acceptance — G3 PR #10
+    r11 P2); the shared deadline caps the WHOLE spawn sequence at
+    boot_target_s. When None (direct call outside the spawn sequence)
+    the per-instance `boot_target_s` deadline applies.
 
     Polling is the health probe itself (models + completion), not just a
     unit-state poll: a unit that is 'active' but whose engine is
     alive-but-stuck is not 'healthy' by S2.2. (No systemctl base param —
     the wait is a port probe, not a unit-state poll; G3 PR #10 r6 P2.)"""
     port = cfg["port_base"] + i
-    deadline = time.monotonic() + cfg["boot_target_s"]
+    if boot_deadline_s is None:
+        deadline = time.monotonic() + cfg["boot_target_s"]
+    else:
+        deadline = boot_deadline_s
     last = False
     while time.monotonic() < deadline:
         last = instance_healthy(port, cfg["alias"], cfg["api_key"])
@@ -698,11 +718,18 @@ def spawn_sequence(
     wait_healthy=wait_instance_healthy,
     log=_log,
     sysctl_base: list[str] | None = None,
+    boot_deadline_s: float | None = None,
 ) -> tuple[int, list[int], str, dict[int, int]]:
     """Spawn the granted instances IN ORDER, running the S1.4 allocation
     tier before each (S2.5 + S1.4 + S2.3). Returns (exit_code,
     spawned_indexes, detail, start_rc) where `start_rc` maps each spawned
     index to its `systemctl start` rc (0 = the start issued cleanly).
+
+    `boot_deadline_s` (an absolute monotonic() deadline, set by the
+    caller) is the SHARED S2.8 #1 whole-boot budget passed to
+    `wait_healthy` — None leaves `wait_healthy` to its own per-instance
+    deadline (the hermetic tests' fake waits take `(i, cfg)` and do not
+    see this kwarg).
 
     The S1.4 two-outcome allocation tier drives the exit code:
       * fail at i > 0  -> WARN_VRAM_SHORTFALL, stop at i-1, exit 0
@@ -750,7 +777,7 @@ def spawn_sequence(
                 f"skipping healthy wait, continuing to next)"
             )
             continue
-        ok = wait_healthy(i, cfg)
+        ok = wait_healthy(i, cfg, boot_deadline_s)
         log(f"i={i} healthy={ok} (S2.5: wait before next)")
         # S2.5: 'waits each to healthy BEFORE the next' — the wait happens
         # inline. A not-yet-healthy instance is still spawned (the probe
@@ -931,8 +958,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- S2.5 spawn path (ordered) --------------------------------------
     sysctl_base = systemctl_base()
+    # S2.8 #1: ONE shared whole-boot budget for the whole spawn sequence
+    # (main + N healthy ≤ boot_target_s). A per-instance boot_target_s
+    # deadline would allow N × boot_target_s (G3 PR #10 r11 P2).
+    boot_deadline_s = time.monotonic() + cfg["boot_target_s"]
     exit_code, spawned, detail, start_rc = spawn_sequence(
-        cfg, n_prime, need_gb, log=_log, sysctl_base=sysctl_base
+        cfg,
+        n_prime,
+        need_gb,
+        log=_log,
+        sysctl_base=sysctl_base,
+        boot_deadline_s=boot_deadline_s,
     )
     _log(detail)
 
@@ -991,7 +1027,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         states: list[str] = []
-        write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
+        write_health(
+            health_dir,
+            build_health(cfg, states, main_ok, main_only_reason=main_only_reason),
+        )
         notify_sd("STATUS=bonsai2-manager: main-only (budget_zero)")
         if args.settle > 0:
             # The settle path exits 0 after settle_s, but still marks
@@ -1053,9 +1092,11 @@ def main(argv: list[str] | None = None) -> int:
     run_probe_loop(cfg, spawned, health_dir, states, 0.0, main_only_reason, _log)
     # Unreachable in production: run_probe_loop(settle_s=0.0) is an infinite
     # loop — the process ends by systemd's SIGTERM (a normal stop, not a
-    # failure; READY=1 was already sent). The return is kept so every
-    # path in main() is visibly terminated (G3 PR #10 round 6 P2).
-    return exit_code
+    # failure; READY=1 was already sent). EXIT_OK (not a boot-path variable):
+    # the exit-4 boot path already returned, so by the time we reach the
+    # probe loop the spawn outcome is always the normal 0 (G3 PR #10 r6 P2;
+    # variable renamed r11 P2 for reader clarity).
+    return EXIT_OK
 
 
 if __name__ == "__main__":

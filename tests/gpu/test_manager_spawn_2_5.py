@@ -167,6 +167,34 @@ def _gpu_compute_apps_mib() -> dict:
     return out
 
 
+def _assert_memory_cap_is_gib_truncation(ins, budget, name):
+    """The S2.2 --memory cap, asserted as docker ACTUALLY parses it.
+
+    S2.2: --memory = the S1.4 per-instance budget. Pin-reality delta
+    (2026-09-22, S2.2): docker parses the `g` suffix as GiB (2^30), not
+    decimal GB, and TRUNCATES the float parse to bytes (probed: 14.78g
+    -> 15869904158 = int(14.78 * 2^30) = int(15869904158.72)) — so the
+    cap lands ~0.91% above the S1.4 decimal-GB budget (the spec formula
+    and the tier stay decimal-GB end-to-end; the cap is a hair looser,
+    which can only help the allocation tier, never hurt it).
+
+    This is a PIN-REALITY assertion, named so a reader sees the test
+    `test_manager_spawns_granted_instances_in_order` doubles as a
+    docker-parse DRIFT DETECTOR (G3 PR #10 r11 P2): if a future docker
+    changes that parse (rounds, or switches to decimal GB), this
+    assertion fails on purpose — the fix is to re-probe + amend the
+    S2.2 delta note, not to loosen the assertion.
+    """
+    cap_bytes = int(budget * 2**30)
+    assert ins["HostConfig"]["Memory"] == cap_bytes, (
+        f"{name} memory cap != {budget}g as docker parses it "
+        f"(S2.2 verbatim flag; {cap_bytes} bytes)"
+    )
+    assert ins["HostConfig"]["MemorySwap"] == cap_bytes, (
+        f"{name} memory-swap != {budget}g (S2.2: no swap escape)"
+    )
+
+
 def _instance_unit_text(
     i: int, image: str, budget_gb: float, ctx: int, parallel: int, kv: str, port: int
 ) -> str:
@@ -335,34 +363,11 @@ class TestManagerSpawnLive(unittest.TestCase):
                         ins["State"]["Running"],
                         f"{name} not running: {ins['State']}",
                     )
-                    # S2.2: --memory = the S1.4 per-instance budget.
-                    # Pin-reality delta (2026-09-22, S2.2): docker parses
-                    # the `g` suffix as GiB (2^30), not decimal GB, and
-                    # TRUNCATES the float parse to bytes (probed: 14.78g
-                    # -> 15869904158 = int(14.78 * 2^30) = int(
-                    # 15869904158.72)) — so the cap lands ~0.91% above
-                    # the S1.4 decimal-GB budget (the spec formula and
-                    # the tier stay decimal-GB end-to-end; the cap is a
-                    # hair looser, which can only help the allocation
-                    # tier, never hurt it). This is a PIN-REALITY
-                    # assertion: it pins docker's EXACT g-suffix parse
-                    # behavior, so if a future docker changes that parse
-                    # (rounds, or switches to decimal GB), this test
-                    # fails on purpose — it is the unit-vs-spec drift
-                    # detector, and the fix is to re-probe + amend the
-                    # S2.2 delta note, not to loosen the assertion.
-                    cap_bytes = int(budget * 2**30)
-                    self.assertEqual(
-                        ins["HostConfig"]["Memory"],
-                        cap_bytes,
-                        f"{name} memory cap != {budget}g as docker parses it "
-                        f"(S2.2 verbatim flag; {cap_bytes} bytes)",
-                    )
-                    self.assertEqual(
-                        ins["HostConfig"]["MemorySwap"],
-                        cap_bytes,
-                        f"{name} memory-swap != {budget}g (S2.2: no swap escape)",
-                    )
+                    # S2.2: --memory = the S1.4 per-instance budget, as
+                    # docker ACTUALLY parses the `g` suffix — a pin-reality
+                    # drift detector (see _assert_memory_cap_is_gib_
+                    # truncation; G3 PR #10 r11 P2 named the doubling).
+                    _assert_memory_cap_is_gib_truncation(ins, budget, name)
                     self.assertEqual(ins["HostConfig"]["NetworkMode"], "host")
                     self.assertEqual(ins["HostConfig"]["IpcMode"], "host")
 
