@@ -209,6 +209,18 @@ def _mem_available_gb() -> float:
     raise AssertionError("MemAvailable not in /proc/meminfo")
 
 
+def _mem_total_gb() -> float:
+    """Live /proc/meminfo MemTotal in decimal GB (the S2.3 planning tier's
+    `total` — the manager reads the SAME value in read_total_gb). G3 PR#11
+    r1 (DOD #4, test #3 root cause): box-size constants baked into the test
+    (the SPEC's 121.6 GB) rot on a different MemTotal — this box's is
+    127.5 GB. Any test that sizes a pool scenario must read this live."""
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) / 1e6
+    raise AssertionError("MemTotal not in /proc/meminfo")
+
+
 def _instance_budget_gb() -> float:
     text = ENGINE_YAML.read_text()
     m = re.search(r"(?m)^[ \t]*per_instance_budget_gb:[ \t]*([0-9.]+)", text)
@@ -389,6 +401,51 @@ def _engine_pid_in_container(name: str) -> int:
     return int(pids[0])
 
 
+def _port_holder(port: int):
+    """G3 PR#11 r1 (DOD #4, #2 root cause): a bounded HOST-SIDE port
+    holder — binds 127.0.0.1:`port` in a daemon thread and refuses the
+    port to whoever else wants it (the restarted engine's
+    `--port` bind fails -> the unit's Restart=on-failure loop keeps
+    the instance DOWN across probe cycles, so the manager's S2.2
+    two-consecutive-fails -> degraded rule is actually reachable).
+
+    Returns a handle with `.release()`: closes the socket, the thread
+    exits, the port is free for the restarted engine. The holder is
+    ALWAYS released in the test's `finally` (even on a timeout) so no
+    listener leaks into the next phase (the one-GPU/one-ports rule).
+    """
+    import threading
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(1)
+
+    state = {"stopped": False}
+
+    def _accept_loop() -> None:
+        while not state["stopped"]:
+            try:
+                conn, _ = s.accept()
+                conn.close()  # refuse: probe gets a clean close, not a 200
+            except OSError:
+                break
+
+    t = threading.Thread(target=_accept_loop, daemon=True)
+    t.start()
+
+    class _Holder:
+        def release(self) -> None:
+            state["stopped"] = True
+            try:
+                s.close()
+            except OSError:
+                pass
+            t.join(timeout=5.0)
+
+    return _Holder()
+
+
 def _cgroup_dir_for(name: str) -> Path | None:
     """The container's cgroup v2 dir (same resolution the manager's
     instance_cgroup_path does: docker id -> system.slice/docker-<id>.
@@ -414,21 +471,74 @@ def _cgroup_dir_for(name: str) -> Path | None:
     return None
 
 
-def _write_cgroup_current(cg: Path | None, value_bytes: int) -> bool:
-    """Simulate cgroup pressure: write `memory.current` directly. The
-    drift watch READS the file (it never allocates), so between two
-    rechecks this write is the S2.5 pressure signal itself. cgroup v2
-    accepts writes to memory.current; the kernel's real current value
-    resumes on the next allocation/charge, so the write is transient
-    and self-cleaning (the test's `finally` tears the container down
-    anyway)."""
+def _inject_cgroup_pressure(
+    container: str, cg: Path | None, target_bytes: int, hold_s: float = 45.0
+) -> bool:
+    """G3 PR#11 r1 (DOD #4, test #4 root cause): the cgroup v2
+    `memory.current` on this box is NOT writable by the test user — the
+    instance containers run in `system.slice/docker-<id>.scope`
+    (root-owned; the 2026-09-23 drift probe got `Permission denied`,
+    rc=1, both as uid 1000 and via a privileged root helper). The old
+    simulated write therefore never landed and the S2.5 clock never
+    started. The pressure is now injected the way the kernel actually
+    charges it: `docker exec` allocates REAL anonymous memory inside
+    the container, which the kernel charges to that container's cgroup
+    (`memory.current` rises by the allocation — probe 2026-09-23:
+    1.1 GB charge moved memory.current 1.5 MB -> 1.1 GB).
+
+    The allocation is a bounded holder: `yes A | head -c N` materializes
+    ~N bytes of non-NUL anonymous pages inside the instance (the
+    image has bash/yes/head, probed 2026-09-23), held for `hold_s` so
+    the manager's shrunken 6 s drift rechecks observe it over the
+    S2.5 30 s sustained window. The holder exits after `hold_s`; the
+    pages are released; the test's `finally` tears the container down
+    regardless.
+
+    Returns True only when the charge actually LANDED: `memory.current`
+    is re-read and must exceed the pre-charge baseline by at least
+    50% of the target (page-cache noise below that is not a charge).
+    """
     if cg is None:
         return False
     try:
-        (cg / "memory.current").write_text(f"{value_bytes}\n")
-        return True
-    except OSError:
+        before = int((cg / "memory.current").read_text().strip())
+    except (OSError, ValueError):
         return False
+    n = int(target_bytes)
+    r = subprocess.run(
+        [
+            "docker",
+            "exec",
+            container,
+            "sh",
+            "-c",
+            f"x=$(yes A 2>/dev/null | head -c {n}); sleep {int(hold_s)}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=hold_s + 30.0,
+    )
+    if r.returncode != 0:
+        # The exec itself failed (bad image toolset) — but the charge
+        # may still have landed before the failure; fall through to the
+        # re-read below and let it decide.
+        print(
+            f"[2.11 #4] pressure holder rc={r.returncode}: "
+            f"{(r.stderr or r.stdout)[:200]}"
+        )
+    # Let the kernel settle the charge, then re-read.
+    time.sleep(2.0)
+    try:
+        after = int((cg / "memory.current").read_text().strip())
+    except (OSError, ValueError):
+        return False
+    landed = after - before >= int(0.5 * n)
+    print(
+        f"[2.11 #4] cgroup charge: {before} B -> {after} B "
+        f"(target +{n} B; landed={landed})"
+    )
+    return landed
 
 
 def _read_health(health_dir: Path) -> dict | None:
@@ -738,9 +848,24 @@ class TestS28Acceptance(unittest.TestCase):
                     pid_before = _engine_pid_in_container("bonsai2-server-0")
                     print(
                         f"\n[2.11 #2] healthy; killing engine pid {pid_before} "
-                        f"inside bonsai2-server-0"
+                        f"inside bonsai2-server-0 + holding port {PORT_BASE} down"
                     )
 
+                    # G3 PR#11 r1 (DOD #4, #2 root cause): the unit's own
+                    # Restart=on-failure + RestartSec=5 recovered the
+                    # engine in ~10-15 s (warm-cache reload) BETWEEN the
+                    # manager's 10 s probe cycles, so the S2.2
+                    # two-consecutive-fails -> degraded rule never saw 2
+                    # fails (the 2026-09-23 run: sequence ['healthy']
+                    # for 120 s). The kill now lands WITH a bounded
+                    # host-side port holder on 30101: while it binds,
+                    # the restarted engine cannot take its port, the
+                    # unit's restart loop keeps failing, down-time spans
+                    # >= 2 probe cycles -> degraded IS witnessed. The
+                    # holder releases only AFTER degraded is seen (the
+                    # reload half = the engine's bind+load+first healthy
+                    # probe — the same S1.8 #4 budget as before, so the
+                    # reload_s arithmetic is unchanged).
                     kill_t0 = time.monotonic()
                     subprocess.run(
                         [
@@ -755,13 +880,18 @@ class TestS28Acceptance(unittest.TestCase):
                         text=True,
                         check=True,
                     )
+                    holder = _port_holder(PORT_BASE)
                     # Witness the S2.2 state sequence on the document:
                     # healthy -> degraded (two consecutive fails at the
-                    # 10 s probe cadence) -> healthy (the unit's own
-                    # Restart=on-failure + RestartSec=5 brings the
-                    # engine back; the manager's five-fail escalation
-                    # is the backstop). Poll the 0.2 s witness window.
+                    # 10 s probe cadence, reachable ONLY while the
+                    # holder keeps the restarted engine from binding)
+                    # -> healthy (holder released at the degraded
+                    # witness; the unit's next restart attempt binds,
+                    # loads, and the manager's next probe clears it;
+                    # the five-fail escalation is the backstop).
+                    # Poll the 0.2 s witness window.
                     seq: list[str] = []
+                    degraded_at: float | None = None
                     recovered_at: float | None = None
                     deadline = time.monotonic() + 120.0
                     while time.monotonic() < deadline:
@@ -770,15 +900,24 @@ class TestS28Acceptance(unittest.TestCase):
                             st = _health_states(h).get(0, ("?", None, False))[0]
                             if not seq or seq[-1] != st:
                                 seq.append(st)
+                            if degraded_at is None and "degraded" in seq:
+                                degraded_at = time.monotonic()
+                                # Release the port NOW: the degraded
+                                # state is witnessed; the restarted
+                                # engine can bind + load, and the
+                                # manager's next probe clears it to
+                                # healthy. The RELOAD half below is
+                                # measured from this moment.
+                                holder.release()
                             if st == "healthy" and "degraded" in seq:
                                 recovered_at = time.monotonic()
                                 break
                         time.sleep(POLL_S)
                     self.assertIsNotNone(
-                        recovered_at,
-                        f"S2.8 #2: never witnessed "
-                        f"healthy->degraded->healthy (sequence: {seq})",
+                        degraded_at,
+                        f"S2.8 #2: never witnessed degraded (sequence: {seq})",
                     )
+                    holder.release()  # idempotent — safety on the early path
                     total_s = recovered_at - kill_t0
                     # The S1.8 #4 15 s budget is the RELOAD half (the
                     # MAP 1.11 convention: the prefix is measured, not
@@ -838,24 +977,43 @@ class TestS28Acceptance(unittest.TestCase):
     def test_3_n0_main_only_and_ptq1_fallback(self):
         self._preconditions(self.budget + 1.0)
         fb_budget = _fallback_budget_gb()  # computed live (no hardcoded copy)
+        # G3 PR#11 r1 (DOD #4, #3 root cause): the footprints are computed
+        # from the LIVE MemTotal (the manager's read_total_gb reads the
+        # same value) instead of baked box-size constants — this box's
+        # MemTotal is 127.5 GB, not the SPEC's 121.6 worked example, and
+        # a baked 100.0 GB footprint left free 19.54 GB -> N'=1, so the
+        # S2.4 retry (which only fires at N'=0) never ran. Half A: free
+        # ~1.0 GB (deep in N'=0). Half B: free = the MIDPOINT of
+        # [fallback budget, PQ2_0 budget) — strictly below the 14.78 GB
+        # PQ2_0 budget (planning tier N'=0) but above the 13.46 GB
+        # fallback budget (the S2.4 retry grants instance 0).
+        total = _mem_total_gb()
+        fp_a = total - 8.0 - 1.0
+        free_b = (round(fb_budget, 2) + 14.78) / 2.0
+        fp_b = total - 8.0 - free_b
+        print(
+            f"[2.11 #3] live MemTotal {total:.2f} GB: half A footprint "
+            f"{fp_a:.2f} (free {total - fp_a - 8.0:.2f} GB -> N'=0 clamp); "
+            f"half B footprint {fp_b:.2f} (free {free_b:.2f} GB -> "
+            f"N'=0 at PQ2_0, S2.4 fallback grants)"
+        )
         with tempfile.TemporaryDirectory(prefix="bonsai2-211-3-") as td:
             tdir = Path(td)
-            # The S2.7 N=0 case: override the main footprint to 120 GB
-            # AND point `container` at a name that does not exist, so
-            # the S2.3 live-cgroup read falls back to the recorded
-            # footprint (the real main container's live cgroup is ~2 GB
-            # asleep and would otherwise grant the full pool — the
-            # spec's "override main footprint to 120 GB" is the
-            # RECORDED-footprint override).
+            # The S2.7 N=0 case: override the main footprint (live
+            # MemTotal-based, see above) AND point `container` at a
+            # name that does not exist, so the S2.3 live-cgroup read
+            # falls back to the recorded footprint (the real main
+            # container's live cgroup is ~2 GB asleep and would
+            # otherwise grant the full pool).
             srv = tdir / "serving-n0.yaml"
             srv.write_text(
                 SERVING_YAML.read_text()
                 .replace(
                     "container: qwen38-sglang", "container: qwen38-sglang-missing-211"
                 )
-                .replace("footprint_gb: 76.4", "footprint_gb: 120.0")
+                .replace("footprint_gb: 76.4", f"footprint_gb: {fp_a:.2f}")
             )
-            self.assertIn("footprint_gb: 120.0", srv.read_text())
+            self.assertIn(f"footprint_gb: {fp_a:.2f}", srv.read_text())
             # --- half A: no fallback size in the config -> plain
             #     main-only (the S2.3 clamp, no S2.4 retry possible).
             eng = tdir / "engine-n0.yaml"
@@ -891,19 +1049,20 @@ class TestS28Acceptance(unittest.TestCase):
                     "budget_zero, zero instances"
                 )
             # --- half B: the S2.4 PTQ1_0 fallback retry (the S2.8 #3
-            #     sibling): footprint 100.0 -> free 13.6 GB, still <
-            #     the PQ2_0 budget 14.78 (N'=0 at the PQ2_0 budget) but
-            #     >= the S2.4 fallback budget (~13.46) -> the retry
-            #     rewrites instance 0's unit to the PTQ1_0 quant + the
-            #     fallback budget and spawns it live (the image bakes
-            #     both quants, S1.3/S6.1).
+            #     sibling): live-footprint override -> free = free_b
+            #     (midpoint of [fallback budget, PQ2_0 budget)) —
+            #     still < the PQ2_0 budget 14.78 (N'=0 at the PQ2_0
+            #     budget) but >= the S2.4 fallback budget (~13.46) ->
+            #     the retry rewrites instance 0's unit to the PTQ1_0
+            #     quant + the fallback budget and spawns it live (the
+            #     image bakes both quants, S1.3/S6.1).
             srv2 = tdir / "serving-fb.yaml"
             srv2.write_text(
                 SERVING_YAML.read_text()
                 .replace(
                     "container: qwen38-sglang", "container: qwen38-sglang-missing-211"
                 )
-                .replace("footprint_gb: 76.4", "footprint_gb: 100.0")
+                .replace("footprint_gb: 76.4", f"footprint_gb: {fp_b:.2f}")
             )
             self._install_units()
             try:
@@ -1024,11 +1183,23 @@ class TestS28Acceptance(unittest.TestCase):
                     cg0 = _cgroup_dir_for("bonsai2-server-0")
                     self.assertIsNotNone(cg0, "instance 0 cgroup not found")
                     print(
-                        f"\n[2.11 #4] healthy; writing "
-                        f"{pressure_bytes} B (> cap {cap_bytes} B) to "
-                        f"instance 0's cgroup memory.current"
+                        f"\n[2.11 #4] healthy; charging "
+                        f"{pressure_bytes} B (> cap {cap_bytes} B) into "
+                        f"instance 0's cgroup (real in-container allocation)"
                     )
-                    _write_cgroup_current(cg0, pressure_bytes)
+                    # G3 PR#11 r1 (DOD #4, #4 root cause): the old direct
+                    # `memory.current` write got EACCES on this box's
+                    # root-owned system.slice scopes — the charge is now
+                    # REAL memory allocated inside the container, and we
+                    # ASSERT it landed (the helper re-reads the cgroup).
+                    self.assertTrue(
+                        _inject_cgroup_pressure(
+                            "bonsai2-server-0", cg0, pressure_bytes
+                        ),
+                        "S2.8 #4: the cgroup charge did not land — "
+                        "memory.current did not rise over cap; the "
+                        "drift watch cannot see it",
+                    )
                     # The halve event: the S2.5 clock starts at the
                     # first over-cap recheck and fires at the first
                     # recheck > 30 s later. Poll the document for
