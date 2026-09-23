@@ -606,6 +606,17 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-23 — G3 loop PR #10: round 16 reviewed — 0 P0/1 P1/2 P2, ALL THREE refuted by pin-reality/code/design-split → DOD met, G3 loop complete (no code changes; last code commit 24d801a)
+
+- **Review: 0 P0 / 1 P1 / 2 P2 (raw: /tmp/review-phase2-manager-skeleton-r16.txt; stdout /tmp/review-10-stdout-r16.txt, review.sh rc=0).** All three refuted:
+  - P1 "S1.4 free read is host-wide MemAvailable, not GPU/VRAM → tier is a no-op on the target box" — **REFUTED (box pin-reality).** Verified live this round: `nvidia-smi --query-gpu=memory.used,memory.total` → `[N/A], [N/A]` on this GB10 — on unified-LPDDR5X there is no separate VRAM pool; the pool IS /proc/meminfo, and the MAP 1.9 OOM test already pins `MemAvailable` as the free read (`test_oom_1_9.py`: "free = /proc/meminfo MemAvailable"). SPEC S1.4 says "nvidia-smi/cgroup free"; on unified memory the cgroup-visible free = MemAvailable. The tier is not a no-op: it gates `MemAvailable >= max(footprint+1.0, cap)` = 15.08 GB and binds under real pressure (after ~28 GB of instances load, or host memory pressure). The "wrong pool" framing assumes a discrete VRAM pool this architecture does not have.
+  - P2#1 "load_config never rejects count:0 / budget:0" — **REFUTED (spec + documented design split).** count=0 is explicitly valid (SPEC S1.4: "N=0 is a valid result (main-only mode; see S2.4)"); count 3–8 are in the valid [0,8] range; budget=0 is caught by `planning_tier`'s existing `budget_gb <= 0` guard → N'=0 → main-only (correct S2.4 behaviour). The load_config docstring states the split: presence+type+sign at load, range checks belong to the S1.7 render-config tool.
+  - P2#2 "main-only settle path passes main_only_reason=None into run_probe_loop" — **REFUTED (misread of the call site).** `main_only_reason = "budget_zero"` is set at line 1153 BEFORE the branch; the settle `run_probe_loop` (line 1187) passes that value, not None. The `build_health` fallback only fires on actual None. The forward-looking concern (S3.2 reload persisting user_unloaded/ERR_VRAM_OOM 0-instance reasons) is MAP 2.6/2.7 territory (reload not in the skeleton); recorded as a hook there.
+- **DOD met: 0 real P0/P1, all P2s refuted with reasons. G3 loop complete (16 rounds).**
+- **State at close:** 186/186 hermetic OK; ruff clean; gate PASS; last code commit `24d801a` (r15); @gpu green ×14 (last: r15 52.2 s, 2 instances healthy, stack=healthy).
+- **MAP/PR:** raw + disposition → PR #10 comment 680.
+- **Next: G4 human merge gate** (`git-merge-push-sync`), then MAP 2.6.
+
 ### 2026-09-23 — G3 loop PR #10: round 15 reviewed — 0 P0/1 P1/2 P2; P1 (boot deadline started AFTER the S2.3 reads — extends r14 P1) + both P2s real, all fixed + pinned (commit 24d801a, @gpu r15 52.2 s)
 
 - **Review: 0 P0 / 1 P1 / 2 P2.**
