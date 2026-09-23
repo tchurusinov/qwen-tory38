@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""bonsai2-manager — MAP 2.1–2.5 / S2.1–S2.5: the subagent instance manager.
+"""bonsai2-manager — MAP 2.1–2.11 / S2.1–S2.8: the subagent instance manager.
 
 Runs from `bonsai2-sglang.service` (Type=notify via this file's sd_notify;
-S2.2). It is the actor for the whole S2 lifecycle skeleton:
+S2.2). It is the actor for the whole S2 lifecycle:
 
   * reads `/opt/bonsai2/etc/subagent-engine.yaml` + `serving.yaml` (S2.2)
   * runs the S2.3 boot-time budget check —
@@ -10,6 +10,11 @@ S2.2). It is the actor for the whole S2 lifecycle skeleton:
     with `free_gb` read from the MAIN container's live cgroup
     `memory.current` (sleep-accurate) else the recorded fresh-load
     `main_stack.footprint_gb` fallback (S2.3)
+  * runs the S2.4 N=0 PTQ1_0 fallback (MAP 2.7): when the S2.3 formula
+    yields N' = 0 at the PQ2_0 budget, re-plan once at the PTQ1_0
+    fallback footprint (~18% smaller, S1.1) + the S2.4 ctx-halve retry
+    on an allocation-tier fail (multiple of 8192, floor 8192); records
+    the quant in use in `subagent-engine.yaml` (S2.4)
   * runs the S1.4 allocation tier before each spawn — the stricter
     `free >= instance_footprint_GB + 1.0` gate, with the bounded free
     read (5 s probe + one retry, then free = 0) (S1.4/S2.3)
@@ -20,13 +25,40 @@ S2.2). It is the actor for the whole S2 lifecycle skeleton:
     and records `main_healthy`)
   * writes `/run/bonsai2/health.json` in the S3.1 schema (S2.2), atomically
   * sends `READY=1` to systemd once the boot sequence completes (Type=notify)
-  * then runs the steady health-probe loop (S2.2; MAP 2.6 plugs in here)
+  * then runs the steady health-probe loop (S2.2) with:
+      - the S2.2 escalation (MAP 2.6): two consecutive probe fails ->
+        `degraded`; five -> a `systemctl restart` attempt (manager
+        backstop on top of the unit's `Restart=on-failure` — a unit
+        systemd already restarted since the fail streak began is
+        deferred to, not double-restarted)
+      - the S2.5 drift watch (MAP 2.8): cgroup pressure sustained > 30 s
+        over the instance's `--memory` cap, evaluated on the 5-minute
+        recheck -> halve that instance's ctx in its unit + `systemctl
+        restart` in place; `ctx_reduced: true` + the new ctx in
+        health.json; counted in the instance's restart budget; `bunloaded`
+        instances are never re-spawned
+      - the S3.2 unload/reload manager-level semantics (MAP 2.10): the
+        `bonsai2-unload` / `bonsai2-reload` commands (Phase 3) write
+        `control/unload` / `control/reload` JSON into the health dir;
+        the manager processes them each cycle (unload -> `systemctl
+        stop` + `bunloaded` + `user_unloaded` main-only reason; reload ->
+        S1.4 tier + unit start + health re-probe, partial on a tier fail)
+        and writes a timestamped ack file the command can poll (dead
+        manager = no ack = the Phase-3 exit-84 path)
 
 MAP scope for this file: 2.1 (skeleton: notify + config + health.json),
-2.2 (boot-time budget check), 2.3 (allocation tier), 2.5 (spawn path).
-2.4 is the unit files (`units/`, the manager is what they run). The
-S2.4 PTQ1_0 / ctx-halve N=0 fallback (MAP 2.7) and the S2.5 5-minute
-drift watch (MAP 2.8) are clearly-marked hooks the skeleton defers to.
+2.2 (boot-time budget check), 2.3 (allocation tier), 2.5 (spawn path),
+2.6 (S2.2 escalation: 2-fail -> degraded, 5-fail -> systemctl restart,
+NRestarts dedup against systemd's own Restart=on-failure),
+2.7 (S2.4 N=0/main-only: the PTQ1_0 fallback retry + the S2.4 ctx-halve
+retry + the quant/ctx bookkeeping in subagent-engine.yaml),
+2.8 (S2.5 drift watch: 5-min recheck, 30 s sustained cgroup pressure ->
+in-place ctx halve + unit restart), 2.9 (S2.6: the measured boot written
+back to serving.yaml boot_target_s), 2.10 (the S3.2 unload/reload
+manager-level semantics the Phase-3 commands mediate through the
+control/ request queue). 2.4 is the unit files
+(`units/`, the manager is what they run); 2.11 is the S2.8 acceptance
+run (tests/gpu/test_lifecycle_2_11.py + the run itself).
 
 Stdlib-only for the core so it is hermetic-testable; PyYAML at the YAML
 edge (same convention as the other `bin/` tools). sd_notify is hand-rolled
@@ -80,6 +112,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -117,12 +150,32 @@ FREE_PROBE_RETRIES = 1
 DEFAULT_CONFIG_DIR = "/opt/bonsai2/etc"
 DEFAULT_HEALTH_DIR = "/run/bonsai2"
 
-# S2.2 health-probe constants (the steady-loop values; MAP 2.6 owns the
-# full degraded/restart policy — the skeleton uses these to WAIT during
-# the spawn sequence, which S2.5 needs regardless).
+# S2.2 health-probe constants (the steady-loop values; the S2.2
+# escalation (MAP 2.6) is driven off these).
 HEALTH_PROBE_POLL_S = 2.0
 COMPLETION_RT_MAX_S = 10.0  # S2.2: a 16-token completion must RT < 10 s
 COMPLETION_MAX_TOKENS = 16
+
+# S2.2 escalation (MAP 2.6): `Two consecutive fails -> degraded;
+# five -> restart attempt.` — the probe cadence is health_poll_s, so
+# "consecutive fails" = consecutive health_poll_s cycles in which the
+# S2.2 probe (models + 16-token completion) failed.
+DEGRADED_FAILS = 2
+RESTART_FAILS = 5
+# After a manager-issued restart, the unit goes through ExecStartPre +
+# the 27 B cold load; systemd's `Restart=on-failure` / the unit itself
+# owns that window. If the unit restarted on its own since the fail
+# streak began, the manager defers to it (no double restart) — see
+# `_refresh_states_with_escalation`.
+
+# S2.5 drift watch (MAP 2.8): `re-checks every 5 min; if an instance's
+# cgroup memory pressure is sustained (> 30 s over its --memory cap),
+# halve its ctx + restart in place`.
+DRIFT_RECHECK_S = 300.0  # env BONSAI2_DRIFT_RECHECK_S overrides (tests)
+DRIFT_PRESSURE_S = 30.0  # env BONSAI2_DRIFT_PRESSURE_S overrides (tests)
+# S2.5: `halve, rounded down to a multiple of 8192, floor 8192`.
+CTX_HALVE_MULTIPLE = 8192
+CTX_FLOOR = 8192
 
 
 # --------------------------------------------------------------------------
@@ -277,6 +330,19 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
         raise ValueError(
             "ERR_CONFIG: subagent-engine.yaml: model.fallback_size_bytes not a positive number"
         )
+    # S1.3 on-disk model filenames (MAP 2.7: the S2.4 fallback boot path
+    # rewrites the unit's --model flag to model.fallback_file). Optional
+    # here — a missing key just disables the surgical unit rewrite (the
+    # caller logs it); the S1.6 schema validation of presence is
+    # bonsai2_render_config.py's job (MAP 1.5).
+    model_file = model.get("file")
+    if model_file is not None and not isinstance(model_file, str):
+        raise ValueError("ERR_CONFIG: subagent-engine.yaml: model.file not a string")
+    fallback_model_file = model.get("fallback_file")
+    if fallback_model_file is not None and not isinstance(fallback_model_file, str):
+        raise ValueError(
+            "ERR_CONFIG: subagent-engine.yaml: model.fallback_file not a string"
+        )
 
     main_stack = srv.get("main_stack")
     if not isinstance(main_stack, dict):
@@ -313,6 +379,8 @@ def load_config(engine_yaml: Path, serving_yaml: Path) -> dict:
         "fallback_size_bytes": (
             int(fallback_size_bytes) if fallback_size_bytes is not None else None
         ),  # normalized (r14 P2)
+        "model_file": model_file,  # S1.3 on-disk name (MAP 2.7 unit rewrite)
+        "fallback_model_file": fallback_model_file,
         "count": inst["count"],
         "port_base": inst["port_base"],
         "ctx_size": inst["ctx_size"],
@@ -485,6 +553,152 @@ def planning_tier(
             f"(free {free_gb:.2f} GB / budget {budget_gb:.2f} GB)"
         )
     return n_prime, free_gb, warnings
+
+
+# --------------------------------------------------------------------------
+# S2.5 ctx reduction rule (shared by the S2.4 fallback boot path (MAP 2.7)
+# and the S2.5 drift watch (MAP 2.8))
+# --------------------------------------------------------------------------
+def halve_ctx(ctx: int) -> int:
+    """S2.5 / S2.4 ctx reduction rule, verbatim: `halve (rounded down to
+    a multiple of 8192, floor 8192)`.
+
+    S2.5: `the manager rewrites that instance's --ctx-size to half
+    (rounded down to a multiple of 8192, floor 8192)`. S2.4 fallback
+    boot path: `the manager retries that one instance with the ctx
+    halved (multiple of 8192, floor 8192 — the same reduction as the
+    S2.5 drift rule)`. One pure function, one rule, both call sites:
+
+      halve_ctx(262144) = 131072
+      halve_ctx(131072) = 65536
+      halve_ctx(8192)   = 8192   (the floor — never below)
+      halve_ctx(8191)   = 8192   (sub-floor rounds up to the floor;
+                                  ctx is always a multiple of 8192 by
+                                  the S1.6/S2.5 invariants, so this
+                                  case is defensive)
+    """
+    if ctx <= CTX_FLOOR:
+        return CTX_FLOOR
+    half = (ctx // 2) // CTX_HALVE_MULTIPLE * CTX_HALVE_MULTIPLE
+    return max(half, CTX_FLOOR)
+
+
+# --------------------------------------------------------------------------
+# S2.4 N=0 fallback (PTQ1_0 retry, MAP 2.7)
+# --------------------------------------------------------------------------
+def fallback_quant_available(cfg: dict) -> bool:
+    """S2.4 (MAP 2.7): the PTQ1_0 retry is only possible when the config
+    carries the fallback quant's size (model.fallback_size_bytes — the
+    S1.1 ~5.95 GB PTQ1_0). Without it the N'=0 handoff stays a plain
+    main-only (budget_zero); the S1.4 formula has no fallback weights
+    to plan against."""
+    return bool(cfg.get("fallback_size_bytes"))
+
+
+def fallback_footprint_gb(cfg: dict) -> float:
+    """S2.4: `recompute S1.4 with its footprint` — the PTQ1_0 weights +
+    the UNCHANGED q4_0 KV at the same ctx/slots (S2.4 verbatim: 'the
+    6.87 GB q4_0 KV at the same ctx/slots' — the KV term is dtype-
+    pinned by `kv_cache`, quant-independent)."""
+    return bonsai2_vram.instance_footprint_gb(
+        cfg["fallback_size_bytes"] / 1e9,
+        int(cfg["slots"]),
+        int(cfg["ctx_size"]),
+        cfg["per_slot_per_token_gb"],
+    )
+
+
+def fallback_budget_gb(cfg: dict) -> float:
+    """S2.4: the PTQ1_0 per-instance BUDGET — the formula footprint +
+    the S1.4 5% margin (`~12.82 GB formula footprint; +5% margin ->
+    ~13.46 GB budget`, S2.4 verbatim). Unlike the allocation tier's
+    gate term, this is NOT floored at the configured
+    per_instance_budget_gb: the fallback exists precisely to admit an
+    instance on a pool that could NOT fit the PQ2_0 cap (a max() floor
+    at 14.78 GB would re-plan at the budget that just came out N'=0)."""
+    return fallback_footprint_gb(cfg) * 1.05
+
+
+def record_quant_in_use(engine_yaml: Path, quant: str, *, log=_log) -> bool:
+    """S2.4 (MAP 2.7): `record the quant in use in subagent-engine.yaml`
+    — a surgical, comment-preserving line rewrite: replace an existing
+    `model.quant_in_use:` line, else insert one under the `model:`
+    block. The key is informational for the pool state (which gguf the
+    pool is serving); the units' --model flags are what actually run
+    the quant (the fallback unit rewrites below), so the record is a
+    state marker, not a boot input."""
+    try:
+        text = engine_yaml.read_text()
+    except OSError as exc:
+        log(f"record_quant_in_use: {engine_yaml}: {exc}")
+        return False
+    lines = text.splitlines(keepends=True)
+    quant_line = (
+        f"  quant_in_use: {quant}   # S2.4 N=0 fallback quant, "
+        "recorded by the manager at boot (MAP 2.7)"
+    )
+    replaced = False
+    for idx, line in enumerate(lines):
+        if re.match(r"^  quant_in_use:", line):
+            lines[idx] = quant_line + "\n"
+            replaced = True
+            break
+    if not replaced:
+        for idx, line in enumerate(lines):
+            if re.match(r"^model:\s*$", line):
+                lines.insert(idx + 1, quant_line + "\n")
+                replaced = True
+                break
+    if not replaced:
+        log(f"record_quant_in_use: no model: block in {engine_yaml}")
+        return False
+    tmp = engine_yaml.with_suffix(engine_yaml.suffix + ".tmp")
+    tmp.write_text("".join(lines))
+    os.replace(tmp, engine_yaml)
+    log(f"S2.4: recorded quant_in_use={quant} in {engine_yaml.name}")
+    return True
+
+
+def record_ctx_in_use(engine_yaml: Path, ctx: int, *, log=_log) -> bool:
+    """S2.4 (MAP 2.7): the S2.4 ctx-halve retry's bookkeeping —
+    `The reduced ctx is recorded in subagent-engine.yaml
+    (instances.ctx_size for that quant) so restarts stay consistent`:
+    a surgical line rewrite of the `instances.ctx_size:` key (the same
+    key the next boot reads for the footprint / the unit's --ctx-size),
+    so a manager restart or install re-run keeps the reduced ctx
+    instead of re-admitting the instance at the ctx that just OOM'd.
+    Same shape as `record_quant_in_use` (replace-or-insert under the
+    `instances:` block; insert only if the key line is missing — a
+    missing key would be an ERR_CONFIG at load anyway, so this is
+    defensive)."""
+    try:
+        text = engine_yaml.read_text()
+    except OSError as exc:
+        log(f"record_ctx_in_use: {engine_yaml}: {exc}")
+        return False
+    lines = text.splitlines(keepends=True)
+    ctx_line = (
+        f"  ctx_size: {int(ctx)}   # S2.4: reduced by the ctx-halve retry "
+        "at boot (MAP 2.7); restarts stay consistent at this ctx"
+    )
+    for idx, line in enumerate(lines):
+        if re.match(r"^  ctx_size:\s", line):
+            lines[idx] = ctx_line + "\n"
+            tmp = engine_yaml.with_suffix(engine_yaml.suffix + ".tmp")
+            tmp.write_text("".join(lines))
+            os.replace(tmp, engine_yaml)
+            log(f"S2.4: recorded instances.ctx_size={int(ctx)} in {engine_yaml.name}")
+            return True
+    for idx, line in enumerate(lines):
+        if re.match(r"^instances:\s*$", line):
+            lines.insert(idx + 1, ctx_line + "\n")
+            tmp = engine_yaml.with_suffix(engine_yaml.suffix + ".tmp")
+            tmp.write_text("".join(lines))
+            os.replace(tmp, engine_yaml)
+            log(f"S2.4: recorded instances.ctx_size={int(ctx)} in {engine_yaml.name}")
+            return True
+    log(f"record_ctx_in_use: no instances: block in {engine_yaml}")
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -690,19 +904,24 @@ def systemctl_start_instance(i: int, base: list[str] | None = None) -> int:
 
 
 def systemctl_state(i: int, base: list[str] | None = None) -> dict:
-    """`systemctl show -p SubState -p Result` for the unit. Returns the RAW
-    systemd values (e.g. SubState="exited"/"running", Result="success"),
-    NOT S3.1 state strings — the SubState/Result -> S3.1 mapping
-    (active->healthy pending probe, failed->bfailed,
-    inactive->bdown/bunloaded) is applied by the CONSUMER. FORWARD-HOOK
-    (G3 PR #10 r6 P2; r7 P2): not called by the skeleton's boot/probe
-    paths — the S1.5 bfailed routing comes from the `systemctl start` rc
-    (start_rc), and steady state comes from the port probe. MAP 2.6's
-    restart escalation is where this is consumed + the S3.1 mapping is
-    wired."""
+    """`systemctl show -p SubState -p Result -p NRestarts` for the unit.
+    Returns the RAW systemd values (e.g. SubState="exited"/"running",
+    Result="success"), NOT S3.1 state strings — the SubState/Result ->
+    S3.1 mapping is applied by the consumers (`_refresh_states`,
+    `check_escalation`).
+
+    Consumed by the S2.2 escalation (MAP 2.6): `NRestarts` detects a
+    unit that systemd itself restarted since the fail streak began
+    (`Restart=on-failure` is the unit's own policy; the manager's
+    five-fail restart is a BACKSTOP on top of it, and must not
+    double-restart a unit systemd already brought back — the restart
+    then resets the unit's start-limit counter, S2.2, and the streak
+    defers to the fresh load).
+    """
     unit = f"bonsai2-server@{i}"
     r = subprocess.run(
-        (base or systemctl_base()) + ["show", "-p", "SubState", "-p", "Result", unit],
+        (base or systemctl_base())
+        + ["show", "-p", "SubState", "-p", "Result", "-p", "NRestarts", unit],
         capture_output=True,
         text=True,
         check=False,
@@ -713,6 +932,188 @@ def systemctl_state(i: int, base: list[str] | None = None) -> dict:
             k, _, v = line.partition("=")
             state[k.strip()] = v.strip()
     return state
+
+
+def systemctl_restart_instance(i: int, base: list[str] | None = None) -> int:
+    """`systemctl restart bonsai2-server@i` (S2.2 five-fail restart,
+    MAP 2.6; S2.5 drift in-place restart, MAP 2.8). `restart` (unlike
+    `start`) resets the unit's start-limit counter, so neither path
+    can trip `bfailed` by itself (S2.2/S2.5). Returns the exit code."""
+    cmd = (base or systemctl_base()) + ["restart", f"bonsai2-server@{i}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        _log(f"systemctl restart bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}")
+    return r.returncode
+
+
+def systemctl_stop_instance(i: int, base: list[str] | None = None) -> int:
+    """`systemctl stop bonsai2-server@i` (S3.2 unload, MAP 2.10 —
+    `systemctl stop` -> the unit's ExecStartPre `docker rm -f`, the
+    same signal path as `cancel`; S2.5: an explicit unload beats the
+    drift watch, so a `bunloaded` instance is never re-spawned).
+    Returns the exit code."""
+    cmd = (base or systemctl_base()) + ["stop", f"bonsai2-server@{i}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        _log(f"systemctl stop bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}")
+    return r.returncode
+
+
+def instance_cgroup_path(name: str) -> Path | None:
+    """The instance container's cgroup dir (S2.5 drift watch, MAP 2.8).
+
+    `name` is the docker container name (`bonsai2-server-i` — the S2.2
+    `--name` flag). Docker on this box (cgroup v2, systemd-managed)
+    charges each container to `/sys/fs/cgroup/system.slice/
+    docker-<id>.scope/` (probed 2026-09-22, the S2.3 main-cgroup read);
+    the raw `docker/<id>/` shape is tried second (cross-layout robust,
+    same convention as `main_used_gb`). None when the container is
+    gone (the unit stopped / drift-restarted before the read).
+    """
+    r = subprocess.run(
+        ["docker", "inspect", "-f", "{{.Id}}", name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        return None
+    cid = r.stdout.strip()
+    if not cid:
+        return None
+    flat = cid.replace("/", "")
+    for cand in (
+        Path(f"/sys/fs/cgroup/system.slice/docker-{flat}.scope"),
+        Path(f"/sys/fs/cgroup/docker/{flat}"),
+    ):
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def cgroup_memory_current(cgroup_dir: Path | None) -> int | None:
+    """`memory.current` (bytes) in a cgroup v2 dir; None on any read
+    failure (the caller treats an unreadable cgroup as 'no pressure
+    signal this cycle' — the S2.5 `> 30 s over the cap` rule cannot
+    fire from a missing reading)."""
+    if cgroup_dir is None:
+        return None
+    try:
+        return int((cgroup_dir / "memory.current").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def rewrite_unit_ctx(
+    unit_path: Path, new_ctx: int, current_ctx: int, *, log=_log
+) -> bool:
+    """S2.5 drift watch (MAP 2.8): rewrite the instance unit's rendered
+    `--ctx-size` from `current_ctx` to `new_ctx` IN PLACE (same unit
+    name, same port, same image — the S2.5 'container-level restart,
+    not systemd re-plumbing' contract).
+
+    The units are installed by install.sh (S6.3) from the S2.2
+    template; at install time each concrete unit carries the rendered
+    `--ctx-size {ctx}` in its ExecStart. The rewrite is surgical:
+    replace the first `--ctx-size <current_ctx> ` occurrence with
+    `--ctx-size <new_ctx> ` — no re-render from the template (the
+    template is a placeholder install.sh owns, not the runtime unit),
+    no other line touched. Returns True iff the rewrite landed
+    (False = no occurrence found — the caller logs + defers; the
+    restart would then run with the old ctx, which is the unit's own
+    business, not a drift-watch failure).
+    """
+    if not unit_path.is_file():
+        log(f"drift watch: unit {unit_path} missing — deferring ctx rewrite")
+        return False
+    text = unit_path.read_text()
+    marker = f"--ctx-size {current_ctx} "
+    if marker not in text:
+        log(
+            f"drift watch: unit {unit_path} has no '--ctx-size {current_ctx} ' "
+            f"— deferring (the unit's ExecStart drifted from the recorded ctx)"
+        )
+        return False
+    text = text.replace(marker, f"--ctx-size {new_ctx} ", 1)
+    tmp = unit_path.with_suffix(unit_path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, unit_path)
+    log(
+        f"drift watch: {unit_path.name}: --ctx-size {current_ctx} -> {new_ctx} "
+        f"(S2.5 halve, multiple of {CTX_HALVE_MULTIPLE}, floor {CTX_FLOOR})"
+    )
+    return True
+
+
+def rewrite_unit_model(unit_path: Path, model_file: str, *, log=_log) -> bool:
+    """S2.4 fallback boot path (MAP 2.7): rewrite the instance unit's
+    `--model` flag to the PTQ1_0 gguf IN PLACE (same unit name, same
+    port, same image — the image bakes BOTH quants at
+    /opt/bonsai2/models/, S1.3/S6.1). Surgical: replace the first
+    `--model /opt/bonsai2/models/<anything> ` occurrence; False when
+    the unit has no --model flag (the caller logs + proceeds — the
+    unit then runs its default quant, which on a fresh install is the
+    configured one)."""
+    if not unit_path.is_file():
+        log(f"fallback boot: unit {unit_path} missing — deferring model rewrite")
+        return False
+    text = unit_path.read_text()
+    m = re.search(r"--model /opt/bonsai2/models/\S+ ", text)
+    if not m:
+        log(
+            f"fallback boot: unit {unit_path.name} has no "
+            "'--model /opt/bonsai2/models/...' flag — deferring "
+            "(the unit's ExecStart drifted from the S1.3 shape)"
+        )
+        return False
+    text = text.replace(m.group(0), f"--model /opt/bonsai2/models/{model_file} ", 1)
+    tmp = unit_path.with_suffix(unit_path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, unit_path)
+    log(
+        f"fallback boot: {unit_path.name}: --model -> "
+        f"/opt/bonsai2/models/{model_file} (S2.4 PTQ1_0 retry)"
+    )
+    return True
+
+
+def rewrite_unit_memory(unit_path: Path, old_budget_gb: float, new_budget_gb: float, *, log=_log) -> bool:
+    """S2.4 fallback boot path (MAP 2.7): rewrite the instance unit's
+    `--memory` / `--memory-swap` flags from the PQ2_0 budget to the
+    PTQ1_0 budget (the S2.2 `--memory` = the per-instance budget, so
+    the fallback instance must carry the FALLBACK budget — the S1.4
+    5%-margin figure for the PTQ1_0 footprint; otherwise the container
+    cap would still be the 14.78 GB PQ2_0 cap on a ~13.46 GB fallback
+    load). Same surgical shape as `rewrite_unit_model`: both flags,
+    first occurrence each, the `g` suffix kept verbatim (the S2.2
+    main-stack pattern; the docker GiB parse pin-reality delta applies
+    equally to both values)."""
+    if not unit_path.is_file():
+        log(f"fallback boot: unit {unit_path} missing — deferring memory rewrite")
+        return False
+    text = unit_path.read_text()
+    old_mem = f"--memory {old_budget_gb}g "
+    old_swap = f"--memory-swap {old_budget_gb}g "
+    if old_mem not in text or old_swap not in text:
+        log(
+            f"fallback boot: unit {unit_path.name} has no "
+            f"'--memory {old_budget_gb}g' / '--memory-swap {old_budget_gb}g' "
+            "— deferring (the unit's ExecStart drifted from the S2.2 shape)"
+        )
+        return False
+    new_mem = f"--memory {new_budget_gb}g "
+    new_swap = f"--memory-swap {new_budget_gb}g "
+    text = text.replace(old_mem, new_mem, 1).replace(old_swap, new_swap, 1)
+    tmp = unit_path.with_suffix(unit_path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, unit_path)
+    log(
+        f"fallback boot: {unit_path.name}: --memory/--memory-swap "
+        f"{old_budget_gb}g -> {new_budget_gb}g (S2.4 PTQ1_0 budget)"
+    )
+    return True
+
+
 
 
 def wait_instance_healthy(
@@ -748,22 +1149,549 @@ def wait_instance_healthy(
         time.sleep(HEALTH_PROBE_POLL_S)
     return last
 
+# --------------------------------------------------------------------------
+# S2.2 escalation + S2.5 drift + S3.2 control (steady-loop state machine)
+# --------------------------------------------------------------------------
+class _InstanceState:
+    """Per-instance steady-loop bookkeeping (the MAP 2.6/2.8/2.10
+    state machine). One per configured index (i in 0..count-1);
+    alignment is BY INDEX, not by list position — the boot skeleton
+    sized its state list to the spawned prefix, the steady loop owns
+    the full configured set.
+
+      state: S3.1 instance state string
+      fails: consecutive S2.2 probe fails (resets on a healthy probe)
+      restarted_at: monotonic() of the last unit-level restart observed
+        (manager-issued OR a systemd-side NRestarts increment) — the
+        five-fail escalation defers to a fresh load instead of
+        double-restarting (the restart resets the unit's start-limit
+        counter, S2.2)
+      ctx: the instance's LIVE ctx (halved by the drift watch / the
+        S2.4 ctx-halve retry; the config ctx is the boot-time value,
+        this is what the unit currently runs — S3.1 `ctx` is the
+        live value)
+      ctx_reduced: True once any halving has happened (S3.1/S2.5)
+      pressure_start: monotonic() when the cgroup first read over the
+        S2.2 --memory cap this cycle (the S2.5 `> 30 s sustained`
+        clock); None when at/below cap
+      restarts: manager-issued unit restarts (drift + escalation) —
+        the S2.5 'counted in that instance's restart budget' book
+        (global acceptance #5: <= 2 per instance over the 72 h soak)
+    """
+
+    __slots__ = (
+        "i",
+        "state",
+        "fails",
+        "restarted_at",
+        "last_nrestarts",
+        "ctx",
+        "ctx_reduced",
+        "pressure_start",
+        "restarts",
+    )
+
+    def __init__(self, i: int, ctx: int, state: str = "bdown"):
+        self.i = i
+        self.state = state
+        self.fails = 0
+        self.restarted_at: float | None = None
+        # -1 = NRestarts not yet observed; the S2.2 escalation (MAP 2.6)
+        # detects a systemd-side restart in between probe passes by a
+        # MONOTONIC NRestarts increment (it can never decrease), so a
+        # stale (low) baseline can only ever trigger the defer branch,
+        # which is the safe one.
+        self.last_nrestarts = -1
+        self.ctx = int(ctx)
+        self.ctx_reduced = False
+        self.pressure_start: float | None = None
+        self.restarts = 0
+
+
+class Runtime:
+    """The manager's steady-loop runtime state (one instance entry per
+    configured index; `spawned` = the indexes with a unit started).
+    Replaces the skeleton's `spawned: list[int]` + `states: list[str]`
+    pair, which only sized the spawned prefix — the S3.2 control path
+    (MAP 2.10) and the S2.5 drift watch (MAP 2.8) both need per-index
+    bookkeeping for the FULL configured set (a `bunloaded` index is
+    one that was granted at boot but stopped by the user; the drift
+    watch must see it and not re-spawn it)."""
+
+    def __init__(self, cfg: dict, spawned: list[int], boot_states: list[str]):
+        count = int(cfg["count"])
+        ctx0 = int(cfg["ctx_size"])
+        entries = [_InstanceState(i, ctx0, "bdown") for i in range(count)]
+        for idx, i in enumerate(spawned):
+            st = boot_states[idx] if idx < len(boot_states) else "bdown"
+            if i < count:
+                entries[i].state = st
+        self.cfg = cfg
+        self.entries: list[_InstanceState] = entries
+        self.spawned: list[int] = list(spawned)
+        # main_only_reason is only PRESENT when instances: 0 (S2.4);
+        # the value ("user_unloaded" vs "budget_zero") is caller-set.
+        self.main_only_reason: str | None = None
+
+    def entry(self, i: int) -> _InstanceState | None:
+        return self.entries[i] if 0 <= i < len(self.entries) else None
+
+    @property
+    def running(self) -> list[int]:
+        return [
+            i for i in self.spawned if self.entries[i].state != "bunloaded"
+        ]
+
+    @property
+    def running_states(self) -> list[str]:
+        return [self.entries[i].state for i in self.running]
+
+    def states_for_health(self) -> list[str]:
+        """The S3.1 `instances` list: the RUNNING set (a `bunloaded`
+        index is dropped from the document — S3.1: 'Note: bunloaded =
+        the user explicitly unloaded that instance; it is not a
+        failure state, routing skips it' — it is not an instance
+        running)."""
+        return [self.entries[i].state for i in self.running]
+
+
+def initial_states(spawned: list[int], start_rc: dict[int, int], cfg: dict) -> list[str]:
+    """The first health.json's states (the skeleton's build, kept as a
+    function so the boot path and the tests share it): a unit whose
+    `systemctl start` returned non-zero reflects its S1.5 bfailed path
+    DIRECTLY in health.json; a clean start that has not gone healthy
+    yet is `degraded` (alive-but-unproven), not bfailed. (MAP 2.6
+    replaces the steady-loop miss-mapping, not this boot-time build —
+    the boot-time build probes exactly once per index.)"""
+    states = []
+    for i in spawned:
+        if start_rc.get(i, 0) != 0:
+            states.append("bfailed")
+        else:
+            port = _port(cfg, i)
+            states.append(
+                "healthy"
+                if instance_healthy(port, cfg["alias"], cfg["api_key"])
+                else "degraded"
+            )
+    return states
+
+
+def _instance_unit_path(i: int, sysctl_base: list[str]) -> Path:
+    """The instance unit's path (system or user scope, following
+    `sysctl_base` — the same scope split as `systemctl_base`)."""
+    if sysctl_base and sysctl_base[-1] == "--user":
+        return Path.home() / ".config" / "systemd" / "user" / f"bonsai2-server@{i}.service"
+    return Path("/etc/systemd/system") / f"bonsai2-server@{i}.service"
+
+
+def _refresh_states(
+    runtime: Runtime, spawned: list[int], log=_log
+) -> None:
+    """Re-probe each RUNNING instance; map to an S3.1 state (S2.2,
+    MAP 2.6).
+
+      * healthy probe -> healthy; the fail counter RESETS (the S2.2
+        two-consecutive rule only counts CONSECUTIVE fails).
+      * miss, fails+1 == 1 -> keep the prior state (a single transient
+        miss is NOT degraded yet — the skeleton's first-miss-over-report
+        is replaced, G3 PR #10 r9 P2: 'MAP 2.6 replaces this with the
+        two-fail counter').
+      * miss, fails+1 >= DEGRADED_FAILS (2) -> degraded (the S2.2
+        'two consecutive fails -> degraded' rule, verbatim).
+      * a `bfailed`/`degraded`/`bdown` instance keeps its state on a
+        miss (only a fresh healthy probe clears it — unchanged from
+        the skeleton).
+    `spawned` is the CURRENT running set (indexes aligned to
+    runtime.entries BY INDEX — the parameter is the caller's snapshot
+    of `runtime.running` taken this cycle, so a control path that
+    mutates `runtime` mid-cycle cannot desync the two)."""
+    for i in spawned:
+        e = runtime.entry(i)
+        if e is None:
+            continue
+        port = _port(runtime.cfg, i)
+        if instance_healthy(port, runtime.cfg["alias"], runtime.cfg["api_key"]):
+            e.fails = 0
+            e.state = "healthy"
+        else:
+            e.fails += 1
+            if e.state == "healthy" or e.state == "degraded":
+                if e.fails >= DEGRADED_FAILS:
+                    e.state = "degraded"
+            # bfailed / bdown: preserved on a miss (skeleton rule)
+
+
+def check_escalation(
+    runtime: Runtime,
+    now: float,
+    *,
+    base: list[str] | None = None,
+    unit_show=subprocess,
+    restart=systemctl_restart_instance,
+    log=_log,
+) -> None:
+    """S2.2 five-fail escalation (MAP 2.6): `five consecutive fails ->
+    restart attempt`, applied per RUNNING instance.
+
+    Semantics:
+      * fails >= RESTART_FAILS (5) AND the unit has NOT restarted on
+        its own since the streak's start (a systemd-side NRestarts
+        increment since `restarted_at` would mean the unit's own
+        Restart=on-failure already acted — the manager defers, no
+        double restart): issue `systemctl restart bonsai2-server@i`
+        (the restart resets the unit's start-limit counter, S2.2, and
+        the instance counts it in its restart budget — S2.5 'counted
+        in that instance's restart budget', global #5).
+      * a healthy probe already reset `fails`, so a recovering
+        instance never reaches the streak.
+      * the state stays `degraded` across the restart (the fresh load
+        is unproven; the next healthy probe clears it to `healthy`).
+    `now` is injectable (hermetic tests advance a fake clock);
+    `unit_show`/`restart` are injectable (hermetic tests fake the
+    systemctl surface)."""
+    base = base if base is not None else systemctl_base()
+    for i in runtime.running:
+        e = runtime.entry(i)
+        if e is None:
+            continue
+        show = unit_show(
+            base
+            + ["show", "-p", "NRestarts", f"bonsai2-server@{i}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        n_restarts = -1
+        for line in show.stdout.splitlines():
+            if line.startswith("NRestarts="):
+                try:
+                    n_restarts = int(line.partition("=")[2].strip())
+                except ValueError:
+                    n_restarts = -1
+        if e.fails < RESTART_FAILS:
+            # No streak: just keep the NRestarts baseline current (the
+            # streak-start value the defer check below compares against).
+            if n_restarts >= 0:
+                e.last_nrestarts = n_restarts
+            continue
+        # -1 = the baseline was never observed (e.g. the streak started
+        # before this manager process saw the unit) — no systemd-side
+        # restart can be DETECTED from it, so the manager's restart is
+        # not deferred on an unknown baseline (a stale -1 can only mean
+        # 'unknown', never 'restarted since the streak began').
+        if e.last_nrestarts >= 0 and n_restarts > e.last_nrestarts:
+            # The unit restarted on ITS OWN since the streak began
+            # (systemd's Restart=on-failure already acted — the restart
+            # reset the unit's start-limit counter, S2.2, and the fail
+            # clock is now measuring a FRESH load): defer, no double
+            # restart.
+            log(
+                f"escalation: i={i} unit already restarted since the "
+                f"fail streak began (NRestarts {e.last_nrestarts} -> "
+                f"{n_restarts}) — deferring to the fresh load"
+            )
+            e.fails = 0
+            e.state = "degraded"  # unproven until the next healthy probe
+            continue
+        rc = restart(i, base)
+        e.restarts += 1
+        e.restarted_at = now
+        e.last_nrestarts = n_restarts + 1  # the restart bumped it (systemd)
+        e.fails = 0
+        e.state = "degraded"  # unproven until the next healthy probe
+        log(
+            f"S2.2 escalation: i={i} {RESTART_FAILS} consecutive probe "
+            f"fails -> systemctl restart bonsai2-server@{i} (rc={rc}, "
+            f"manager restarts={e.restarts})"
+        )
+
+
+def check_drift(
+    runtime: Runtime,
+    now: float,
+    cap_bytes: int,
+    *,
+    base: list[str] | None = None,
+    cgroup_path=instance_cgroup_path,
+    cgroup_read=cgroup_memory_current,
+    rewrite=rewrite_unit_ctx,
+    restart=systemctl_restart_instance,
+    log=_log,
+) -> None:
+    """S2.5 drift watch (MAP 2.8), one recheck: for each RUNNING
+    instance, read its cgroup `memory.current` against the S2.2
+    `--memory` cap.
+
+      * over cap: start/continue the pressure clock — sustained over
+        cap for > DRIFT_PRESSURE_S (30 s, S2.5 verbatim) -> halve the
+        instance's ctx (S2.5 rule: `halve, rounded down to a multiple
+        of 8192, floor 8192`), rewrite the unit's `--ctx-size` in
+        place, `systemctl restart bonsai2-server@i` in place (same
+        unit name/port/image; the restart resets the start-limit
+        counter so the drift handling itself cannot trip bfailed,
+        S2.5), record `ctx_reduced: true` + the new ctx (S3.1), count
+        it in the instance's restart budget.
+      * at/below cap: the clock resets (the `> 30 s sustained` rule
+        needs the over-cap condition CONTINUOUS).
+      * `bunloaded` instances are NOT in `runtime.running` — never
+        re-spawned (S2.5/S3.2: an explicit unload beats the drift
+        watch).
+      * ctx-grow is never done (v1 is conservative, S2.5).
+    `now` + the cgroup/rewrite/restart surfaces are injectable (the
+    hermetic tests drive the 30 s clock without wall time).
+    """
+    base = base if base is not None else systemctl_base()
+    for i in runtime.running:
+        e = runtime.entry(i)
+        if e is None:
+            continue
+        cur = cgroup_read(cgroup_path(f"bonsai2-server-{i}"))
+        if cur is None:
+            # unreadable (container gone this cycle — e.g. mid-restart):
+            # keep the clock running (a missing reading is not a
+            # recovery reading); the next cycle re-reads.
+            continue
+        if cur > cap_bytes:
+            if e.pressure_start is None:
+                e.pressure_start = now
+            elif (now - e.pressure_start) > DRIFT_PRESSURE_S:
+                new_ctx = halve_ctx(e.ctx)
+                unit = _instance_unit_path(i, base)
+                if rewrite(unit, new_ctx, e.ctx, log=log):
+                    e.ctx = new_ctx
+                    e.ctx_reduced = True
+                    rc = restart(i, base)
+                    e.restarts += 1
+                    e.restarted_at = now
+                    e.fails = 0
+                    e.pressure_start = None
+                    e.state = "degraded"  # unproven until re-healthy
+                    log(
+                        f"S2.5 drift: i={i} cgroup {cur} B > cap {cap_bytes} B "
+                        f"sustained > {DRIFT_PRESSURE_S:.0f} s -> ctx "
+                        f"{new_ctx} (halved, floor {CTX_FLOOR}), "
+                        f"systemctl restart in place (rc={rc}, "
+                        f"manager restarts={e.restarts}, ctx_reduced=true)"
+                    )
+        else:
+            e.pressure_start = None
+
+
+def _port_free_check(port: int, timeout: float = 1.0) -> bool:
+    """True when 127.0.0.1:port is NOT accepting connections (the
+    unload drain's 'the engine is gone' check — a refused connect is
+    'gone'; a live engine answering 401 on /v1/models is still up)."""
+    import socket as _socket
+
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(("127.0.0.1", port))
+        return False  # something accepted — still up
+    except OSError:
+        return True  # refused / no listener — gone
+    finally:
+        s.close()
+
+
+def wait_port_down(
+    port: int, timeout_s: float = 30.0, poll_s: float = 0.5, check=_port_free_check
+) -> bool:
+    """Wait up to `timeout_s` for 127.0.0.1:port to stop accepting
+    (the S3.2 unload's 'instant VRAM release' verification — the unit
+    stop + `docker rm -f` takes a bounded moment; the manager polls,
+    and reports the stop's own rc even on a late-down port rather than
+    blocking the cycle indefinitely)."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if check(port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
+
+
+def process_control(
+    control_dir: Path,
+    runtime: Runtime,
+    now: float,
+    *,
+    base: list[str] | None = None,
+    free_reader=read_free_gb,
+    start=systemctl_start_instance,
+    stop=systemctl_stop_instance,
+    wait_healthy=wait_instance_healthy,
+    wait_down=wait_port_down,
+    log=_log,
+) -> None:
+    """S3.2 unload/reload manager-level semantics (MAP 2.10), one pass
+    over the `control/` request queue (the Phase-3 `bonsai2-unload` /
+    `bonsai2-reload` commands write one JSON request file each; the
+    manager is the sole pool actor — S3.2 'Both are manager-mediated').
+
+    Request shape (the command owns the write; the manager owns the
+    ack): `{"type": "unload"|"reload", "instances": [i, ...] | "all",
+    "request_id": "<uuid-ish>"}`.
+
+    UNLOAD (S3.2): per target index (in ascending order) —
+      * already `bunloaded`/not-running -> no-op for that index
+        (idempotent, S3.2: 'unload of an already-unloaded ... instance
+        is a no-op for that index');
+      * running -> `systemctl stop bonsai2-server@i` (the unit's
+        ExecStartPre `docker rm -f`, the same signal path as
+        `cancel`), wait for the port to go down (bounded), mark
+        `bunloaded` in health.json (S2.4: 'with zero running
+        instances the stack enters main-only mode with
+        main_only_reason: user_unloaded'). `--all` = every configured
+        index not already unloaded.
+    RELOAD (S3.2): per target index — the normal path: S1.4 allocation
+    tier (the CURRENT config need), S2.2 unit start, S2.2 health
+    re-probe (healthy <= boot_target_s). A tier fail at a target ->
+    that index stays `bunloaded`, the others proceed, the ack carries
+    `"state": "partial"` + a WARN_VRAM_SHORTFALL detail (S3.2: 'a
+    partial reload ... is still a valid state — the S1.4 i > 0
+    partial-load rule, not the i = 0 exit-4 case').
+    ACK: `control/ack-<request_id>.json` = `{"type": ...,
+    "reloaded"/"unloaded": [i...], "state": "ok"|"partial",
+    "ts": <epoch>}`; the request file is renamed `.done` on success.
+    A dead manager writes no ack — the Phase-3 command's exit-84
+    path (S3.2: 'a dead manager -> exit 84')."""
+    if not control_dir.is_dir():
+        return
+    for req_file in sorted(control_dir.iterdir()):
+        if req_file.suffix != ".json" or not req_file.is_file():
+            continue
+        try:
+            req = json.loads(req_file.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log(f"control: unreadable request {req_file.name}: {exc} — leaving in place")
+            continue
+        rtype = req.get("type")
+        targets = req.get("instances")
+        req_id = str(req.get("request_id") or req_file.stem)
+        ack: dict = {"type": rtype, "request_id": req_id, "ts": now}
+        if rtype not in ("unload", "reload") or targets not in ("all",) and not isinstance(targets, list):
+            ack.update(state="error", detail="bad request: type must be unload|reload; instances must be [i...] or 'all'")
+            _write_ack(control_dir, req_file, ack)
+            continue
+        idxs = [i for i in range(int(runtime.cfg["count"]))] if targets == "all" else [int(t) for t in targets]
+        idxs = [i for i in idxs if 0 <= i < len(runtime.entries)]
+        if rtype == "unload":
+            done = []
+            for i in sorted(idxs):
+                e = runtime.entries[i]
+                if e.state == "bunloaded":
+                    continue  # idempotent no-op (S3.2)
+                rc = stop(i, base)
+                down = wait_down(_port(runtime.cfg, i))
+                e.state = "bunloaded"
+                e.fails = 0
+                e.pressure_start = None
+                if i in runtime.spawned:
+                    done.append(i)
+                log(f"S3.2 unload: i={i} systemctl stop rc={rc}, port-down={down}")
+            runtime.spawned = [
+                i for i in runtime.spawned if runtime.entries[i].state != "bunloaded"
+            ]
+            # S2.4: zero running -> main-only user_unloaded (the value the
+            # next health write carries while the set stays empty).
+            if not runtime.spawned:
+                runtime.main_only_reason = "user_unloaded"
+            ack.update(unloaded=sorted(done), state="ok")
+        else:  # reload
+            need_gb = _allocation_need_from_cfg(runtime.cfg)
+            reloaded: list[int] = []
+            partial = False
+            for i in sorted(idxs):
+                e = runtime.entries[i]
+                if e.state != "bunloaded":
+                    continue  # idempotent: only unloaded indexes reload
+                granted, free_gb, detail = allocation_tier(need_gb, free_reader)
+                if not granted:
+                    log(f"reload i={i}: WARN_VRAM_SHORTFALL {detail} — stays bunloaded")
+                    partial = True
+                    continue
+                rc = start(i, base)
+                if i not in runtime.spawned:
+                    runtime.spawned.append(i)
+                    runtime.spawned.sort()
+                if rc != 0:
+                    e.state = "bfailed"
+                    log(f"reload i={i}: systemctl start rc={rc} -> bfailed")
+                    continue
+                ok = wait_healthy(i, runtime.cfg, None)
+                e.state = "healthy" if ok else "degraded"
+                e.fails = 0
+                e.pressure_start = None
+                if ok:
+                    reloaded.append(i)
+                else:
+                    partial = True
+                log(f"reload i={i}: healthy={ok} ({detail})")
+            if runtime.spawned:
+                runtime.main_only_reason = None
+            ack.update(
+                reloaded=sorted(reloaded),
+                state="partial" if partial else "ok",
+                detail="WARN_VRAM_SHORTFALL" if partial else None,
+            )
+        _write_ack(control_dir, req_file, ack)
+        log(f"control: {rtype} {idxs} -> {ack.get('state')} (ack {req_id})")
+
+
+def _write_ack(control_dir: Path, req_file: Path, ack: dict) -> None:
+    """Write the ack file + mark the request done (S3.2 manager-mediated
+    ack — the Phase-3 command polls for `ack-<request_id>.json`)."""
+    req_id = ack.get("request_id") or req_file.stem
+    ack_file = control_dir / f"ack-{req_id}.json"
+    tmp = ack_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(ack, indent=2) + "\n")
+    os.replace(tmp, ack_file)
+    try:
+        os.replace(req_file, req_file.with_suffix(".json.done"))
+    except OSError as exc:  # already consumed / raced — the ack is written
+        _log(f"control: could not mark {req_file.name} done: {exc}")
+
+
+def _allocation_need_from_cfg(cfg: dict) -> float:
+    """The S1.4 gate term for the CURRENT config (reload path, S3.2):
+    `max(footprint + 1.0, cap)` — same derivation as main() (the
+    reload runs the allocation tier with the config the manager
+    booted with, S3.2 're-spawns the targeted indexes through the
+    normal path')."""
+    footprint = bonsai2_vram.instance_footprint_gb(
+        cfg["weights_gb"],
+        int(cfg["slots"]),
+        int(cfg["ctx_size"]),
+        cfg["per_slot_per_token_gb"],
+    )
+    return max(footprint + TIER_MARGIN_GB, float(cfg["budget_gb"]))
+
 
 # --------------------------------------------------------------------------
 # S3.1 health.json
+
+
 # --------------------------------------------------------------------------
 def _port(cfg: dict, i: int) -> int:
     return int(cfg["port_base"]) + i
 
 
-def _instance_entry(cfg: dict, i: int, state: str) -> dict:
+def _instance_entry(
+    cfg: dict, i: int, state: str, ctx: int | None = None, ctx_reduced: bool = False
+) -> dict:
     slots = int(cfg["slots"])
     return {
         "i": i,
         "port": _port(cfg, i),
         "state": state,
-        "ctx": int(cfg["ctx_size"]),
-        "ctx_reduced": False,  # S2.5 drift watch (MAP 2.8) sets this True
+        # S3.1: the instance's LIVE ctx (the S2.5 drift watch / S2.4
+        # ctx-halve retry halve it; the config value is the boot-time
+        # default) + ctx_reduced (S2.5 'recorded in health.json as
+        # ctx_reduced: true + the new ctx value').
+        "ctx": int(cfg["ctx_size"]) if ctx is None else int(ctx),
+        "ctx_reduced": bool(ctx_reduced),
         "slots_in_use": 0,  # the harness owns live task slots (MAP P3)
         "slots_total": slots,
     }
@@ -789,10 +1717,16 @@ def stack_summary(instance_states: list[str]) -> str:
 
 
 def build_health(
-    cfg: dict, states: list[str], main_ok: bool, main_only_reason: str | None = None
+    cfg: dict,
+    states: list[str],
+    main_ok: bool,
+    main_only_reason: str | None = None,
 ) -> dict:
     """The S3.1 schema, one document. `states` is a list of S3.1 instance
-    states aligned to i=0..len-1 (empty = main-only)."""
+    states aligned to the RUNNING set (empty = main-only). The boot-time
+    path (MAP 2.1–2.5) builds docs from the spawn outcome; the steady
+    loop builds them via `build_runtime_health` (which carries each
+    instance's LIVE ctx + ctx_reduced, S2.5/S3.1)."""
     stack = stack_summary(states)
     doc: dict = {
         "stack": stack,
@@ -810,6 +1744,34 @@ def build_health(
     return doc
 
 
+def build_runtime_health(cfg: dict, runtime: Runtime, main_ok: bool) -> dict:
+    """The S3.1 document from the steady-loop Runtime (MAP 2.6/2.8/2.10):
+    the RUNNING set's states, each instance's LIVE ctx + ctx_reduced
+    (S2.5/S3.1: `ctx_reduced: true` + the new `ctx` value), and the
+    runtime's main_only_reason (present only while the running set is
+    empty — the S3.1 contract)."""
+    running = runtime.running
+    states = [runtime.entries[i].state for i in running]
+    doc: dict = {
+        "stack": stack_summary(states),
+        "instances": [
+            _instance_entry(
+                cfg,
+                i,
+                runtime.entries[i].state,
+                ctx=runtime.entries[i].ctx,
+                ctx_reduced=runtime.entries[i].ctx_reduced,
+            )
+            for i in running
+        ],
+        "main_endpoint": cfg["main_endpoint"],
+        "main_healthy": bool(main_ok),
+    }
+    if not running and runtime.main_only_reason is not None:
+        doc["main_only_reason"] = runtime.main_only_reason
+    return doc
+
+
 def write_health(health_dir: Path, doc: dict) -> None:
     """Atomic write of health.json (tmp + rename) so a reader never sees a
     partial file. Creates the (tmpfs) dir if missing — the install-time
@@ -820,6 +1782,43 @@ def write_health(health_dir: Path, doc: dict) -> None:
     tmp = health_dir / "health.json.tmp"
     tmp.write_text(json.dumps(doc, indent=2) + "\n")
     os.replace(tmp, final)
+
+
+def write_boot_target_s(serving_yaml: Path, boot_target_s: float, *, log=_log) -> bool:
+    """S2.6 (MAP 2.9): `boot_target_s` is MEASURED, not guessed — written
+    back to serving.yaml from the measured boot (the S2.7 reboot test's
+    T). A surgical, comment-preserving line rewrite of the top-level
+    `boot_target_s:` key: replace an existing occurrence in place, else
+    append it as the final top-level key (the tracked template keeps it
+    last, S2.6). The value is rounded to a whole second (S2.6's example
+    is `180`, an int) with a minimum of 10 s (a measurement below the
+    health-poll cadence is noise, not a target). Returns True on a
+    write; False (log, no file change) when the file is missing."""
+    target = max(10, int(round(float(boot_target_s))))
+    new_line = (
+        f"boot_target_s: {target}   # measured, not guessed; "
+        "updated by install test (S2.7) / the manager's measured boot (MAP 2.9)"
+    )
+    try:
+        text = serving_yaml.read_text()
+    except OSError as exc:
+        log(f"write_boot_target_s: {serving_yaml}: {exc} (skipped)")
+        return False
+    lines = text.splitlines(keepends=True)
+    replaced = False
+    for idx, line in enumerate(lines):
+        if re.match(r"^boot_target_s:\s", line):
+            lines[idx] = new_line + "\n"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(new_line + "\n")
+    tmp = serving_yaml.with_suffix(serving_yaml.suffix + ".tmp")
+    tmp.write_text("".join(lines))
+    os.replace(tmp, serving_yaml)
+    log(f"S2.6: measured boot {boot_target_s:.1f} s -> boot_target_s={target} "
+        f"written to {serving_yaml.name}")
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -913,67 +1912,222 @@ def spawn_sequence(
     )
 
 
+def fallback_retry(
+    cfg: dict,
+    engine_yaml: Path,
+    sysctl_base: list[str],
+    boot_deadline_s: float,
+    *,
+    spawn=spawn_sequence,
+    log=_log,
+) -> tuple[int, list[int], str, dict[int, int], int]:
+    """S2.4 fallback boot path (MAP 2.7): when the S2.3 planning tier
+    yielded N'=0 at the PQ2_0 budget, `install retries once with the
+    PTQ1_0 fallback (S1.1, ~18% smaller)` — re-plan at the PTQ1_0
+    budget, re-write instance 0's unit to the PTQ1_0 quant + the
+    fallback budget, re-run the S1.4 allocation tier + the S2.5 spawn
+    for that one instance.
+
+    The S2.4 ctx-halve retry: `if the allocation tier still fails at
+    the default --ctx-size ... the manager retries that one instance
+    with the ctx halved (multiple of 8192, floor 8192 — the same
+    reduction as the S2.5 drift rule) and re-runs the allocation tier
+    on the reduced footprint; only if that also fails does the S1.4
+    ERR_VRAM_OOM exit 4 apply.`
+
+    The reduced ctx is recorded in `subagent-engine.yaml`
+    (`instances.ctx_size` for that quant) so restarts stay consistent;
+    `record_quant_in_use` marks the quant in use (both are surgical,
+    comment-preserving rewrites of the installed file — the caller
+    passes the DEPLOY path, which under the @gpu harness is the
+    tracked template, so tests copy it first).
+
+    Returns (exit_code, spawned, detail, start_rc, ctx_in_use):
+      * 0 + [0] — the fallback instance spawned (possibly at the
+        halved ctx); ctx_in_use = the ctx the unit now runs.
+      * EXIT_VRAM_OOM + [] — the tier defeated the fallback instance
+        at BOTH the default and the halved ctx (the S1.4 exit-4 case,
+        main-only is NOT the outcome — S2.4 'Live-margin OOM').
+    `spawn` is injectable (the hermetic tests fake the whole spawn;
+    the real path runs it for n_prime=1)."""
+    fb_budget = fallback_budget_gb(cfg)
+    fb_need = max(
+        fallback_footprint_gb(cfg) + TIER_MARGIN_GB,
+        fb_budget,
+    )
+    fb_cfg = dict(cfg)
+    fb_cfg["budget_gb"] = fb_budget
+    fb_cfg["weights_gb"] = cfg["fallback_size_bytes"] / 1e9
+    record_quant_in_use(engine_yaml, "PTQ1_0", log=log)
+    _log(
+        f"S2.4: N'=0 at the PQ2_0 budget -> PTQ1_0 retry: budget "
+        f"{fb_budget:.2f} GB (footprint {fallback_footprint_gb(cfg):.2f} + 5%), "
+        f"need {fb_need:.2f} GB"
+    )
+    unit0 = _instance_unit_path(0, sysctl_base)
+    if cfg.get("fallback_model_file"):
+        rewrite_unit_model(unit0, cfg["fallback_model_file"], log=log)
+    # cfg["budget_gb"] is the normalized per_instance_budget_gb (PQ2_0
+    # cap in the installed unit; load_config normalizes the key).
+    rewrite_unit_memory(unit0, float(cfg["budget_gb"]), fb_budget, log=log)
+
+    exit_code, spawned, detail, start_rc = spawn(
+        fb_cfg, 1, fb_need, log=log, sysctl_base=sysctl_base, boot_deadline_s=boot_deadline_s
+    )
+    ctx_in_use = int(cfg["ctx_size"])
+    if exit_code == EXIT_OK and spawned:
+        _log(f"S2.4: PTQ1_0 fallback instance 0 spawned ({detail})")
+        return EXIT_OK, spawned, f"PTQ1_0 fallback: {detail}", start_rc, ctx_in_use
+
+    # The allocation tier defeated the fallback instance at the default
+    # ctx (S1.4's exit-4 at i = 0). The S2.4 ctx-halve retry.
+    new_ctx = halve_ctx(ctx_in_use)
+    _log(
+        f"S2.4: allocation tier failed at the default ctx "
+        f"({detail}) -> ctx-halve retry: ctx {ctx_in_use} -> {new_ctx} "
+        f"(multiple of {CTX_HALVE_MULTIPLE}, floor {CTX_FLOOR})"
+    )
+    rewrite_unit_ctx(
+        unit0, new_ctx, ctx_in_use, log=lambda msg: _log(f"{msg} (ctx-halve retry)")
+    )
+    ctx2_cfg = dict(fb_cfg)
+    ctx2_cfg["ctx_size"] = new_ctx
+    need2 = max(
+        bonsai2_vram.instance_footprint_gb(
+            cfg["fallback_size_bytes"] / 1e9,
+            int(cfg["slots"]),
+            new_ctx,
+            cfg["per_slot_per_token_gb"],
+        )
+        + TIER_MARGIN_GB,
+        fb_budget,
+    )
+    exit_code2, spawned2, detail2, start_rc2 = spawn(
+        ctx2_cfg,
+        1,
+        need2,
+        log=log,
+        sysctl_base=sysctl_base,
+        boot_deadline_s=boot_deadline_s,
+    )
+    if exit_code2 == EXIT_OK and spawned2:
+        ctx_in_use = new_ctx
+        # S2.4: 'The reduced ctx is recorded in subagent-engine.yaml
+        # (instances.ctx_size for that quant) so restarts stay
+        # consistent' — the unit's --ctx-size was already rewritten
+        # (rewrite_unit_ctx above); this records the YAML key too.
+        record_ctx_in_use(engine_yaml, new_ctx, log=log)
+        _log(f"S2.4: PTQ1_0 fallback instance 0 spawned at the halved ctx ({detail2})")
+        return (
+            EXIT_OK,
+            spawned2,
+            f"PTQ1_0 fallback + ctx-halve: {detail2}",
+            start_rc2,
+            ctx_in_use,
+        )
+    _log(
+        f"S2.4: the ctx-halve retry also failed ({detail2}) -> "
+        "ERR_VRAM_OOM exit 4 (S1.4 live-margin OOM, S2.4)"
+    )
+    return (
+        EXIT_VRAM_OOM,
+        [],
+        f"ERR_VRAM_OOM (PTQ1_0 + ctx-halve): {detail2}",
+        {},
+        ctx_in_use,
+    )
+
+
 # --------------------------------------------------------------------------
 # steady probe loop (S2.2; MAP 2.6 owns the degraded->restart escalation)
 # --------------------------------------------------------------------------
-def _refresh_states(
-    cfg: dict, spawned: list[int], states: list[str], log=_log
-) -> list[str]:
-    """Re-probe each spawned instance every cycle; map to an S3.1 state.
-
-    Skeleton miss-mapping (a fresh healthy probe always wins):
-      * healthy probe  -> healthy (clears any degraded mark)
-      * miss, was healthy -> degraded. This is a deliberate skeleton
-        OVER-REPORT: S2.2's locked rule is *two consecutive* fails ->
-        degraded, but the skeleton flips on the first miss (no per-instance
-        fail counter yet). A transient single-cycle probe miss therefore
-        shows degraded in health.json for one `health_poll_s` cycle. MAP 2.6
-        replaces this with the two-fail counter and the five-fail -> restart
-        escalation.
-      * miss, was degraded/bdown/bfailed -> keep the prior state (only a
-        fresh healthy probe clears it).
-    `states` in, aligned states out.
-    (No main_ok param — instance liveness is probed per-instance; the main
-    stack's health is the probe loop's own job, not this one; G3 PR #10
-    r6 P2.)"""
-    if len(states) != len(spawned):
-        states = ["healthy"] * len(spawned)
-    new_states = list(states)
-    for idx, i in enumerate(spawned):
-        port = _port(cfg, i)
-        if instance_healthy(port, cfg["alias"], cfg["api_key"]):
-            new_states[idx] = "healthy"
-        else:
-            # Skeleton over-report (G3 PR #10 r9 P2): first miss -> degraded
-            # (S2.2's two-consecutive-fail rule is a MAP 2.6 counter); a
-            # degraded/bdown/bfailed instance keeps its state on a miss.
-            new_states[idx] = (
-                "degraded" if new_states[idx] == "healthy" else new_states[idx]
-            )
-    return new_states
+def _drift_cap_bytes(budget_gb: float) -> int:
+    """The S2.5 drift watch's per-instance cap in BYTES: the S2.2
+    `--memory` flag's value. S2.2 caps the container at
+    `per_instance_budget_gb` decimal GB; the kernel enforces that
+    decimal value in bytes (the docker GiB parse only affects the
+    flag string, not the cgroup limit the kernel sees — the S2.2
+    pin-reality delta is about the FLAG, the S2.5 watch compares the
+    cgroup against the BUDGET, decimal-GB end to end, S1.4 convention).
+    `int(budget_gb * 1e9)`: a cgroup exactly AT the cap is not
+    'over' — the S2.5 rule is strictly `> cap` sustained."""
+    return int(float(budget_gb) * 1e9)
 
 
 def run_probe_loop(
     cfg: dict,
-    spawned: list[int],
+    runtime: Runtime,
     health_dir: Path,
-    states: list[str],
     settle_s: float,
-    main_only_reason: str | None = None,
+    *,
+    drift_recheck_s: float | None = None,
+    drift_pressure_s: float | None = None,
     log=_log,
 ) -> int:
-    """The steady state: every `health_poll_s`, re-probe each instance +
-    main, atomically rewrite health.json (S2.2). Runs forever under
-    systemd (settle_s == 0); exits 0 after settle_s when non-zero (the
-    @gpu test harness + a manual run). Returns the process exit code.
-    (No main_ok param — the main stack's health is re-probed fresh every
-    cycle inside the loop; G3 PR #10 r6 P2.)"""
+    """The steady state (S2.2 health probe + S2.2 escalation + S2.5
+    drift watch + S3.2 control, MAP 2.6/2.8/2.10): every
+    `health_poll_s`, re-probe main + each running instance (S2.2),
+    apply the two-fail->degraded / five-fail->restart escalation
+    (S2.2), process the `control/` request queue (S3.2), atomically
+    rewrite health.json (S3.1 schema, with live ctx + ctx_reduced).
+
+    The S2.5 drift recheck runs on its OWN 5-minute cadence
+    (`drift_recheck_s`, default 300 s, S2.5: 're-checks every 5 min')
+    — NOT every probe cycle: the 30 s pressure window is tracked
+    across rechecks (the clock lives on the instance entry, so a
+    recheck that sees the cgroup back under cap resets it; the
+    between-recheck probe cycles only track probe fails).
+
+    Runs forever under systemd (settle_s == 0); exits 0 after settle_s
+    when non-zero (the @gpu test harness + a manual run). At least one
+    full cycle always runs before the settle check (a settle run is a
+    normal ready boot — the first health.json is written, G3 PR #10
+    r5 P1's READY ordering is main()'s job, the loop's contract is the
+    document)."""
+    if drift_recheck_s is None:
+        drift_recheck_s = float(
+            os.environ.get("BONSAI2_DRIFT_RECHECK_S", DRIFT_RECHECK_S)
+        )
+    if drift_pressure_s is None:
+        drift_pressure_s = float(
+            os.environ.get("BONSAI2_DRIFT_PRESSURE_S", DRIFT_PRESSURE_S)
+        )
+    drift_interval_s = max(drift_recheck_s - 1.0, 1.0)
+    cap_bytes = _drift_cap_bytes(float(cfg["budget_gb"]))
+    base = systemctl_base()
+    last_drift_at = -float("inf")
     cycle = 0
     t0 = time.monotonic()
     while True:
+        now = time.monotonic()
         main_ok = main_healthy(cfg["main_endpoint"])
-        states = _refresh_states(cfg, spawned, states, log)
-        write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
+        # Snapshot the running set BEFORE the control pass: a control
+        # that stops instances mid-cycle must not desync the probe
+        # pass from the runtime (the entries are indexed by i, so the
+        # snapshot is the set as of cycle start).
+        running_snapshot = list(runtime.running)
+        _refresh_states(runtime, running_snapshot, log)
+        check_escalation(runtime, now, base=base, log=log)
+        control_dir = health_dir / "control"
+        try:
+            process_control(control_dir, runtime, now, base=base, log=log)
+        except Exception as exc:  # noqa: BLE001 — the control pass must
+            # never kill the steady loop (a bad request file is the
+            # command's fault, not the manager's; it stays in place,
+            # the ack is the command's error signal).
+            log(f"control pass error (cycle {cycle}): {exc!r}")
+        if now - last_drift_at >= drift_interval_s:
+            last_drift_at = now
+            check_drift(
+                runtime,
+                now,
+                cap_bytes,
+                base=base,
+                log=log,
+            )
+        write_health(
+            health_dir, build_runtime_health(cfg, runtime, main_ok)
+        )
         if settle_s > 0 and (time.monotonic() - t0) >= settle_s:
             log(f"probe loop: settled {settle_s:.0f}s (cycle {cycle}), exit 0")
             return EXIT_OK
@@ -988,7 +2142,7 @@ def run_probe_loop(
 # --------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="bonsai2 instance manager (MAP 2.1–2.5, S2.1–S2.5)."
+        description="bonsai2 instance manager (MAP 2.1–2.11, S2.1–S2.8)."
     )
     ap.add_argument(
         "--settle",
@@ -1039,6 +2193,7 @@ def main(argv: list[str] | None = None) -> int:
     # read lives INSIDE the budget, not on top of it. (S2.8 #1: 'Cold
     # boot → main + N healthy ≤ 180 s'.)
     boot_deadline_s = time.monotonic() + cfg["boot_target_s"]
+    boot_t0 = time.monotonic()  # MAP 2.9: the MEASURED boot's T
 
     # --- S2.3 boot-time budget check -----------------------------------
     try:
@@ -1093,16 +2248,35 @@ def main(argv: list[str] | None = None) -> int:
         f"Wants= not Requires=)"
     )
 
-    # --- S2.5 spawn path (ordered) --------------------------------------
+    # --- S2.4 N=0 PTQ1_0 fallback (MAP 2.7) / S2.5 spawn path (ordered) --
     sysctl_base = systemctl_base()
-    exit_code, spawned, detail, start_rc = spawn_sequence(
-        cfg,
-        n_prime,
-        need_gb,
-        log=_log,
-        sysctl_base=sysctl_base,
-        boot_deadline_s=boot_deadline_s,
-    )
+    ctx_in_use = int(cfg["ctx_size"])
+    if n_prime == 0 and fallback_quant_available(cfg):
+        # S2.4 (S2.3 entry, verbatim): 'install retries once with the
+        # PTQ1_0 fallback (S1.1, ~18% smaller)'. The retry re-plans at
+        # the fallback budget, rewrites instance 0's unit (model +
+        # memory flags) in place, and runs the S1.4 allocation tier +
+        # the S2.5 spawn for that one instance — with the S2.4 ctx-halve
+        # retry inside (a tier fail at the default ctx; S1.4's exit 4
+        # applies only if THAT also fails).
+        exit_code, spawned, detail, start_rc, ctx_in_use = fallback_retry(
+            cfg,
+            engine_yaml,
+            sysctl_base,
+            boot_deadline_s,
+            log=_log,
+        )
+        if exit_code == EXIT_OK and spawned:
+            n_prime = 1
+    else:
+        exit_code, spawned, detail, start_rc = spawn_sequence(
+            cfg,
+            n_prime,
+            need_gb,
+            log=_log,
+            sysctl_base=sysctl_base,
+            boot_deadline_s=boot_deadline_s,
+        )
     _log(detail)
 
     # --- i = 0 allocation OOM (exit 4): a BOOT-TIME failure -------------
@@ -1141,35 +2315,40 @@ def main(argv: list[str] | None = None) -> int:
         notify_sd("STOPPING=1")
         return EXIT_VRAM_OOM
 
-    # --- S2.4 N=0 / main-only handoff (the PTQ1_0 / ctx-halve fallback is
-    #     MAP 2.7; the skeleton hands off to main-only, exit 0) ----------
+    # --- S2.4 N=0 / main-only mode (MAP 2.7) ----------------------------
+    # The PTQ1_0 fallback already ran above (it is the FIRST move when
+    # N'=0 at the PQ2_0 budget + a fallback size is configured); a
+    # fallback OOM was handled by the exit-4 path above. What remains:
+    #   * no fallback size in the config -> plain main-only (P1,
+    #     G3 PR #10 r4);
+    #   * a fallback that could not run -> exit 4 (S2.4 live-margin
+    #     OOM), already returned above.
     main_only_reason: str | None = None
     if n_prime == 0:
-        # S2.4: the planning-tier N'=0 reason is `budget_zero` (the
-        # spec shares it with the post-PTQ1_0-retry zero; a distinct
-        # `fallback_zero` is a MAP 2.7 candidate — S2.4 amendment
-        # 2026-09-23, G3 PR #10 round 2). Distinct from S3.2's
-        # `user_unloaded` (explicit unload).
+        # S2.4: the shared reason is `budget_zero` (the spec shares it
+        # with the post-PTQ1_0-retry zero — S2.4 amendment 2026-09-23,
+        # G3 PR #10 round 2; a distinct `fallback_zero` distinguishing
+        # 'PTQ1_0 was tried and still 0' is a MAP 2.7 candidate the
+        # S3.1 schema is open to). Distinct from S3.2's `user_unloaded`
+        # (explicit unload).
         main_only_reason = "budget_zero"
         _log(
-            "S2.4: N'=0 -> main-only mode (reason=budget_zero). "
-            "MAP 2.7 adds the PTQ1_0 / ctx-halve fallback before this handoff."
+            "S2.4: N'=0 -> main-only mode (reason=budget_zero)."
             + (
-                f" Fallback quant validated at config-load: PTQ1_0 "
-                f"{cfg['fallback_size_bytes']} B "
-                f"(~{cfg['fallback_size_bytes'] / 1e9:.2f} GB vs PQ2_0 "
-                f"{cfg['weights_gb']:.2f} GB)."
-                if cfg.get("fallback_size_bytes")
-                else " No model.fallback_size_bytes in the YAML — MAP 2.7's "
-                "PTQ1_0 retry has no size to plan against (P1, G3 PR #10 r4)."
+                ""
+                if fallback_quant_available(cfg)
+                else " No model.fallback_size_bytes in the YAML — the "
+                "PTQ1_0 retry had no size to plan against (P1, G3 PR #10 r4)."
             )
         )
-        states: list[str] = []
+        boot_states: list[str] = []
         write_health(
             health_dir,
-            build_health(cfg, states, main_ok, main_only_reason=main_only_reason),
+            build_health(cfg, boot_states, main_ok, main_only_reason=main_only_reason),
         )
         notify_sd("STATUS=bonsai2-manager: main-only (budget_zero)")
+        runtime = Runtime(cfg, [], boot_states)
+        runtime.main_only_reason = main_only_reason
         if args.settle > 0:
             # The settle path exits 0 after settle_s, but still marks
             # readiness FIRST: under a user-scope Type=notify start (the
@@ -1178,15 +2357,7 @@ def main(argv: list[str] | None = None) -> int:
             # the non-settle path below and the instances settle path
             # (G3 PR #10 round 5 P1).
             notify_sd("READY=1")
-            return run_probe_loop(
-                cfg,
-                [],
-                health_dir,
-                states,
-                args.settle,
-                main_only_reason,
-                _log,
-            )
+            return run_probe_loop(cfg, runtime, health_dir, args.settle, _log)
         notify_sd("READY=1")
         return EXIT_OK
 
@@ -1196,38 +2367,52 @@ def main(argv: list[str] | None = None) -> int:
     # sequence surfaces) instead of re-deriving by probing a possibly-dead
     # unit. A clean start that has not gone healthy yet is `degraded`
     # (alive-but-unproven), not bfailed.
-    states = []
-    for i in spawned:
-        if start_rc.get(i, 0) != 0:
-            states.append("bfailed")
-        else:
-            port = _port(cfg, i)
-            states.append(
-                "healthy"
-                if instance_healthy(port, cfg["alias"], cfg["api_key"])
-                else "degraded"
-            )
-    write_health(health_dir, build_health(cfg, states, main_ok, main_only_reason))
+    boot_states = initial_states(spawned, start_rc, cfg)
+    write_health(
+        health_dir, build_health(cfg, boot_states, main_ok, main_only_reason)
+    )
     notify_sd(f"STATUS=bonsai2-manager: booted {len(spawned)} instance(s)")
+
+    # The steady loop owns per-instance state from here (MAP 2.6/2.8/
+    # 2.10): one entry per configured index, the boot-time states seeded
+    # onto the spawned prefix, the S2.4 main-only reason only when the
+    # running set is empty (the main-only boot path set it; a partial
+    # load still has >=1 instance so the S3.1 reason stays absent).
+    runtime = Runtime(cfg, spawned, boot_states)
+    if not spawned:
+        runtime.main_only_reason = main_only_reason
+    # S2.4 (MAP 2.7): a fallback boot ran instance 0 at ctx_in_use
+    # (the default, or the halved ctx after the ctx-halve retry) with
+    # the PTQ1_0 quant — seed the LIVE value + ctx_reduced on the
+    # steady-loop entry so health.json reports the ctx the unit ACTUALLY
+    # runs (S3.1 `ctx` = the live value, `ctx_reduced` marks the halve).
+    if ctx_in_use != int(cfg["ctx_size"]):
+        for i in spawned:
+            e = runtime.entry(i)
+            if e is not None:
+                e.ctx = ctx_in_use
+                e.ctx_reduced = True
+
+    # S2.6 (MAP 2.9): `boot_target_s` is measured, not guessed — write
+    # the MEASURED boot back to serving.yaml (the S2.7 reboot test's T,
+    # recorded by the manager at every boot that spawned >=1 instance:
+    # a main-only boot measured nothing to target). Best-effort: a
+    # missing/unwritable file is logged, never fatal (the S2.6 file is
+    # install.sh's; the manager's job is to keep its measurement fresh).
+    if spawned:
+        measured_boot_s = time.monotonic() - boot_t0
+        write_boot_target_s(serving_yaml, measured_boot_s, log=_log)
 
     if args.settle > 0:
         # Readiness before the settle window: same user-scope Type=notify
         # FAILED-START rationale as the main-only settle branch above
         # (G3 PR #10 round 5 P1) — a settle run is a normal, ready boot.
         notify_sd("READY=1")
-        return run_probe_loop(
-            cfg,
-            spawned,
-            health_dir,
-            states,
-            args.settle,
-            main_only_reason,
-            _log,
-        )
+        return run_probe_loop(cfg, runtime, health_dir, args.settle, _log)
 
     # systemd Type=notify: signal readiness, then run the probe loop forever.
     notify_sd("READY=1")
-    run_probe_loop(cfg, spawned, health_dir, states, 0.0, main_only_reason, _log)
+    run_probe_loop(cfg, runtime, health_dir, 0.0, _log)
     # Unreachable in production: run_probe_loop(settle_s=0.0) is an infinite
     # loop — the process ends by systemd's SIGTERM (a normal stop, not a
     # failure; READY=1 was already sent). EXIT_OK (not a boot-path variable):
