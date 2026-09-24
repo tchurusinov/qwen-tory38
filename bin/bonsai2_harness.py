@@ -1046,7 +1046,25 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
     instance_i = target["i"]
     # P2 #9 (G3 PR#12 r1): a string port in health.json would otherwise
     # be emitted as a string, violating the S3.1 numeric port schema.
-    port = int(target.get("port", ident.get("port_base", 30101) + instance_i))
+    # G3 PR#12 r3 P2: a NON-numeric string port must not escape as an
+    # uncaught ValueError (Python exit 1, outside the S3.2 closed set) —
+    # it is a malformed MANAGER document, so exit 84 (the
+    # HealthMissing family), not 2 (2 = the harness's own config).
+    port = target.get("port", ident.get("port_base", 30101) + instance_i)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return emit(
+            {
+                "error": "ERR_MANAGER_DOWN",
+                "detail": (
+                    f"health.json: instance i={instance_i} port {port!r} is not "
+                    "numeric (malformed document)"
+                ),
+            },
+            EXIT_MANAGER_DOWN,
+            f"health.json port for i={instance_i} not numeric: {port!r}",
+        )
     task_id = new_task_id(d)
     if parsed["out"] is None:
         result_file = str(d["base"] / f"{task_id}.json")
