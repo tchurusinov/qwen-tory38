@@ -985,14 +985,18 @@ class TestS28Acceptance(unittest.TestCase):
                     )
 
                     kill_t0 = time.monotonic()
+                    # llama-server is PID 1 inside the container; the kernel
+                    # makes PID 1 ignore SIGKILL when no handler is installed,
+                    # so `docker exec kill -9 1` rc=0 but the engine survives.
+                    # `docker kill -s TERM` (SIGTERM) is handled by the engine
+                    # (it exits 143 → non-zero → Restart=on-failure fires).
                     subprocess.run(
                         [
                             "docker",
-                            "exec",
-                            "bonsai2-server-0",
                             "kill",
-                            "-9",
-                            str(pid_before),
+                            "-s",
+                            "TERM",
+                            "bonsai2-server-0",
                         ],
                         capture_output=True,
                         text=True,
@@ -1332,7 +1336,13 @@ class TestS28Acceptance(unittest.TestCase):
                     # target 95% of the kernel cap, allocate the delta.
                     kernel_cap = int((cg0 / "memory.max").read_text().strip())
                     base_now = int((cg0 / "memory.current").read_text().strip())
-                    target_now = int(0.95 * kernel_cap)
+                    # Target: clear the manager's decimal cap with ~0.35 GB
+                    # margin (enough for the drift watch to see cur > cap),
+                    # but stay well below the kernel's binary cap so the
+                    # holder + engine don't trigger the cgroup OOM killer.
+                    # 0.95 * kernel_cap left only ~0.8 GB headroom — too
+                    # tight for the holder's python startup + the engine.
+                    target_now = cap_bytes + int(0.35e9)  # manager cap + 350 MB
                     alloc_bytes = target_now - base_now
                     self.assertGreater(
                         alloc_bytes,

@@ -1394,7 +1394,7 @@ def check_escalation(
     now: float,
     *,
     base: list[str] | None = None,
-    unit_show=subprocess,
+    unit_show=subprocess.run,
     restart=systemctl_restart_instance,
     log=_log,
 ) -> None:
