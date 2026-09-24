@@ -87,7 +87,15 @@ def _pick_retry_instance(
         )
 
     fresh = [e for e in instances if fits(e) and e.get("i") not in tried]
-    pool = fresh if fresh else [e for e in instances if fits(e)]
+    # P0 #2 (G3 PR#12 r1): the fallback pool is the UNTRIED-fit instances
+    # minus the tried ones — a second failure on the SAME instance violates
+    # S1.5 "one retry, next instance". (The old fallback was all-fits, so a
+    # retry could land back on the instance that just failed.)
+    pool = (
+        fresh
+        if fresh
+        else [e for e in instances if fits(e) and e.get("i") not in tried]
+    )
     if not pool:
         return None, None
     if fresh:

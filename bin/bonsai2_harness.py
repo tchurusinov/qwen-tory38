@@ -407,23 +407,81 @@ def running_count(d: dict, i: int) -> int:
     )
 
 
+def _instance_loads(d: dict) -> dict:
+    """{i: (slots_in_use, running_count)} from ONE iter_tasks pass
+    (P1 #6, G3 PR#12 r1): routing + the fast path need both counters
+    for every instance — iterating the task records N_instances × N
+    times is O(N × M) I/O for no reason. Instances with no records are
+    absent; callers use .get(i, (0, 0))."""
+    loads: dict = {}
+    for r in iter_tasks(d):
+        i = r.get("instance")
+        if r.get("state") not in CHARGED_STATES:
+            continue
+        entry = loads.setdefault(i, [0, 0])
+        entry[0] += 1
+        if r.get("state") == "running":
+            entry[1] += 1
+    return {i: (v[0], v[1]) for i, v in loads.items()}
+
+
 @contextlib.contextmanager
 def lock_wait(base_dir: Path, name: str, timeout_s: float = 2.0):
-    """Best-effort O_EXCL lock file (PID-unique, released by unlink).
-    Serializes the slot-claim critical section across concurrent
-    spawn/collect processes. A timeout raises TimeoutError (the caller
-    retries its poll loop — the lock is advisory ordering, not a
-    resource)."""
+    """Best-effort O_EXCL lock file. `name` is the lock IDENTITY — the
+    file is {name}.lock, so concurrent holders contend on the SAME path
+    (G3 PR#12 r1 P0 #1: a {name}.{pid} naming meant every process
+    created its own file and the lock never actually serialized across
+    processes). The PID suffix is the STALE-DETECTION key: a holder
+    whose PID no longer exists left a dead lock, which is reclaimed
+    (the O_EXCL pattern is best-effort, so a crashed holder must not
+    wedge the queue — P2 #7's follow-through). Released by unlink.
+    A timeout raises TimeoutError (the caller retries its poll loop —
+    the lock is advisory ordering, not a resource)."""
     lock_dir = base_dir / ".locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    path = lock_dir / f"{name}.{os.getpid()}"
+    path = lock_dir / f"{name}.lock"
     deadline = time.monotonic() + timeout_s
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
             break
         except FileExistsError:
+            # Stale-lock reclaim: a holder crashed without the unlink
+            # leaving {name}.lock behind. If the recorded PID is gone,
+            # the lock is dead — take it (the O_EXCL pattern is
+            # best-effort, so a dead holder must not wedge the queue).
+            # An EMPTY file is either a live holder mid-write or a
+            # holder that died between create and write — give it a
+            # 0.5 s grace before reclaiming.
+            stale = False
+            first_empty = None
+            try:
+                content = path.read_text().strip()
+                if content:
+                    holder = int(content)
+                    if holder <= 0:
+                        stale = True
+                    else:
+                        try:
+                            os.kill(holder, 0)
+                        except OSError:
+                            stale = True
+                else:
+                    now = time.monotonic()
+                    if first_empty is None:
+                        first_empty = now
+                    elif now - first_empty > 0.5:
+                        stale = True
+            except (OSError, ValueError):
+                stale = True
+            if stale:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"lock {name!r} busy for {timeout_s:.1f} s"
@@ -491,15 +549,22 @@ def route_target(
     overall is reported with ERR_CTX_TOO_LONG (the detail says which)
     — EVEN when a slot is free: a free slot on a ctx-shrunk instance is
     not a slot for this task (S1.5 exit 5, not a blind queue).
+
+    P1 #6 (G3 PR#12 r1): the slot counters are built from ONE
+    iter_tasks pass (`_instance_loads`) — the per-instance
+    slots_in_use/running_count calls each re-globbed + re-parsed every
+    record, O(N_instances × N_tasks) I/O per spawn.
     """
     instances = doc.get("instances", [])
     if not instances:
         return None, "ERR_NO_INSTANCES", "main-only mode (0 instances in health.json)"
-    charged = {e.get("i"): slots_in_use(d, e.get("i")) for e in instances}
+    loads = _instance_loads(d)
+    charged = {e.get("i"): loads.get(e.get("i"), (0, 0))[0] for e in instances}
+    running = {e.get("i"): loads.get(e.get("i"), (0, 0))[1] for e in instances}
     fit = [e for e in instances if ctx_need is None or (_inst_ctx(e) or 0) >= ctx_need]
     pool = fit if fit else instances
     routable = [e for e in pool if e.get("state") in ROUTABLE_STATES]
-    free = [e for e in routable if running_count(d, e.get("i")) < _inst_total(e)]
+    free = [e for e in routable if running[e.get("i")] < _inst_total(e)]
     if free:
         target = min(free, key=lambda e: (charged.get(e.get("i"), 0), e.get("i", 0)))
         if not fit:
@@ -544,6 +609,54 @@ def route_target(
             ),
         )
     return cand, None, None
+
+
+def claim_own_task(d: dict, doc: dict, task_id: str) -> tuple[dict | None, bool]:
+    """The fast-path claim, under the SAME slot-claim lock as
+    claim_slot (G3 PR#12 r1 P0 #1: the old fast path checked
+    running_count and promoted this record with no lock held, so a
+    concurrent spawn's claim_slot could promote the same record in
+    between — two start_workers, one task. Now the check + promotion +
+    ownership are one critical section).
+
+    Returns (rec, promoted):
+      * rec None -> the slot is not free for this task (running full,
+        or the instance no longer routable / the ctx no longer fits —
+        the S2.5 drift halve): the caller drops into the queue-wait
+        loop;
+      * promoted True -> THIS call marked the record running; the
+        caller owns starting its worker;
+      * promoted False -> the record is already running/terminal,
+        owned by ANOTHER spawn (its claim pass got here first): the
+        caller's task is running — emit it, start no second worker.
+    """
+    with lock_wait(d["base"], "slot-claim"):
+        try:
+            rec = read_task(d, task_id)
+        except TaskNotFound:
+            return None, False
+        if rec.get("state") in ("running", *TERMINAL_STATES):
+            return rec, False
+        i = rec.get("instance")
+        entry = next(
+            (e for e in doc.get("instances", []) if e.get("i") == i),
+            None,
+        )
+        if entry is None or entry.get("state") not in ROUTABLE_STATES:
+            return None, False
+        if (
+            rec.get("ctx_need") is not None
+            and (_inst_ctx(entry) or 0) < rec["ctx_need"]
+        ):
+            return None, False
+        loads = _instance_loads(d)
+        running = loads.get(i, (0, 0))[1]
+        if running >= _inst_total(entry):
+            return None, False
+        rec["state"] = "running"
+        rec["updated_ts"] = time.time()
+        write_task(d, rec)
+        return rec, True
 
 
 def claim_slot(d: dict, doc: dict) -> dict | None:
@@ -975,21 +1088,36 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         "updated_ts": now,
     }
     write_task(d, rec)
-    if running_count(d, instance_i) < _inst_total(target):
-        rec2 = read_task(d, task_id)
-        rec2["state"] = "running"
-        start_worker(d, rec2, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr))
+    # P0 #1 (G3 PR#12 r1): the fast path is a CLAIM, so it runs under
+    # the slot-claim lock (claim_own_task). A None result = the slot
+    # was taken by a concurrent claim (or the instance drifted
+    # un-routable mid-spawn) -> the queue-wait loop below.
+    claimed_rec, promoted = claim_own_task(d, doc, task_id)
+    if claimed_rec is not None:
+        if promoted:
+            start_worker(
+                d, claimed_rec, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr)
+            )
         fresh = read_task(d, task_id)
-        return emit(
-            spawn_json(fresh),
-            EXIT_OK,
-            f"task {task_id} running on i={instance_i} (port {port})",
-        )
+        if fresh.get("state") == "running":
+            return emit(
+                spawn_json(fresh),
+                EXIT_OK,
+                f"task {task_id} running on i={fresh.get('instance')}",
+            )
     # The S3.3 queue-wait loop: poll the claim protocol until this task
     # is running or queue_wait_max_s expires (S3.2: 8 = the manager-side
     # wait budget; the task's own --deadline is the worker's, S3.4).
+    # P1 #4 (G3 PR#12 r1): the health document is RE-READ every poll —
+    # the manager may have re-written it mid-wait (an instance bdown,
+    # ctx halved, slots_total changed), and the claim pass must route
+    # on the live document, not the one from spawn entry.
     wait_deadline = time.monotonic() + float(cfg["queue_wait_max_s"])
     while True:
+        try:
+            doc = load_health_doc(env=env)
+        except HealthMissing:
+            pass  # the manager dropped the document mid-wait — keep the last good one
         claimed = claim_slot(d, doc)
         if claimed is not None:
             start_worker(
