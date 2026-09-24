@@ -23,7 +23,7 @@ The tool is loaded from bin/ via importlib.util (same convention as
 tests/test_model_fetch.py: bin/ is the deploy target, not a test
 package).
 
-Run: `python3 -m unittest discover -s tests` from the repo root.
+Run: `python3 -m unittest discover -s tests -t .` from the repo root.
 """
 
 import hashlib

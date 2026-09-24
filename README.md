@@ -175,7 +175,7 @@ units/                      # -> /etc/systemd/system/ (S2.2; MAP 2.4) — PENDIN
 image/                      # Dockerfiles: build pipeline + runtime image
 bench/                      # S5 bench framework source (run.py, score/,
     goldens/                #   goldens + M4 seeded-bug fixture) — PENDING (MAP P4)
-tests/                      # hermetic default: python3 -m unittest discover -s tests
+tests/                      # hermetic default: python3 -m unittest discover -s tests -t .
     gpu/                    # @gpu tests ONLY, via tests/run_gpu.sh
 third_party/llama.cpp/      # fork submodule, pinned (MAP 1.1)
 scripts/                    # repo workflow tooling (gate.sh, review.sh,
@@ -385,7 +385,7 @@ stash first, so a crash never eats work.
 
 ### Testing
 
-- Hermetic default: `python3 -m unittest discover -s tests` (no GPU, no
+- Hermetic default: `python3 -m unittest discover -s tests -t .` (no GPU, no
   network, stdlib only).
 - `@gpu` tests live only in `tests/gpu/`, run via `tests/run_gpu.sh`
   (which snapshots nvidia-smi into `test-logs/gpu-<ts>.log` first).

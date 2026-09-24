@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""bonsai2-status — the S3.2 main-agent API: pool + main-stack status.
+
+Thin deploy file (MAP 3.2; the logic lives in this dir's
+`bonsai2_harness.py`, MAP 3.1, so all four S3.2 status-family commands
+share ONE implementation of the S3.1 output contract).
+
+The S3.1 status schema (stdout = one JSON object):
+  {"stack": "healthy|degraded|main-only",
+   "instances": [{"i": 0, "port": 30101, "state": "healthy|degraded|bdown|bfailed|bunloaded",
+                  "ctx": 262144, "ctx_reduced": false,
+                  "slots_in_use": 3, "slots_total": 8}],
+   "main_endpoint": "http://localhost:30001", "main_healthy": true,
+   "main_only_reason": "budget_zero"}   # present ONLY when instances: 0 (S2.4)
+
+Exit codes (S3.2 closed set, per-command mapping):
+  0  = success (the document is the data; main_healthy is live-probed)
+  2  = malformed config (harness.yaml unreadable/invalid)
+  82 = the main-endpoint liveness probe failed (S3.6
+       main_endpoint_healthy_probe) — the document is still emitted
+  84 = health.json absent/invalid (the manager is down; S3.2 "a dead
+       manager -> exit 84")
+"""
+
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bonsai2_harness as H  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(H.dispatch("bonsai2-status", sys.argv[1:]))

@@ -496,12 +496,12 @@ Exit: S2.8 acceptance (all five, runnable on this box).
 
 Exit: hermetic closed-set suite green + S3.8 acceptance (all five).
 
-- [ ] 3.1 Core library: stdout = one JSON object (S3.1 schemas), stderr
+- [x] 3.1 Core library: stdout = one JSON object (S3.1 schemas), stderr
       human-only; `harness.yaml` loader (S3.6) + env overrides
       `BONSAI2_CONFIG`, `BONSAI2_RESULTS_DIR` (S3.2).
-- [ ] 3.2 `bonsai2-status`, `bonsai2-list-instances`, `bonsai2-health`
+- [x] 3.2 `bonsai2-status`, `bonsai2-list-instances`, `bonsai2-health`
       (S3.2, S3.1 status schema incl. `main_only_reason`).
-- [ ] 3.3 `bonsai2-spawn`: least-loaded deadline-aware routing, tie-break
+- [x] 3.3 `bonsai2-spawn`: least-loaded deadline-aware routing, tie-break
       lowest i; queue FIFO with priority preemption; `queue_wait_max_s`
       expiry → exit 8 `state: "queued"` (S3.3, S3.2).
 - [ ] 3.4 Slot model + deadline enforcement: one slot per task for its
@@ -813,6 +813,40 @@ SPEC.md `status` → `active`.
   session can fix against observed timings, not assumptions.
 - spec deltas: none (the env hook is a test hook, same pattern as the
   two existing documented test hooks; no locked value moved).
+### 2026-09-24 — Phase 3: MAP 3.1–3.3 implemented + green (branch `phase3-harness-api`, G2 gate PASS, G3 pending)
+
+- agent/model: Hermes qwen3.8-27b (implementation carried over from the
+  prior session; this session closed G2: runner fix + bin/README + MAP/
+  ARTIFACTS + gate)
+- phase(s): P3 (3.1 core library, 3.2 status family, 3.3 spawn +
+  taskworker)
+- items checked: 3.1, 3.2, 3.3. Not claimed: 3.4–3.12 (later items on
+  the same phase — dedup, collect, steer/cancel, unload/reload, closed-
+  set audit, live acceptance; see PR body "NOT claimed").
+- machine state: nothing installed/running — hermetic work only. All
+  new code lives on the branch: `bin/bonsai2_harness.py` (core
+  library), `bin/bonsai2-status` / `bin/bonsai2-list-instances` /
+  `bin/bonsai2-health` (S3.2 read family), `bin/bonsai2-spawn` +
+  `bin/bonsai2-taskworker.py` (spawn + detached worker),
+  `tests/fixtures/mock_engine.py` (threaded http.server fixture; no
+  :30001 dependency), 3 new hermetic test modules. Main stack :30001
+  untouched. No GPU touched by the hermetic suite.
+- next: G3 PR opened on this branch (`phase3-harness-api`) with DOD /
+  checks / residual-risk per the PR-body contract; `./scripts/review.sh
+  phase3-harness-api main .git/plan.md /tmp/pr-intent.txt` with
+  REVIEW_EXCLUDE for the two docs files (in the PR, out of review).
+  After G4 merge: 3.4 (slot model + deadline enforcement, manager-side
+  half) is the next item; `reap_stale` in the core library is its tested
+  hook.
+- blockers/intricacies: the hermetic discover target is now
+  `python3 -m unittest discover -s tests -t .` (repo root as top-level
+  dir) — without `-t .` the new `tests/fixtures` package +
+  `tests/__init__.py` break discovery for the pre-existing modules
+  (import root mismatch). All docstrings stating the old target were
+  updated in this PR (README, 5 test modules, `.git/plan.md`).
+  `UNRESOLVED: spawn-dedup` marker at the spawn site (3.5 closes it).
+- spec deltas: none (SPEC S3.1/S3.2/S3.3/S3.6/S3.7 implemented as
+  written; no locked value moved).
 
 ### 2026-09-23 — G3 PR #11 r1 disposition iteration 2: @gpu #2/#4 test-harness fixes, verification PENDING (branch `phase2-lifecycle`)
 

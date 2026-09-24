@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""bonsai2-spawn — submit one subagent task (S3.2/S3.3; MAP 3.3).
+
+Thin deploy file; the submission flow lives in `bonsai2_harness.py`
+(`cmd_spawn`) so the queue/claim protocol is shared with everything
+that promotes queued tasks.
+
+Usage (the S3.2 surface, every flag specced):
+  bonsai2-spawn [-p PROMPT_FILE | -i INLINE_PROMPT]
+                [--tools on|off] [--ctx N] [--deadline SECS]
+                [--out FILE] [--priority low|normal|high]
+
+Routing (S3.3, locked): the least-loaded healthy instance with a free
+slot (tie-break lowest i); `bunloaded` never appears in the health
+document so it is skipped by construction. No free slot on any
+routable instance -> the task queues (FIFO, priority preempts: high
+jumps the queue, low waits) and the spawn waits up to
+`queue_wait_max_s` (harness.yaml); expiry -> exit 8, state "queued".
+
+Exit codes (S3.2 closed set, per-command mapping):
+  0  = accepted — the task is RUNNING on its instance (a free slot was
+       available, or the queue wait was won within queue_wait_max_s)
+  2  = malformed args / malformed config
+  3  = the routing candidate is bfailed (ERR_PORT_IN_USE, S1.5) or
+       bdown (ERR_INSTANCE_UNHEALTHY) at submission — S4.5: wait one
+       health cycle (30 s), re-spawn
+  5  = no instance's live ctx fits the requested --ctx
+       (ERR_CTX_TOO_LONG, S1.5)
+  8  = queue_wait_max_s expired, the task is still "queued"
+  80 = main-only mode (0 instances) — the S2.4 {"reason": ...} JSON
+  82 = the main endpoint is unhealthy (S3.6 probe)
+  84 = health.json absent/invalid (manager down)
+
+The task's later terminal state (done/failed/timeout, exit 20/21/22
+via collect — MAP 3.6) is NOT this command's: spawn is accepted, the
+worker (this dir's bonsai2-taskworker.py, started detached) owns the
+run. A task id is `t-YYYYmmdd-NNNN-<4hex>` (the S3.1 example shape).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bonsai2_harness as H  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(H.dispatch("bonsai2-spawn", sys.argv[1:]))

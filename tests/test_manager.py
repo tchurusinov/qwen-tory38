@@ -65,7 +65,7 @@ What each MAP item is proven by (the spec-named assertions):
       - a unit that fails to start is recorded, and the loop continues
         to the next index (S2.1: independent engines).
 
-Run: `python3 -m unittest discover -s tests` from the repo root.
+Run: `python3 -m unittest discover -s tests -t .` from the repo root.
 """
 
 import importlib.machinery

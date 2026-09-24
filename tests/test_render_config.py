@@ -13,7 +13,7 @@ No GPU, no network (hermetic-suite convention, tests/test_smoke.py).
 The tool is loaded from bin/ via importlib.util (same convention as
 tests/test_model_fetch.py).
 
-Run: `python3 -m unittest discover -s tests` from the repo root.
+Run: `python3 -m unittest discover -s tests -t .` from the repo root.
 """
 
 import copy
