@@ -250,9 +250,12 @@ hand-edit the deployed files; re-run the installer instead.
 
 <!-- In progress (MAP P3 / SPEC S3): the read family (status,
      list-instances, health — MAP 3.2) and spawn + taskworker (MAP 3.3)
-     are merged on main; 3.4-3.12 (slots/deadline, dedup, collect,
-     steer/cancel, unload/reload, closed-set audit, mock-engine manager
-     stub, acceptance) are actively underway. The surface below is the
+     are merged on main. The remainder of the phase is actively underway
+     (per the MAP.md ledger, which is authoritative for the numbers):
+     3.4 slot model + deadline, 3.5 spawn dedup, 3.6 collect,
+     3.7 steer/cancel, 3.8 unload/reload, 3.9 exit-code closed-set audit,
+     3.10 mock-engine manager stub, 3.11 hermetic suite, 3.12 S3.8
+     acceptance. The surface below is the
      LOCKED design (S3.2) and the commands still to land keep it verbatim.
      Command surface (S3.2, all under /opt/bonsai2/bin/, config from
      /opt/bonsai2/etc/harness.yaml, env overrides
