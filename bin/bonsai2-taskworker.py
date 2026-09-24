@@ -203,6 +203,23 @@ def _run_attempt(rec: dict, port: int, ident: dict) -> dict:
 
 
 def main() -> int:
+    """The ALWAYS-exits-0 contract (the docstring's source-of-truth note,
+    G3 PR#12 r2 P2: it must be ENFORCED, not just documented) — a worker
+    crash leaves its record `running`, and the Phase-3 reaper (MAP 3.4)
+    turns a stale running record into failed/ERR_ENGINE_DOWN. Any
+    uncaught exception (a KeyError in _run_attempt, a bad record port,
+    ...) would otherwise escape as Python's exit 1; log + return 0 so
+    the record is the single source of truth either way."""
+    try:
+        return _main()
+    except Exception as exc:  # noqa: BLE001 — the always-exits-0 contract
+        _log(
+            f"uncaught worker error: {exc.__class__.__name__}: {exc} (record stays as-is; the reaper owns it)"
+        )
+        return 0
+
+
+def _main() -> int:
     if len(sys.argv) != 2:
         _log("usage: bonsai2-taskworker.py <task-record.json>")
         return (

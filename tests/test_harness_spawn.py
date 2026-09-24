@@ -815,13 +815,19 @@ class TestSpawnQueuePromotion(SpawnBase):
         ids = [doc["task_id"] for _c, doc in results]
         self.assertEqual(len(set(ids)), 2, "two DISTINCT task ids — no shared record")
         d = self._results()
-        rec0 = H.read_task(d, ids[0])
-        rec1 = H.read_task(d, ids[1])
-        pids = {rec0.get("worker_pid"), rec1.get("worker_pid")}
+        # G3 PR#12 r2 P2: only RUNNING records carry a worker_pid (a spawn
+        # that queued out on exit 8 has none — asserting exactly-2 pids was
+        # timing-fragile). The no-double-claim invariant: no SINGLE worker
+        # may serve two records.
+        pids = [
+            r.get("worker_pid")
+            for r in (H.read_task(d, tid) for tid in ids)
+            if r.get("worker_pid")
+        ]
         self.assertEqual(
-            len(pids - {None}),
-            2,
-            "each task got its OWN worker (the double-claim defect would give one task two workers, the other none)",
+            len(pids),
+            len(set(pids)),
+            "no worker serves two records (the double-claim defect would start two workers on one task, or one on two)",
         )
 
 
