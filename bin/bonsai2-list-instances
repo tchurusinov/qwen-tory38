@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""bonsai2-list-instances — HUMAN table of the pool (S3.2).
+
+Thin deploy file (MAP 3.2; shared logic in `bonsai2_harness.py`). The
+S3.2 named exception to the S3.1 one-JSON-object rule: this command's
+stdout is a human table (i / port / state / ctx / ctx_reduced /
+slots in use / slots total), one line per running instance; the JSON
+status is `bonsai2-status`'s job. Diagnostics still go to stderr.
+
+Exit codes (S3.2 closed set): 0 = ok (the table is the data), 2 =
+malformed config, 82 = main-endpoint probe failed, 84 = health.json
+absent/invalid (manager down).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bonsai2_harness as H  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(H.dispatch("bonsai2-list-instances", sys.argv[1:]))

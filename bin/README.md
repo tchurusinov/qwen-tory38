@@ -4,23 +4,47 @@ Everything in this directory is deployed by install.sh to
 /opt/bonsai2/bin/ on the host (layout MAP 0.1). The repo tree mirrors
 the host layout 1:1 so source and deploy paths never diverge in naming.
 
-Lands here (later MAP phases):
+Landed so far:
 
-- `bonsai2-manager` — the instance manager (MAP 2.1–2.5, S2.1–S2.5); runs
-  from the `bonsai2-sglang.service` unit (Type=notify via its own
-  sd_notify). Lands MAP 2.1–2.5 (2026-09-22, branch
-  `phase2-manager-skeleton`): config load, S2.3 boot tier, S1.4
-  allocation tier, S2.5 ordered spawn, S3.1 health.json; the S2.2
-  health-probe escalation (MAP 2.6) and S2.4 PTQ1_0/ctx-halve fallback
-  (MAP 2.7) are marked hooks inside it.
-- `bonsai2-spawn`, `bonsai2-steer`, `bonsai2-cancel`,
-  `bonsai2-status`, `bonsai2-list-instances`, `bonsai2-collect`,
-  `bonsai2-bench`, `bonsai2-unload`, `bonsai2-reload`,
-  `bonsai2-health` — the S3.2 control scripts, the main-agent API
-  (MAP 3.1–3.12).
+- `bonsai2_vram.py` — the S1.4 VRAM accounting formula as pure
+  functions (MAP 1.6, S1.4/S1.7 "unit half").
+- `bonsai2_model_fetch.py` — weights download + SHA/size verification
+  against `etc/subagent-engine.yaml` (MAP 1.3, S1.1/S1.5).
+- `bonsai2_render_config.py` — subagent-engine.yaml writer + schema
+  validation (MAP 1.5, S1.6/S1.7).
+- `bonsai2_build_image.py` — the `bonsai2-server:<tag>` runtime image
+  builder + image.pin recorder (MAP 1.4, S1.6/S6.1).
+- `bonsai2-manager` — the instance manager (MAP 2.1–2.11, S2.1–S2.5):
+  config load, S2.3 boot tier, S1.4 allocation tier, S2.5 ordered
+  spawn, S3.1 health.json, S2.2 escalation, S2.4 PTQ1_0/ctx-halve
+  fallback, drift watch, S3.2 control queue. Runs from the
+  `bonsai2-sglang.service` unit (Type=notify via its own sd_notify).
+- `bonsai2_harness.py` — the S3.1 core library for the S3.2 control
+  scripts: one-JSON-on-stdout/one-stderr contract, closed-set exit
+  codes, S3.6 config loader, health.json read, main-endpoint probe,
+  slot accounting + least-loaded routing, queue + task records,
+  `reap_stale` (MAP 3.1).
+- `bonsai2-status`, `bonsai2-list-instances`, `bonsai2-health` — the
+  S3.2 read family (MAP 3.2): status (S3.1 status schema, live
+  main-probe, recomputed slots), list-instances (human table), health
+  (raw health.json). Exit 0/82/84 mapping.
+- `bonsai2-spawn` + `bonsai2-taskworker.py` — S3.2 spawn command +
+  detached worker (MAP 3.3): least-loaded deadline-aware routing,
+  queue wait (exit 8), S3.7 result file, S1.5 one-retry engine-down
+  path. The worker is not itself an S3.2 command; it is the child the
+  spawn command detaches.
+
+Lands here (later MAP items on this phase / later phases):
+
+- `bonsai2-steer`, `bonsai2-collect`, `bonsai2-cancel` — S3.2 commands
+  (MAP 3.4/3.6/3.7).
+- `bonsai2-bench`, `bonsai2-unload`, `bonsai2-reload` — S3.2 commands
+  (MAP 3.8/4.7).
 - `llama-server` — NOT in the repo: it is baked into the
   `bonsai2-server:<tag>` image (S1.4/S6.1); a host copy lives at
   /opt/bonsai2/bin/llama-server for ops (S1.2, MAP 1.2).
 
-Empty until MAP 2.1/Phase 3 add the first script; this README keeps the
-directory tracked in git so the layout is visible from day one.
+Tests: hermetic suite lives in `tests/` (run
+`python3 -m unittest discover -s tests -t .` from the repo root; no
+GPU, no network, stdlib only). @gpu tests live in `tests/gpu/`, run
+via `tests/run_gpu.sh`.

@@ -1,6 +1,6 @@
 """Hermetic test suite — no GPU, no network (Global testing discipline).
 
-Default discover target: `python3 -m unittest discover -s tests` from the
+Default discover target: `python3 -m unittest discover -s tests -t .` from the
 repo root. GPU tests live in tests/gpu/ (separate discover target,
 run via tests/run_gpu.sh with an nvidia-smi snapshot first).
 
