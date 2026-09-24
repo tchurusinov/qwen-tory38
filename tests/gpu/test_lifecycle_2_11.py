@@ -490,7 +490,7 @@ def _inject_cgroup_pressure(
     cg: Path | None,
     target_bytes: int,
     cap_bytes: int,
-    hold_s: float = 75.0,
+    hold_s: float = 120.0,
 ) -> bool:
     """G3 PR#11 r1 (DOD #4, test #4 root cause): the cgroup v2
     `memory.current` on this box is NOT writable by the test user — the
@@ -513,11 +513,13 @@ def _inject_cgroup_pressure(
     moving `memory.current` only ~0.5 MB (never near cap). The runtime
     image bakes python3 for this (Dockerfile.runtime; verified in-build).
 
-    `hold_s` defaults to 75 s (bumped from 45): the S2.5 sustained
-    window is 30 s and the drift recheck cadence is shrunken to 6 s, so
-    the over-cap charge must outlive 30 s of clock PLUS the ~6 s of
-    recheck latency that starts the clock, with margin. The detection
-    below confirms the cap is crossed while the hold is still in force.
+    `hold_s` defaults to 120 s: the S2.5 sustained window is 30 s and the
+    drift recheck cadence is shrunken to 6 s, so the over-cap charge must
+    outlive 30 s of clock PLUS the ~6 s of recheck latency that starts the
+    clock, with margin. With a 13.7 GB allocation the cap can be crossed
+    ~30-45 s after the holder starts; the 120 s hold keeps the charge in
+    force well past any drift-clock start inside the 90 s halve-poll
+    window, so the sustained-30 s condition is met and the halve fires.
 
     Returns True only when the charge actually LANDED: `memory.current`
     is re-read and must EXCEED the manager's S2.2 `--memory` cap
