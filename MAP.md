@@ -694,6 +694,63 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-24 — Phase 3: PR #12 G3 closed (3 review rounds), G4 merge approved (branch `phase3-harness-api`)
+
+- agent/model: Hermes qwen3.8-27b (session: G3 rounds 1–3 disposition +
+  G4 merge-gate record; user approval in PR comment 787)
+- phase(s): P3 (3.1/3.2/3.3 — the PR scope; G3 now closed, G4 merge
+  at the human gate)
+- items checked: 3.1, 3.2, 3.3 (claimed in the PR DOD; the flip to [x]
+  lands with the merge commit)
+- G3 review loop (branch `phase3-harness-api`):
+  * **Round 1** (raw = comment 727; 2 P0, 3 P1, 4 P2): P0 #1 the O_EXCL
+    lock was not cross-process (`{name}.{pid}`) + the spawn fast path
+    was unlocked — fixed in `d2e2f47` (shared `{name}.lock` + stale-PID
+    reclaim; `claim_own_task` under the slot-claim lock); P0 #2 the
+    retry pool could re-pick a tried instance — fixed (untried-only
+    pool, dead-branch cleanup in `eacef6d`); P1 #4 queue-wait re-reads
+    the health doc per poll; P1 #6 single-pass `_instance_loads`.
+    P1 #3 spawn engine-identity load softened (worker re-reads it;
+    missing engine yaml -> accepted, worker fails ERR_ENGINE_DOWN);
+    P1 #5 --out parent validated/created at spawn; P2 #8 deadline 0.0
+    is not falsy; P2 #9 string port coerced to int. Full disposition =
+    comment 769. Regression tests landed: cross-process lock contention
+    + stale reclaim, concurrent-spawn double-claim, retry-pool pins,
+    P1/P2 fix pins (+10 cases, 293 -> 303).
+  * **Round 2** (raw = 779; 0 P0, 1 P1, 3 P2): P1 WAIVED with probe
+    evidence (the "stale doc" claim — `try: doc = load` already keeps
+    the last good doc; simulated loads give [1,1,3,3]); P2 worker
+    always-exits-0 now ENFORCED (main -> try/_main wrapper) + P2
+    double-claim test assertion de-timing-fragiled, both in `58d98fe`;
+    P2 lock-hold scaling deferred to MAP 3.4. Disposition = 781.
+  * **Round 3** (raw = 786; 1 P0, 1 P1-withdrawn, 7 P2): user waiver in
+    comment 787 ("round 3 findings may be waived for now, being covered
+    by future items; DOD reached, I approve"). P0 (O(N_tasks) I/O under
+    the slot-claim lock) = scaling hazard, noted for MAP 3.4 (the
+    reaper/load test is the right place); the one live P1 (racing
+    spawns vs slots_total) analyzed as unlikely under the exclusive
+    lock (check + promote + write are one critical section — the
+    regression test `test_two_concurrent_spawns_do_not_double_claim`
+    pins it); P2 non-numeric port -> uncaught ValueError exit 1 FIXED
+    in `13e3a90` (now exit 84, the malformed-manager-doc family, not 2);
+    remaining P2s (PID reuse in stale reclaim, instance None -> 0,
+    cmd_status mkdir side effect, [8,8] test edge, docstring
+    precision) carried to MAP 3.4/3.5 as notes.
+- machine state: hermetic-only; gate.sh PASS + 303 tests OK on every
+  commit. Main stack :30001 untouched (shared with the pi reviewer;
+  reviews ran sequentially). No /opt/bonsai2, no units, no images
+  (install is the Phase-6 area).
+- next: after G4 merge — 3.4 (slot model + deadline enforcement,
+  manager-side half; the reaper owns stale running records + the
+  lock-hold load test from the round-2/3 notes).
+- blockers/intricacies: none new for the next session. Note: the
+  queue-wait loop's `try: doc = load_health_doc() except: pass` is
+  CORRECT-by-exception (the assignment never happens on failure —
+  round-2 P1 was this false positive; keep the shape, don't "fix" it).
+- spec deltas: none (S3.1–S3.3 implemented as written; no locked value
+  moved — the engine-yaml coupling note is a doc clarification, the
+  spawn exit mapping is unchanged).
+
 ### 2026-09-24 — Phase-2 tech-debt hotfix closed: @gpu #2/#4 GREEN (branch `hotfix-gpu-2-4-techdebt`, PR #13, hotfix, no G3 review per user)
 
 - agent/model: Hermes qwen3.8-27b (session `20260924_095247_1bcca1`
