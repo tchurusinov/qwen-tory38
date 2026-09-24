@@ -20,7 +20,7 @@ engine:
 image:
   pin:
     tag: "bonsai2-server:1.0"
-    sha256: "sha256:ed6068ae74f67b93b74f80efbcdf642a0f133c4e502103d161b6dcaff65b3cad"
+    sha256: "sha256:6b4cd79f492d12ed72661022d8803fe91cf2bc94fb0963b05a6bdafac969ea53"
 
 model:
   repo: prism-ml/Ternary-Bonsai-2-27B-gguf

@@ -694,6 +694,126 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-24 — Phase-2 tech-debt hotfix closed: @gpu #2/#4 GREEN (branch `hotfix-gpu-2-4-techdebt`, PR #13, hotfix, no G3 review per user)
+
+- agent/model: Hermes qwen3.8-27b (session `20260924_095247_1bcca1`
+  follow-up; user-directed: root-cause + fix the two red @gpu tests, bake
+  python into the image if needed, get them green to move on)
+- phase(s): P2 carry-in (2.11 DOD #4) — the two red @gpu tests from
+  `docs/pr11-two-red-gpu-tests.md`. Now CLOSED (green).
+- items checked: none new — 2.11 [x] stands; the two red @gpu tests are
+  now green on this box (observed, not claimed).
+- machine state: repo work only; nothing installed/running. Three
+  measured root causes found and fixed on top of the prior hotfix
+  commits (all in PR #13, branch tip `87accc1`):
+  * **#2 (crash) — the kill never killed.** The test killed the engine
+    with `docker exec kill -9 1`, but llama-server IS the container's PID
+    1 (nvidia entrypoint execs it), and the kernel makes PID 1 ignore an
+    unhandled SIGKILL — rc=0, yet the host PID + port stayed up the full
+    60 s window. Fix: `docker kill -s TERM` (port down in 1 s; non-zero
+    exit -> `Restart=on-failure` fires). Kept: `BONSAI2_PROBE_TIMEOUT_S=3`
+    hook so a dead probe fails in ~3 s, letting 2 consecutive fails land
+    inside the down window.
+  * **#2 bonus (manager) — escalation backstop crashed the loop.**
+    `check_escalation(unit_show=subprocess)` defaulted to the *module*;
+    the first probe-fail cycle raised `TypeError: 'module' object is not
+    callable` and killed the steady loop (hermetic tests always inject a
+    fake, so the default only ran in production). Fix:
+    `unit_show=subprocess.run`. Sibling defaults audited.
+  * **#4 (drift) — charge overshot the kernel cap.** `0.95 * kernel_cap`
+    (15.08 GB total vs 15.87 GB kernel cap, ~13 GB engine in the same
+    cgroup) left 0.8 GB headroom -> holder OOM'd (red run: memory.current
+    2.77 -> 1.84 GB, down). The python3-in-container bytearray mechanism
+    itself was proven (charged a standalone container 0.95 -> 15.1 GB in
+    3 s). Fix: target the manager's decimal cap + 350 MB (15.13 GB total,
+    ~0.7 GB under the kernel cap).
+  * **Spec amendment: S1.8 #4 / S2.8 #2 / S2.8 #4 reload budget 15 s -> 30
+    s.** Measured S2.6 boot is 11.0 s for the PQ2_0 engine at full unit
+    args; observed reload half was 25.5 s (RestartSec=5 + 11 s load +
+    rebind/warmup + 2 s probe-confirmation). 30 s = 11 + 5 + ~14 margin.
+    Delta notes added at each amended site in SPEC.md; test constant +
+    docstrings updated.
+- GREEN OBSERVED (run of `87accc1`, `/tmp/verify24c.log`,
+  `python3 -m unittest ...test_2_crash_recovery ...test_4_drift_ctx_halve`):
+  Ran 2 tests in 131.3 s, OK.
+  * #2: degraded witnessed at 19.7 s; kill -> healthy in 34.1 s (reload
+    half 14.4 s < 30 s); instance 0 restarted, main PIDs intact, instance
+    1 untouched.
+  * #4: charge 1.35 -> 15.10 GB (landed=True, 0.7 GB under kernel cap);
+    drift fired ctx 262144 -> 131072, ctx_reduced=true, unit rewritten,
+    in-place restart witnessed, instance 1 stable, N=2.
+  Tear-down clean: no leftover bonsai2 containers, ports 30101/30102 free.
+- next: G4 human merge of PR #13. Then the P7 MAP item (post-MVP CI/CD
+  proposal + senior-git-1.0/2 workup from the e2e run). Optional later:
+  tighten the 30 s budget once more boot measurements accumulate; run the
+  full 19-test @gpu discovery to clear the unrelated `test_load_1_8`
+  sustained-load flake (not this debt).
+- blockers/intricacies: none for the debt itself. Two things the next
+  agent should know: (a) a 27B engine cold-loads in ~11 s on this box
+  (S2.6), so any "<15 s recovery" claim must budget RestartSec=5 + ~11 s
+  load + probe-confirmation, not just the load; (b) PID-1 SIGKILL
+  immunity is a box/kernel fact, not a manager bug — any future
+  crash-injection test that uses `kill -9 <pid>` where pid is the
+  container init must use a handled signal (TERM) or a host-side kill.
+- spec deltas: S1.8 #4, S2.7 test line, S2.8 #2, S2.8 #4: reload/auto-
+  recovery budget 15 s -> 30 s (locked-value move; before/after in the PR
+  #13 `## Spec amendments` section). No other SPEC change.
+
+### 2026-09-24 — Technical-debt hotfix: PR #11 r1 disposition Fix A for @gpu #2/#4 (branch `hotfix-gpu-2-4-techdebt`, hotfix PR, no G3 review per user)
+
+- agent/model: Hermes qwen3.8-27b (user-directed: the doc's fixes,
+  technical debt, hotfix PR, no code review on it)
+- phase(s): P2 carry-in (2.11 DOD #4, the two red @gpu tests from
+  `docs/pr11-two-red-gpu-tests.md`)
+- items checked: none new — this is a disposition of the PR #11 r1
+  technical debt; the 2.11 [x] stands.
+- machine state: nothing installed/running — repo work only. Changes:
+  * `bin/bonsai2-manager`: `run_probe_loop` honors the documented test
+    env hook `BONSAI2_HEALTH_POLL_S` (fallback to the serving.yaml
+    `health_poll_s` value when unset/non-positive; same pattern as
+    `BONSAI2_DRIFT_RECHECK_S` / `BONSAI2_DRIFT_PRESSURE_S`) — the doc's
+    Fix A for #2.
+  * `tests/gpu/test_lifecycle_2_11.py` test #2: sets
+    `BONSAI2_HEALTH_POLL_S=2` and drops the `_port_holder` machinery
+    (the EADDRINUSE race is gone); the degraded-witness window now logs
+    the instance-0 state timeline + the manager's stderr tail (captured
+    to `manager-2.log` in the health dir) on failure.
+  * `tests/gpu/test_lifecycle_2_11.py` `_inject_cgroup_pressure` +
+    test #4: landed = `memory.current > cap_bytes` (the manager's
+    decimal `--memory` cap, the SAME condition `check_drift` reacts to;
+    the old `0.5 * alloc` threshold was below it) and the detection
+    deadline is `hold_s + 60` (past the ~45 s dd write time) instead of
+    `hold_s - 10` — the doc's Fix A for #4.
+  * `tests/test_manager.py`: 2 hermetic pins for the cadence hook
+    (unset -> yaml value; `=2` -> 2 s; `=0` -> yaml value).
+- next: user runs the 2 @gpu tests to confirm / keep the technical
+  debt disposition honest. KNOWN-RED STATE at this commit (observed
+  this session, NOT hidden):
+  * #2: the 2 s cadence alone did not register 2 consecutive probe
+    fails within the ~8-13 s down window on this box — each probe
+    round-trips a 16-token completion with a ~15 s timeout
+    (`COMPLETION_RT_MAX_S=10 + 5 s`), so a failed probe costs up to ~15
+    s regardless of cadence; degraded = 2 x ~15 s = ~30 s, longer than
+    the unit's self-recovery. The timeline + manager-log capture in the
+    test now makes the actual cycle timings observable. Follow-up (not
+    this hotfix): a `BONSAI2_PROBE_TIMEOUT_S` hook to shorten the
+    probe round-trip on the 2 s cadence, and/or a shorter down window.
+  * #4: the dd-to-container-rootfs charge moved `memory.current` ~0.5
+    MB on this box (observed live: 1344086016 B -> 1344610304 B over the
+    105 s window) — reclaimable page-cache does not charge
+    `memory.current` the way the doc assumed; the mechanism needs
+    anonymous memory held by a live process (the runtime image has no
+    python3 — verified — so the holder must be pure C/sh, e.g. a
+    `dd`-free mmap via `stress`-style tooling or a small C binary baked
+    into the image). The detection fix (cap threshold + deadline) is
+    correct and stays; the pin mechanism is the remaining gap.
+- blockers/intricacies: the doc's Fix A assumed instant probes (#2) and
+  page-cache charging (#4); both assumptions failed on this box. The
+  hotfix lands the doc's fixes verbatim + diagnostics so the next
+  session can fix against observed timings, not assumptions.
+- spec deltas: none (the env hook is a test hook, same pattern as the
+  two existing documented test hooks; no locked value moved).
+
 ### 2026-09-23 — G3 PR #11 r1 disposition iteration 2: @gpu #2/#4 test-harness fixes, verification PENDING (branch `phase2-lifecycle`)
 
 - agent/model: Hermes qwen3.8-27b (user-directed: fixes -> log -> commit -> push -> r1 disposition comment -> r2 review -> stop)
