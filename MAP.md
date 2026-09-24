@@ -694,6 +694,71 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-24 — Phase-2 tech-debt hotfix closed: @gpu #2/#4 GREEN (branch `hotfix-gpu-2-4-techdebt`, PR #13, hotfix, no G3 review per user)
+
+- agent/model: Hermes qwen3.8-27b (session `20260924_095247_1bcca1`
+  follow-up; user-directed: root-cause + fix the two red @gpu tests, bake
+  python into the image if needed, get them green to move on)
+- phase(s): P2 carry-in (2.11 DOD #4) — the two red @gpu tests from
+  `docs/pr11-two-red-gpu-tests.md`. Now CLOSED (green).
+- items checked: none new — 2.11 [x] stands; the two red @gpu tests are
+  now green on this box (observed, not claimed).
+- machine state: repo work only; nothing installed/running. Three
+  measured root causes found and fixed on top of the prior hotfix
+  commits (all in PR #13, branch tip `87accc1`):
+  * **#2 (crash) — the kill never killed.** The test killed the engine
+    with `docker exec kill -9 1`, but llama-server IS the container's PID
+    1 (nvidia entrypoint execs it), and the kernel makes PID 1 ignore an
+    unhandled SIGKILL — rc=0, yet the host PID + port stayed up the full
+    60 s window. Fix: `docker kill -s TERM` (port down in 1 s; non-zero
+    exit -> `Restart=on-failure` fires). Kept: `BONSAI2_PROBE_TIMEOUT_S=3`
+    hook so a dead probe fails in ~3 s, letting 2 consecutive fails land
+    inside the down window.
+  * **#2 bonus (manager) — escalation backstop crashed the loop.**
+    `check_escalation(unit_show=subprocess)` defaulted to the *module*;
+    the first probe-fail cycle raised `TypeError: 'module' object is not
+    callable` and killed the steady loop (hermetic tests always inject a
+    fake, so the default only ran in production). Fix:
+    `unit_show=subprocess.run`. Sibling defaults audited.
+  * **#4 (drift) — charge overshot the kernel cap.** `0.95 * kernel_cap`
+    (15.08 GB total vs 15.87 GB kernel cap, ~13 GB engine in the same
+    cgroup) left 0.8 GB headroom -> holder OOM'd (red run: memory.current
+    2.77 -> 1.84 GB, down). The python3-in-container bytearray mechanism
+    itself was proven (charged a standalone container 0.95 -> 15.1 GB in
+    3 s). Fix: target the manager's decimal cap + 350 MB (15.13 GB total,
+    ~0.7 GB under the kernel cap).
+  * **Spec amendment: S1.8 #4 / S2.8 #2 / S2.8 #4 reload budget 15 s -> 30
+    s.** Measured S2.6 boot is 11.0 s for the PQ2_0 engine at full unit
+    args; observed reload half was 25.5 s (RestartSec=5 + 11 s load +
+    rebind/warmup + 2 s probe-confirmation). 30 s = 11 + 5 + ~14 margin.
+    Delta notes added at each amended site in SPEC.md; test constant +
+    docstrings updated.
+- GREEN OBSERVED (run of `87accc1`, `/tmp/verify24c.log`,
+  `python3 -m unittest ...test_2_crash_recovery ...test_4_drift_ctx_halve`):
+  Ran 2 tests in 131.3 s, OK.
+  * #2: degraded witnessed at 19.7 s; kill -> healthy in 34.1 s (reload
+    half 14.4 s < 30 s); instance 0 restarted, main PIDs intact, instance
+    1 untouched.
+  * #4: charge 1.35 -> 15.10 GB (landed=True, 0.7 GB under kernel cap);
+    drift fired ctx 262144 -> 131072, ctx_reduced=true, unit rewritten,
+    in-place restart witnessed, instance 1 stable, N=2.
+  Tear-down clean: no leftover bonsai2 containers, ports 30101/30102 free.
+- next: G4 human merge of PR #13. Then the P7 MAP item (post-MVP CI/CD
+  proposal + senior-git-1.0/2 workup from the e2e run). Optional later:
+  tighten the 30 s budget once more boot measurements accumulate; run the
+  full 19-test @gpu discovery to clear the unrelated `test_load_1_8`
+  sustained-load flake (not this debt).
+- blockers/intricacies: none for the debt itself. Two things the next
+  agent should know: (a) a 27B engine cold-loads in ~11 s on this box
+  (S2.6), so any "<15 s recovery" claim must budget RestartSec=5 + ~11 s
+  load + probe-confirmation, not just the load; (b) PID-1 SIGKILL
+  immunity is a box/kernel fact, not a manager bug — any future
+  crash-injection test that uses `kill -9 <pid>` where pid is the
+  container init must use a handled signal (TERM) or a host-side kill.
+- spec deltas: S1.8 #4, S2.7 test line, S2.8 #2, S2.8 #4: reload/auto-
+  recovery budget 15 s -> 30 s (locked-value move; before/after in the PR
+  #13 `## Spec amendments` section). No other SPEC change.
+
 ### 2026-09-24 — Technical-debt hotfix: PR #11 r1 disposition Fix A for @gpu #2/#4 (branch `hotfix-gpu-2-4-techdebt`, hotfix PR, no G3 review per user)
 
 - agent/model: Hermes qwen3.8-27b (user-directed: the doc's fixes,
