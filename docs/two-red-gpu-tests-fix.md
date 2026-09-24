@@ -1,6 +1,17 @@
 # qwen-tory38 — the two red @gpu tests: situation, root cause, fix
 
-Date: 2026-09-24. Branch `hotfix-gpu-2-4-techdebt` (PR #13, open, known-red).
+> **Status update (2026-09-24):** PR #13 merged into main
+> (`1dc1ff5`); @gpu #2/#4 observed GREEN on this box
+> (observed run `Ran 2 tests in 131.3 s, OK` — #2
+> kill → healthy 34.1 s, reload half 14.4 s < 30 s; #4 charge
+> 1.35 → 15.10 GB, ctx 262144 → 131072 fired in place; local log
+> `test-logs/gpu-verify24c.log`, gitignored — timings in the 2026-09-24
+> MAP session log). The 15 s → 30 s
+> reload-budget spec amendment (S1.8 #4 / S2.8 #2 / S2.8 #4) is in
+> SPEC.md with delta notes at each amended site. The "Open questions"
+> below are settled by that green run.
+
+Date: 2026-09-24. Branch `hotfix-gpu-2-4-techdebt` (PR #13, merged).
 Scope: S2.8 acceptance tests #2 (crash recovery) and #4 (drift ctx halve) in
 `tests/gpu/test_lifecycle_2_11.py`. Everything here is grounded in the code,
 the PR #11 follow-up doc, the hotfix PR body, the last @gpu verify log

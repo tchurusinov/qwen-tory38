@@ -36,8 +36,10 @@ Landed so far:
 
 Lands here (later MAP items on this phase / later phases):
 
-- `bonsai2-steer`, `bonsai2-collect`, `bonsai2-cancel` — S3.2 commands
-  (MAP 3.4/3.6/3.7).
+- `bonsai2-steer`, `bonsai2-cancel` (MAP 3.7), `bonsai2-collect`
+  (MAP 3.6) — S3.2 commands; the slot model + deadline enforcement
+  (MAP 3.4) and spawn dedup (MAP 3.5) land in the core library, not as
+  new commands.
 - `bonsai2-bench`, `bonsai2-unload`, `bonsai2-reload` — S3.2 commands
   (MAP 3.8/4.7).
 - `llama-server` — NOT in the repo: it is baked into the
