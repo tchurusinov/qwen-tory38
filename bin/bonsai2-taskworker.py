@@ -20,9 +20,10 @@ Wire behavior (the S1.5 + S3.7 rows the spawn JSON implies):
     ctx-size, the exit-5 condition's task-side state);
   * non-JSON / unparseable completion body -> failed `ERR_PARSE` (S3.7);
   * connection error / 429 / 5xx -> `engine_retried` ONCE on another
-    instance (lowest-i healthy with ctx fit among the untried, else the
-    least-loaded healthy with ctx fit — S1.5 "one retry, next
-    instance"), second failure -> failed `ERR_ENGINE_DOWN`;
+    instance (lowest-i healthy with ctx fit among the UNTRIED; when
+    every healthy instance has already been tried the task fails — the
+    pre-fix least-loaded ANY-instance fallback could re-pick a tried
+    one, violating S1.5), second failure -> failed `ERR_ENGINE_DOWN`;
   * the task's own --deadline (S3.4) expiring mid-run -> `timeout`
     (the 22-path state; the manager-side enforcement half is MAP 3.4).
 
@@ -71,10 +72,17 @@ def _set_state(
 def _pick_retry_instance(
     doc: dict, rec: dict, d: dict
 ) -> tuple[int | None, int | None]:
-    """S1.5 one-retry target: lowest-i healthy with ctx fit among the
-    UNTRIED instances; if every instance was already tried, the
-    least-loaded healthy with ctx fit (any instance). (i, port) or
-    (None, None) when no healthy instance remains."""
+    """S1.5 one-retry target: the lowest-i healthy instance with ctx fit
+    among the UNTRIED instances. (i, port) or (None, None) when no
+    untried instance is healthy with ctx fit — the caller then fails the
+    task (second failure -> ERR_ENGINE_DOWN).
+
+    P0 #2 (G3 PR#12 r1): the pool is the UNTRIED-fit instances ONLY — a
+    retry that re-picks an already-tried instance violates S1.5 "one
+    retry, next instance". (The pre-fix fallback was all-fit, so a second
+    failure could land back on the instance that just failed. The
+    pre-fix "least-loaded ANY instance" branch is gone with it: when
+    every healthy instance has been tried, the task fails instead.)"""
     tried = set(rec.get("instances_tried") or [])
     instances = [e for e in doc.get("instances", []) if e.get("state") == "healthy"]
     if not instances:
@@ -87,21 +95,9 @@ def _pick_retry_instance(
         )
 
     fresh = [e for e in instances if fits(e) and e.get("i") not in tried]
-    # P0 #2 (G3 PR#12 r1): the fallback pool is the UNTRIED-fit instances
-    # minus the tried ones — a second failure on the SAME instance violates
-    # S1.5 "one retry, next instance". (The old fallback was all-fits, so a
-    # retry could land back on the instance that just failed.)
-    pool = (
-        fresh
-        if fresh
-        else [e for e in instances if fits(e) and e.get("i") not in tried]
-    )
-    if not pool:
+    if not fresh:
         return None, None
-    if fresh:
-        target = min(pool, key=lambda e: e.get("i", 0))
-    else:
-        target = min(pool, key=lambda e: (H.slots_in_use(d, e.get("i")), e.get("i", 0)))
+    target = min(fresh, key=lambda e: e.get("i", 0))
     port = target.get("port")
     if not isinstance(port, int):
         ident_port_base = 30101
@@ -234,7 +230,12 @@ def main() -> int:
         _log(f"{rec['task_id']}: already {rec['state']} — nothing to do")
         return 0
     deadline_s = rec.get("deadline_s")
-    deadline_at = time.monotonic() + (float(deadline_s) if deadline_s else float(3600))
+    # P2 #8 (G3 PR#12 r1): `0.0` is falsy — an explicit zero deadline must
+    # mean "already expired" (timeout immediately), not "fall back to the
+    # 3600 s default". Use `is not None`, not truthiness.
+    deadline_at = time.monotonic() + (
+        float(deadline_s) if deadline_s is not None else float(3600)
+    )
     try:
         ident = H.load_engine_identity()
     except H.ConfigError as exc:

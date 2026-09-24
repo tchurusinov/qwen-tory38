@@ -35,6 +35,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -65,6 +66,21 @@ def _load_harness():
 
 
 H = _load_harness()
+
+
+def _load_taskworker(name: str = "bonsai2_taskworker_under_test"):
+    """The worker as a separate module (the suite loads the harness as
+    'bonsai2_harness'; the worker is its own top-level module that
+    imports it — keep the name distinct so unittest discovery sees two
+    real modules)."""
+    loader = importlib.machinery.SourceFileLoader(
+        name, str(BIN_DIR / "bonsai2-taskworker.py")
+    )
+    spec = importlib.util.spec_from_loader(name, loader)
+    assert spec
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 def _run_spawn(
@@ -701,6 +717,298 @@ class TestSpawnQueuePromotion(SpawnBase):
             ("queued", "running", "done"),
             "tid: still queued, or promoted once the slow slot freed (FIFO order)",
         )
+
+    def test_two_concurrent_spawns_do_not_double_claim(self):
+        """P0 #1 regression (G3 PR#12 r1): the spawn free-slot fast path
+        is a CLAIM under the slot-claim lock (claim_own_task) — two
+        concurrent spawns must NEVER promote the SAME record to running
+        (the pre-fix fast path checked running_count with no lock held,
+        so a concurrent claim could promote the same record in between:
+        two start_workers, one task). Here: one engine slot, two spawns
+        racing via a barrier; each gets its OWN task id, and both
+        eventually run (the second is promoted by the first task's
+        slot-freeing on the SLOW engine)."""
+        p0 = free_port()
+        self._write_cfg(queue_wait_max_s=3)
+        self._instance(p0, variant="slow")
+        self._write_health([self._inst(0, p0, total=1)])
+        barrier = threading.Barrier(2)
+        results: list = []
+        result_lock = threading.Lock()
+        errors: list = []
+
+        # Per-thread routed streams: redirect_stdout/redirect_stderr swap
+        # the GLOBAL sys.stdout/sys.stderr, so two racing spawns must not
+        # each swap (thread B's JSON could land in thread A's buffer ->
+        # json.loads blows up). One global swap to a stream that routes
+        # every write to the CURRENT thread's buffer is race-free. The
+        # out/err streams route to SEPARATE buffers (stderr diagnostic
+        # text must not corrupt the stdout JSON).
+        tls = threading.local()
+
+        def _routed(attr: str) -> io.StringIO:
+            buf = getattr(tls, attr, None)
+            if buf is None:
+                buf = io.StringIO()
+                setattr(tls, attr, buf)
+            return buf
+
+        class _ThreadRoutedOut(io.StringIO):
+            def write(self, s):
+                return _routed("out").write(s)
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        class _ThreadRoutedErr(io.StringIO):
+            def write(self, s):
+                return _routed("err").write(s)
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        routed_out, routed_err = _ThreadRoutedOut(), _ThreadRoutedErr()
+        saved_out, saved_err = sys.stdout, sys.stderr
+
+        def runner():
+            barrier.wait()
+            with redirect_stdout(routed_out), redirect_stderr(routed_err):
+                code = H.cmd_spawn(["-i", "race task"], self.env, poll_s=0.05)
+            raw = getattr(tls, "out", io.StringIO()).getvalue()
+            tls.out = None
+            try:
+                doc = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                with result_lock:
+                    errors.append(f"thread {threading.get_ident()}: {exc}: {raw!r}")
+                return
+            with result_lock:
+                results.append((code, doc))
+
+        try:
+            sys.stdout, sys.stderr = routed_out, routed_err
+            ts = [threading.Thread(target=runner) for _ in range(2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(timeout=20)
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+        self.assertEqual(errors, [], f"spawn stdout lost to a sibling thread: {errors}")
+        self.assertEqual(len(results), 2)
+        codes = [c for c, _ in results]
+        self.assertIn(
+            codes,
+            [
+                [0, 0],
+                [0, 8],
+                [8, 0],
+            ],
+            f"each spawn accepted (0) or queued-out (8): {codes}",
+        )
+        ids = [doc["task_id"] for _c, doc in results]
+        self.assertEqual(len(set(ids)), 2, "two DISTINCT task ids — no shared record")
+        d = self._results()
+        rec0 = H.read_task(d, ids[0])
+        rec1 = H.read_task(d, ids[1])
+        pids = {rec0.get("worker_pid"), rec1.get("worker_pid")}
+        self.assertEqual(
+            len(pids - {None}),
+            2,
+            "each task got its OWN worker (the double-claim defect would give one task two workers, the other none)",
+        )
+
+
+class TestTaskWorkerRetry(unittest.TestCase):
+    """The worker's S1.5 one-retry target, unit level: the P0 #2 pool
+    semantics — a retry NEVER lands back on an already-tried instance."""
+
+    def setUp(self):
+        self.W = _load_taskworker()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = {
+            "base": self.tmp,
+            "tasks": self.tmp / "tasks",
+            "locks": self.tmp / ".locks",
+        }
+        (self.tmp / "tasks").mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _doc(self, instances):
+        return {"stack": "healthy", "instances": instances}
+
+    def _inst(self, i, state="healthy", ctx=262144):
+        return {"i": i, "port": 30101 + i, "state": state, "ctx": ctx}
+
+    def test_retry_never_retries_a_tried_instance(self):
+        # P0 #2 regression: both instances healthy, both already tried,
+        # one of them carries all the load — the pre-fix least-loaded
+        # ANY-instance fallback would have re-picked the tried i=0.
+        rec = {
+            "task_id": "t-1",
+            "instances_tried": [0, 1],
+            "ctx_need": None,
+            "result_file": str(self.tmp / "r1.json"),
+        }
+        doc = self._doc([self._inst(0), self._inst(1)])
+        H.write_task(self.d, {"task_id": "t-other", "state": "running", "instance": 0})
+        ni, _port = self.W._pick_retry_instance(doc, rec, self.d)
+        self.assertIsNone(
+            ni,
+            "every healthy instance already tried -> no retry target -> fail (S1.5 one retry, next instance)",
+        )
+
+    def test_retry_picks_lowest_i_untried(self):
+        rec = {"task_id": "t-1", "instances_tried": [0], "ctx_need": None}
+        doc = self._doc([self._inst(0), self._inst(1), self._inst(2)])
+        ni, port = self.W._pick_retry_instance(doc, rec, self.d)
+        self.assertEqual(ni, 1, "lowest-i healthy with ctx fit among the UNTRIED")
+        self.assertEqual(port, 30102)
+
+    def test_retry_skips_broken_untried(self):
+        rec = {"task_id": "t-1", "instances_tried": [0], "ctx_need": None}
+        doc = self._doc([self._inst(0), self._inst(1, state="bdown"), self._inst(2)])
+        ni, _port = self.W._pick_retry_instance(doc, rec, self.d)
+        self.assertEqual(ni, 2, "bdown i=1 is skipped even though it is untried")
+
+
+class TestRound1P1P2Fixes(SpawnBase):
+    """The round-1 P1 #3 / P1 #5 / P2 #8 / P2 #9 fixes, each pinned by a
+    named case against its pre-fix shape."""
+
+    def test_spawn_missing_engine_yaml_is_accepted(self):
+        """P1 #3: the engine yaml is the manager's config, not the
+        harness's — a healthy pool + free slot is NOT blocked by it.
+        Pre-fix: spawn exit 2. Now: accepted; the worker's own re-read
+        fails the task with ERR_ENGINE_DOWN (the record stays
+        collectable)."""
+        p0 = free_port()
+        self._write_cfg()
+        self._instance(p0, variant="ok")
+        self._write_health([self._inst(0, p0)])
+        # point BOTH the in-process load and the worker's env at a
+        # missing file
+        self.env["BONSAI2_ENGINE_YAML"] = str(self.tmp / "absent-engine.yaml")
+        os.environ["BONSAI2_ENGINE_YAML"] = self.env["BONSAI2_ENGINE_YAML"]
+        code, doc, _ = _run_spawn(["-i", "hi"], self.env, poll_s=0.05)
+        self.assertEqual(
+            code,
+            0,
+            "healthy pool + free slot -> accepted despite the missing engine yaml",
+        )
+        self.assertEqual(doc["state"], "running")
+        d = self._results()
+        rec = _wait_state(d, doc["task_id"], ("failed",), timeout_s=10.0)
+        self.assertEqual(
+            rec["error"],
+            "ERR_ENGINE_DOWN",
+            "the worker's re-read fails it at start (the coupling, documented in the module docstring)",
+        )
+        self.assertIn("worker-start", rec.get("detail", ""))
+
+    def test_out_parent_is_created_at_spawn(self):
+        """P1 #5: the --out parent deep path is validated/created at
+        spawn time — a crash mid-task can no longer be the first place
+        an uncreatable --out dir is discovered."""
+        p0 = free_port()
+        self._write_cfg()
+        self._instance(p0, variant="ok")
+        self._write_health([self._inst(0, p0)])
+        out = self.tmp / "a" / "b" / "c" / "deep-out.json"
+        code, doc, _ = _run_spawn(
+            ["-i", "hi", "--out", str(out)], self.env, poll_s=0.05
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(doc["result_file"], str(out))
+        self.assertTrue(
+            out.parent.is_dir(), "the --out parent was created at spawn time"
+        )
+        d = self._results()
+        rec = _wait_state(d, doc["task_id"], ("done", "failed"), timeout_s=10.0)
+        self.assertEqual(rec["state"], "done")
+
+    def test_out_parent_under_a_file_is_exit_2(self):
+        """P1 #5: an --out whose PARENT PATH COMPONENT is a file fails at
+        spawn (exit 2, the malformed-args path), not mid-task."""
+        p0 = free_port()
+        self._write_cfg()
+        self._instance(p0, variant="ok")
+        self._write_health([self._inst(0, p0)])
+        blocker = self.tmp / "blocker"
+        blocker.write_text("i am a file in the --out path")
+        out = blocker / "result.json"
+        code, doc, _ = _run_spawn(
+            ["-i", "hi", "--out", str(out)], self.env, poll_s=0.05
+        )
+        self.assertEqual(code, 2, "uncreatable --out parent -> exit 2 at spawn")
+        self.assertEqual(doc["error"], "ERR_ARGS")
+
+    def test_string_port_in_health_doc_is_coerced(self):
+        """P2 #9: a string port in health.json is coerced to int at spawn
+        time (the S3.1 numeric port schema) — the spawn JSON must not
+        emit a string port."""
+        p0 = free_port()
+        self._write_cfg()
+        self._instance(p0, variant="ok")
+        inst = self._inst(0, p0)
+        inst["port"] = str(p0)  # the malformed document
+        self._write_health([inst])
+        code, doc, _ = _run_spawn(["-i", "hi"], self.env, poll_s=0.05)
+        self.assertEqual(code, 0)
+        self.assertIsInstance(
+            doc["port"], int, "spawn JSON port is numeric (S3.1 schema)"
+        )
+        self.assertEqual(doc["port"], p0)
+
+    def test_zero_deadline_is_immediate_timeout(self):
+        """P2 #8: deadline_s == 0.0 is NOT the 3600 s default — a
+        zero-deadline task times out immediately (pre-fix: `0.0` is
+        falsy, so the worker silently used the 3600 s default)."""
+        W = _load_taskworker(name="bonsai2_taskworker_zero")
+
+        p0 = free_port()
+        self._write_cfg()
+        self._instance(p0, variant="ok")
+        self._write_health([self._inst(0, p0)])
+        d = self._results()
+        H.ensure_results_dirs(d)
+        tid = H.new_task_id(d)
+        rec = {
+            "task_id": tid,
+            "state": "running",
+            "instance": 0,
+            "port": p0,
+            "prompt": "deadline zero",
+            "deadline_s": 0.0,
+            "result_file": str(d["base"] / f"{tid}.json"),
+            "created_ts": time.time(),
+        }
+        H.write_task(d, rec)
+        argv_backup = list(sys.argv)
+        W.sys.argv = ["bonsai2-taskworker.py", str(d["tasks"] / f"{tid}.json")]
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                rc = W.main()
+        finally:
+            sys.argv = argv_backup
+        self.assertEqual(rc, 0, "the worker always exits 0 — the record carries state")
+        rec = H.read_task(d, tid)
+        self.assertEqual(
+            rec["state"],
+            "timeout",
+            "deadline 0.0 = already expired -> timeout (not the 3600 s default)",
+        )
+        self.assertEqual(rec["error"], "ERR_DEADLINE")
 
 
 if __name__ == "__main__":

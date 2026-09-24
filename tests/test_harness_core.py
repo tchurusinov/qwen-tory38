@@ -47,8 +47,12 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -508,6 +512,67 @@ class TestLockWait(unittest.TestCase):
                 t.start()
                 t.join(timeout=5)
                 self.assertTrue(t.is_alive() is False)
+
+    def test_cross_process_lock_contends(self):
+        """P0 #1 regression (G3 PR#12 r1): the O_EXCL lock is a REAL
+        cross-process serialization — the file is {name}.lock (the name
+        is the identity, the file is shared), so a holder in ANOTHER
+        process blocks this one. The pre-fix {name}.{pid} naming meant
+        every process created its own file and no two holders ever
+        contended (the lock never actually serialized)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            child_script = (
+                "import sys, time\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "import bonsai2_harness as H\n"
+                "from pathlib import Path\n"
+                "base = Path(sys.argv[2])\n"
+                "with H.lock_wait(base, 'xproc', timeout_s=10.0):\n"
+                "    (base / 'held').write_text('held')\n"
+                "    time.sleep(6)\n"
+            )
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    child_script,
+                    str(BIN_DIR),
+                    str(base),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                # wait until the child actually HOLDS the lock (it writes a
+                # marker from inside the critical section — no startup race)
+                held = base / "held"
+                deadline = time.monotonic() + 5.0
+                while not held.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(held.is_file(), "the child must have taken the lock")
+                # while the child holds it, a short-timeout acquire here
+                # must TIME OUT (contention on the shared {name}.lock)
+                with (
+                    self.assertRaises(TimeoutError),
+                    H.lock_wait(base, "xproc", timeout_s=0.5),
+                ):
+                    pass
+                # kill the holder -> stale lock (dead PID inside)
+                child.kill()
+                child.wait(timeout=5)
+                # reclaim: the dead holder's lock must not wedge the queue
+                with H.lock_wait(base, "xproc", timeout_s=5.0):
+                    lock_file = base / ".locks" / "xproc.lock"
+                    self.assertEqual(
+                        lock_file.read_text().strip(),
+                        str(os.getpid()),
+                        "reclaimed: this process is now the holder",
+                    )
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
 
 
 if __name__ == "__main__":

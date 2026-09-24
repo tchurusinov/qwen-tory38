@@ -29,7 +29,11 @@ Config (S3.2/S3.6):
     the wire) comes from subagent-engine.yaml — the manager's own config
     in the same etc/ dir (default /opt/bonsai2/etc/subagent-engine.yaml,
     overridable via `BONSAI2_ENGINE_YAML`, the manager's documented test
-    hook). Missing/invalid = exit 2.
+    hook). Missing/invalid: the SPAWN accepts (the engine yaml is the
+    manager's config, not the harness's — P1 #3, G3 PR#12 r1: a healthy
+    pool + free slot is not blocked by it) and the WORKER fails its task
+    at start with failed ERR_ENGINE_DOWN (the worker re-reads the file
+    itself; the record stays collectable).
   * the health document: <BONSAI2_HEALTH_DIR or /run/bonsai2>/health.json
     (the S3.1 schema, written by the manager every probe cycle). The
     commands are read-only consumers of it; an absent/invalid document
@@ -85,8 +89,10 @@ spawn's detached child):
   * 400 (request > ctx) -> failed ERR_CTX_TOO_LONG;
   * non-JSON / unparseable body -> failed ERR_PARSE (S3.7);
   * connection error / 429 / 5xx -> engine_retried ONCE on another
-    instance (lowest-i healthy with ctx fit among the untried; then the
-    least-loaded healthy with ctx fit), second failure -> failed
+    instance (lowest-i healthy with ctx fit among the UNTRIED; when
+    every healthy instance has already been tried the task fails —
+    P0 #2, G3 PR#12 r1: the pre-fix least-loaded ANY-instance fallback
+    could re-pick an already-tried one), second failure -> failed
     ERR_ENGINE_DOWN (S1.5 "engine crash mid-request");
   * deadline expiry -> timeout (the S3.4 22-path state; the manager-side
     enforcement half is MAP 3.4).
@@ -983,9 +989,19 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         return emit({"error": "ERR_ARGS", "detail": parsed}, EXIT_ARGS, parsed)
     try:
         cfg = load_config(env)
-        ident = load_engine_identity(env)
     except ConfigError as exc:
         return emit({"error": "ERR_ARGS", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    # P1 #3 (G3 PR#12 r1): the wire identity is only used for the
+    # port_base fallback below — the worker re-reads subagent-engine.yaml
+    # itself at start (its own load_engine_identity), so a missing/malformed
+    # engine yaml must NOT block spawn acceptance on a healthy pool + free
+    # slot. Fall back to the default port base here; a real config problem
+    # then surfaces as the worker's failed ERR_ENGINE_DOWN at run time
+    # (the record is still collectable), not a spawn exit 2.
+    try:
+        ident = load_engine_identity(env)
+    except ConfigError:
+        ident = {"engine_yaml": None, "port_base": 30101}
     try:
         doc = load_health_doc(env=env)
     except HealthMissing as exc:
@@ -1028,7 +1044,9 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             detail,
         )
     instance_i = target["i"]
-    port = target.get("port", ident.get("port_base", 30101) + instance_i)
+    # P2 #9 (G3 PR#12 r1): a string port in health.json would otherwise
+    # be emitted as a string, violating the S3.1 numeric port schema.
+    port = int(target.get("port", ident.get("port_base", 30101) + instance_i))
     task_id = new_task_id(d)
     if parsed["out"] is None:
         result_file = str(d["base"] / f"{task_id}.json")
@@ -1039,6 +1057,18 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 {"error": "ERR_ARGS", "detail": f"--out {out_path} : parent is a file"},
                 EXIT_ARGS,
                 f"--out {out_path}: parent is a file",
+            )
+        # P1 #5 (G3 PR#12 r1): validate/CREATE the --out parent at spawn
+        # time (the worker used to mkdir it at write time, so a --out under
+        # an impossible deep path was only discovered mid-task). An OSError
+        # here (parent path uncreatable) is a spawn-time rejection, exit 2.
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return emit(
+                {"error": "ERR_ARGS", "detail": f"--out {out_path}: {exc}"},
+                EXIT_ARGS,
+                f"--out {out_path}: {exc}",
             )
         result_file = str(out_path)
     prompt = parsed["prompt"]
