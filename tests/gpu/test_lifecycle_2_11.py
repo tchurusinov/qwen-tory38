@@ -486,7 +486,11 @@ def _cgroup_dir_for(name: str) -> Path | None:
 
 
 def _inject_cgroup_pressure(
-    container: str, cg: Path | None, target_bytes: int, hold_s: float = 45.0
+    container: str,
+    cg: Path | None,
+    target_bytes: int,
+    cap_bytes: int,
+    hold_s: float = 45.0,
 ) -> bool:
     """G3 PR#11 r1 (DOD #4, test #4 root cause): the cgroup v2
     `memory.current` on this box is NOT writable by the test user — the
@@ -509,11 +513,27 @@ def _inject_cgroup_pressure(
     regardless.
 
     Returns True only when the charge actually LANDED: `memory.current`
-    is re-read and must exceed the pre-charge baseline by at least
-    50% of the target (page-cache noise below that is not a charge).
+    is re-read and must EXCEED the manager's S2.2 `--memory` cap
+    (`cap_bytes`, the same `cur > cap_bytes` condition `check_drift`
+    reacts to — G3 PR#11 r1 disposition / technical debt, docs/pr11-
+    two-red-gpu-tests.md Fix A). The old `0.5 * target` threshold was
+    well below the cap the drift watch actually checks, so it could
+    report "landed" at a level the watch never saw. The poll deadline
+    is extended PAST the dd write time (`hold_s + 60`) — the old
+    `hold_s - 10` (35 s) gave up before a ~45 s 13.7 GB write had
+    produced enough charged pages to cross the cap.
     """
     if cg is None:
         return False
+    if cap_bytes <= 0:
+        # G3 PR#11 r1 disposition / technical debt (Fix A): the landed
+        # condition is `memory.current > cap_bytes` (the cap check_drift
+        # reacts to) — the caller MUST pass the manager's decimal cap;
+        # the old 0.5*target baseline heuristic retired with it.
+        raise ValueError(
+            "_inject_cgroup_pressure: cap_bytes must be > 0 (the manager's "
+            "S2.2 --memory cap in bytes, the condition check_drift reacts to)"
+        )
     try:
         before = int((cg / "memory.current").read_text().strip())
     except (OSError, ValueError):
@@ -554,17 +574,25 @@ def _inject_cgroup_pressure(
         text=True,
     )
     try:
-        # dd at ~300 MB/s takes ~45 s for 13.7 GB — read the cgroup
-        # repeatedly until the charge is visible or the hold window is
-        # nearly over (never after it).
-        deadline = time.monotonic() + hold_s - 10.0
+        # dd at ~300 MB/s takes ~45 s for 13.7 GB. G3 PR#11 r1
+        # disposition / technical debt (Fix A, docs/pr11-two-red-gpu-
+        # tests.md): the detection must (1) check the condition the
+        # drift watch reacts to — `memory.current > cap_bytes` (the
+        # manager's decimal `--memory` cap), not `0.5 * target` — and
+        # (2) wait PAST the write time (`hold_s + 60`, ~105 s), not
+        # give up at `hold_s - 10` (35 s) before the 13.7 GB dd has
+        # produced enough charged pages to cross the cap. The pin is
+        # held for the full `sleep HOLD` after the write, so once the
+        # cap is crossed the charge is sustained > 30 s and check_drift
+        # fires.
+        deadline = time.monotonic() + hold_s + 60.0
         after = before
         while time.monotonic() < deadline:
             try:
                 cur = int((cg / "memory.current").read_text().strip())
             except (OSError, ValueError):
                 cur = before
-            if cur - before >= int(0.5 * n):
+            if cur > cap_bytes:
                 after = cur
                 break
             time.sleep(2.0)
@@ -586,10 +614,10 @@ def _inject_cgroup_pressure(
                 capture_output=True,
                 check=False,
             )
-    landed = after - before >= int(0.5 * n)
+    landed = after > cap_bytes
     print(
         f"[2.11 #4] cgroup charge: {before} B -> {after} B "
-        f"(target +{n} B; landed={landed})"
+        f"(manager cap {cap_bytes} B; target +{n} B; landed={landed})"
     )
     return landed
 
@@ -602,6 +630,16 @@ def _read_health(health_dir: Path) -> dict | None:
         return json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _tail_lines(path: Path, n: int = 40) -> str:
+    """The last `n` lines of a text file (the manager-log diagnostic
+    dump on a red degraded-witness); '' when the file is absent or
+    unreadable."""
+    try:
+        return "\n".join(path.read_text().splitlines()[-n:])
+    except OSError:
+        return ""
 
 
 def _health_states(health: dict) -> dict:
@@ -884,10 +922,31 @@ class TestS28Acceptance(unittest.TestCase):
             with tempfile.TemporaryDirectory(prefix="bonsai2-health-211-2-") as td:
                 health_dir = Path(td)
                 env = self._manager_env(health_dir, ENGINE_YAML, SERVING_YAML)
+                # G3 PR#11 r1 disposition, technical-debt fix (Fix A,
+                # docs/pr11-two-red-gpu-tests.md): the old port-holder
+                # machinery raced the engine's own port rebind (EADDRINUSE,
+                # Errno 98) because it tried to hold 30101 down while the
+                # still-live engine owned it. The root cause was the 20 s
+                # degraded window (2 fails x 10 s cadence) vs the unit's
+                # ~8-13 s self-recovery — the holder existed to stretch the
+                # down time past the restart. With the manager's documented
+                # BONSAI2_HEALTH_POLL_S hook the cadence is 2 s, so degraded
+                # = 2 consecutive fails = 4 s of down time, which the
+                # unit's RestartSec=5 floor outlasts: degraded is witnessed
+                # naturally at ~4 s, before the unit recovers. No holder.
+                env["BONSAI2_HEALTH_POLL_S"] = "2"
+                # G3 PR#11 r1 disposition / technical debt: capture the
+                # manager's stderr (its _log probe-cycle trace) to a file
+                # so a red degraded-witness can be diagnosed from the
+                # actual probe timings instead of re-running blind.
+                # (No context manager: the handle stays open for the
+                # manager's lifetime and is closed in the finally below.)
+                mgr_log = health_dir / "manager-2.log"
+                mgr_log_fh = open(mgr_log, "w")  # noqa: SIM115
                 proc = subprocess.Popen(
                     [sys.executable, str(MANAGER), "--settle", str(SETTLE_S + 90)],
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=mgr_log_fh,
                     text=True,
                     env=env,
                 )
@@ -901,23 +960,9 @@ class TestS28Acceptance(unittest.TestCase):
                     pid_before = _engine_pid_in_container("bonsai2-server-0")
                     print(
                         f"\n[2.11 #2] healthy; killing engine pid {pid_before} "
-                        f"inside bonsai2-server-0 + holding port {PORT_BASE} down"
+                        f"inside bonsai2-server-0"
                     )
 
-                    # G3 PR#11 r1 (DOD #4, #2 root cause, 2nd iteration):
-                    # the holder must be in place BEFORE the kill — the
-                    # unit's Restart=on-failure + RestartSec=5 is fast
-                    # enough that the engine REBINDS 30101 within the
-                    # window between the kill and any later bind
-                    # (iteration 1: the post-kill bind got
-                    # EADDRINUSE against the restarted engine). The
-                    # holder occupies 30101 for ~30 s (>= 2 probe
-                    # cycles at the 10 s cadence) so the S2.2
-                    # two-consecutive-fails -> degraded rule fires;
-                    # then it releases, the unit's next restart
-                    # attempt binds + loads, and the RELOAD half is
-                    # measured from the release moment.
-                    holder = _port_holder(PORT_BASE)
                     kill_t0 = time.monotonic()
                     subprocess.run(
                         [
@@ -932,30 +977,51 @@ class TestS28Acceptance(unittest.TestCase):
                         text=True,
                         check=True,
                     )
-                    # Witness the degraded state first (2 fails at the
-                    # 10 s probe cadence — reachable only while the
-                    # holder keeps the restarted engine from binding).
-                    _poll_until(
-                        health_dir,
-                        60.0,
-                        lambda h: (
+                    # Witness the degraded state first (2 consecutive
+                    # fails at the BONSAI2_HEALTH_POLL_S=2 s cadence ->
+                    # ~4 s; the unit's RestartSec=5 floor keeps the
+                    # engine down past that, so no port holder is
+                    # needed — the holder's EADDRINUSE race is gone).
+                    # Observe the state over the window (don't assume a
+                    # fixed down time — docs/pr11-two-red-gpu-tests.md):
+                    # log the instance-0 state timeline to the manager
+                    # log file so a failure is diagnosable.
+                    degraded_at = None
+                    timeline = []
+                    t_deadline = kill_t0 + 60.0
+                    while time.monotonic() < t_deadline:
+                        h = _read_health(health_dir)
+                        st0 = (
                             _health_states(h).get(0, ("?", None, False))[0]
-                            == "degraded"
-                        ),
-                        "S2.8 #2 degraded witness",
-                    )
-                    degraded_at = time.monotonic()
+                            if h
+                            else "?"
+                        )
+                        off = time.monotonic() - kill_t0
+                        if not timeline or timeline[-1][1] != st0:
+                            timeline.append((round(off, 1), st0))
+                        if st0 == "degraded" and degraded_at is None:
+                            degraded_at = time.monotonic()
+                            break
+                        time.sleep(POLL_S)
+                    if degraded_at is None:
+                        for off, st in timeline:
+                            print(f"[2.11 #2] t={off:6.1f}s state0={st}", flush=True)
+                        print(
+                            f"[2.11 #2] manager log tail:\n{_tail_lines(mgr_log, 40)}",
+                            flush=True,
+                        )
+                        self.fail(
+                            "S2.8 #2 degraded witness did not land within 60 s "
+                            f"(timeline: {timeline[-12:]}; manager log: {mgr_log})"
+                        )
                     print(
                         f"[2.11 #2] degraded witnessed at {degraded_at - kill_t0:.1f} s"
                     )
-                    # Release the port: the restarted engine can now
-                    # bind + load; the manager's next probe clears it.
-                    holder.release()
                     # The S1.8 #4 15 s budget is the RELOAD half,
-                    # measured from the moment the engine may come
-                    # back (the prefix — the probe-cadence degraded
-                    # lag + the holder window — is measured, not
-                    # charged; the MAP 1.11 convention).
+                    # measured from the degraded witness (the engine
+                    # may already be reloading under the 5 s
+                    # RestartSec floor; the prefix is measured, not
+                    # charged — the MAP 1.11 convention).
                     reload_t0 = time.monotonic()
                     health = _poll_until(
                         health_dir,
@@ -1006,6 +1072,14 @@ class TestS28Acceptance(unittest.TestCase):
                     except subprocess.TimeoutExpired:
                         proc.kill()
                         proc.wait(timeout=10.0)
+                    # The manager's stderr streams to mgr_log (a
+                    # diagnostic for the degraded-witness window); close
+                    # it after the manager exits so the fd does not leak
+                    # into the health-dir teardown.
+                    try:
+                        mgr_log_fh.close()
+                    except (OSError, ValueError):
+                        pass
         finally:
             self._teardown_instances()
 
@@ -1252,10 +1326,15 @@ class TestS28Acceptance(unittest.TestCase):
                         f"(real in-container allocation)"
                     )
                     self.assertTrue(
-                        _inject_cgroup_pressure("bonsai2-server-0", cg0, alloc_bytes),
+                        _inject_cgroup_pressure(
+                            "bonsai2-server-0",
+                            cg0,
+                            alloc_bytes,
+                            cap_bytes,
+                        ),
                         "S2.8 #4: the cgroup charge did not land — "
-                        "memory.current did not rise over cap; the "
-                        "drift watch cannot see it",
+                        "memory.current did not rise over the manager "
+                        "cap; the drift watch cannot see it",
                     )
                     # The halve event: the S2.5 clock starts at the
                     # first over-cap recheck and fires at the first

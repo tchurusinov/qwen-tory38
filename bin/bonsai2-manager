@@ -2185,7 +2185,24 @@ def run_probe_loop(
     full cycle always runs before the settle check (a settle run is a
     normal ready boot — the first health.json is written, G3 PR #10
     r5 P1's READY ordering is main()'s job, the loop's contract is the
-    document)."""
+    document).
+
+    The probe cadence itself is overridable via the documented test
+    env hook `BONSAI2_HEALTH_POLL_S` (falls back to the
+    serving.yaml `health_poll_s` value when unset or not a positive
+    number) — the same pattern as `BONSAI2_DRIFT_RECHECK_S` /
+    `BONSAI2_DRIFT_PRESSURE_S` below. The S2.8 #2 @gpu test
+    (technical debt from the PR #11 r1 disposition) uses the 2 s
+    cadence: degraded = 2 consecutive fails = 4 s of down time, which
+    the unit's RestartSec=5 floor outlasts, so the degraded witness
+    needs no port-holder machinery."""
+    raw = os.environ.get("BONSAI2_HEALTH_POLL_S", "").strip()
+    try:
+        health_poll_s = float(raw) if raw else float(cfg["health_poll_s"])
+    except ValueError:
+        health_poll_s = float(cfg["health_poll_s"])
+    if health_poll_s <= 0:
+        health_poll_s = float(cfg["health_poll_s"])
     if drift_recheck_s is None:
         drift_recheck_s = float(
             os.environ.get("BONSAI2_DRIFT_RECHECK_S", DRIFT_RECHECK_S)
@@ -2238,8 +2255,8 @@ def run_probe_loop(
             log(f"probe loop: settled {settle_s:.0f}s (cycle {cycle}), exit 0")
             return EXIT_OK
         # S2.2: health_poll_s cadence (the steady-loop constant from
-        # serving.yaml; the skeleton's settle loop uses it too).
-        time.sleep(cfg["health_poll_s"])
+        # serving.yaml, or the BONSAI2_HEALTH_POLL_S test hook).
+        time.sleep(health_poll_s)
         cycle += 1
 
 

@@ -1325,6 +1325,74 @@ class TestEscalation(unittest.TestCase):
             )
         self.assertEqual(restarts, [], "systemd-side restart mid-streak is deferred")
 
+    def _drive_probe_loop(self, sleeps, env_extra):
+        """Run run_probe_loop for one settle cycle with every external
+        dependency mocked; append each steady-loop sleep to `sleeps`
+        and return (rc, sleeps). The env dict is patched onto
+        os.environ for the duration of the run."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        rt = mgr.Runtime(cfg, [0], ["healthy"])
+        td = tempfile.mkdtemp()
+        try:
+            with (
+                mock.patch.dict(os.environ, env_extra, clear=False),
+                mock.patch.object(mgr, "main_healthy", return_value=True),
+                mock.patch.object(mgr, "_refresh_states"),
+                mock.patch.object(mgr, "check_escalation"),
+                mock.patch.object(mgr, "process_control"),
+                mock.patch.object(mgr, "check_drift"),
+                mock.patch.object(mgr, "write_health"),
+                mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]),
+                mock.patch.object(
+                    mgr.time, "sleep", side_effect=lambda s: sleeps.append(s)
+                ),
+            ):
+                rc = mgr.run_probe_loop(
+                    cfg,
+                    rt,
+                    mgr.Path(td),
+                    0.05,
+                    log=lambda *a: None,
+                )
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        return rc, sleeps
+
+    def test_probe_cadence_env_hook_unset_defaults_to_yaml(self):
+        """BONSAI2_HEALTH_POLL_S unset -> the serving.yaml
+        health_poll_s value drives the steady-loop sleep (the S2.2
+        default is 10 s)."""
+        sleeps: list[float] = []
+        rc, got = self._drive_probe_loop(sleeps, {})
+        self.assertEqual(rc, 0)
+        self.assertTrue(got, "the loop must sleep between cycles")
+        expected = float(mgr.load_config(ENGINE_YAML, SERVING_YAML)["health_poll_s"])
+        for s in got:
+            self.assertAlmostEqual(s, expected, msg="cadence must stay the yaml value")
+
+    def test_probe_cadence_env_hook_overrides_the_yaml(self):
+        """G3 PR#11 r1 disposition / technical debt (docs/pr11-two-
+        red-gpu-tests.md Fix A): BONSAI2_HEALTH_POLL_S=2 shortens the
+        S2.2 degraded window to 2 x 2 s = 4 s so the S2.8 #2 @gpu test
+        can witness degraded without port-holder machinery; a
+        non-positive value falls back to the yaml value."""
+        sleeps: list[float] = []
+        rc, got = self._drive_probe_loop(sleeps, {"BONSAI2_HEALTH_POLL_S": "2"})
+        self.assertEqual(rc, 0)
+        self.assertTrue(got)
+        for s in got:
+            self.assertAlmostEqual(
+                s, 2.0, msg="the 2 s test cadence must drive the steady loop"
+            )
+        sleeps.clear()
+        rc, got = self._drive_probe_loop(sleeps, {"BONSAI2_HEALTH_POLL_S": "0"})
+        self.assertEqual(rc, 0)
+        expected = float(mgr.load_config(ENGINE_YAML, SERVING_YAML)["health_poll_s"])
+        for s in got:
+            self.assertAlmostEqual(
+                s, expected, msg="a non-positive hook value falls back to the yaml"
+            )
+
 
 # --------------------------------------------------------------------------
 # MAP 2.7 — S2.4 N=0 PTQ1_0 fallback + ctx-halve retry + bookkeeping
