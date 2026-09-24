@@ -1393,6 +1393,60 @@ class TestEscalation(unittest.TestCase):
                 s, expected, msg="a non-positive hook value falls back to the yaml"
             )
 
+    def _probe_timeout_passed(self, env_extra):
+        """Run run_probe_loop for one cycle with _refresh_states recording
+        the `probe_timeout_s` kwarg it is called with; return that value.
+        The hook is parsed in run_probe_loop and forwarded to the probe,
+        so the forward IS the contract (docs/two-red-gpu-tests-fix.md)."""
+        cfg = mgr.load_config(ENGINE_YAML, SERVING_YAML)
+        rt = mgr.Runtime(cfg, [0], ["healthy"])
+        td = tempfile.mkdtemp()
+        seen = {}
+
+        def _recording_refresh(runtime, snapshot, log=mgr._log, probe_timeout_s=None):
+            seen["probe_timeout_s"] = probe_timeout_s
+
+        try:
+            with (
+                mock.patch.dict(os.environ, env_extra, clear=False),
+                mock.patch.object(mgr, "main_healthy", return_value=True),
+                mock.patch.object(
+                    mgr, "_refresh_states", side_effect=_recording_refresh
+                ),
+                mock.patch.object(mgr, "check_escalation"),
+                mock.patch.object(mgr, "process_control"),
+                mock.patch.object(mgr, "check_drift"),
+                mock.patch.object(mgr, "write_health"),
+                mock.patch.object(mgr, "systemctl_base", return_value=["systemctl"]),
+                mock.patch.object(mgr.time, "sleep"),
+            ):
+                mgr.run_probe_loop(cfg, rt, mgr.Path(td), 0.05, log=lambda *a: None)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        return seen.get("probe_timeout_s", "UNSET")
+
+    def test_probe_timeout_env_hook_unset_defaults_to_none(self):
+        """BONSAI2_PROBE_TIMEOUT_S unset -> the probe keeps its own
+        default socket cap (probe_timeout_s forwarded as None)."""
+        self.assertIsNone(
+            self._probe_timeout_passed({}),
+            "unset hook must forward None (the probe's default socket cap)",
+        )
+
+    def test_probe_timeout_env_hook_overrides(self):
+        """G3 PR#11 r1 disposition / technical debt follow-up
+        (docs/two-red-gpu-tests-fix.md): BONSAI2_PROBE_TIMEOUT_S=3 caps
+        the probe's socket timeout so a dead engine's failed probe fails
+        fast, letting the S2.2 two-consecutive-fails rule register inside
+        the down window; a non-positive value falls back to the default
+        (None)."""
+        got = self._probe_timeout_passed({"BONSAI2_PROBE_TIMEOUT_S": "3"})
+        self.assertAlmostEqual(
+            got, 3.0, msg="the 3 s probe cap must be forwarded to the probe"
+        )
+        got = self._probe_timeout_passed({"BONSAI2_PROBE_TIMEOUT_S": "0"})
+        self.assertIsNone(got, "a non-positive hook value falls back to None")
+
 
 # --------------------------------------------------------------------------
 # MAP 2.7 — S2.4 N=0 PTQ1_0 fallback + ctx-halve retry + bookkeeping

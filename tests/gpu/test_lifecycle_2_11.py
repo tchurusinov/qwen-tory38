@@ -490,7 +490,7 @@ def _inject_cgroup_pressure(
     cg: Path | None,
     target_bytes: int,
     cap_bytes: int,
-    hold_s: float = 45.0,
+    hold_s: float = 75.0,
 ) -> bool:
     """G3 PR#11 r1 (DOD #4, test #4 root cause): the cgroup v2
     `memory.current` on this box is NOT writable by the test user — the
@@ -501,16 +501,23 @@ def _inject_cgroup_pressure(
     started. The pressure is now injected the way the kernel actually
     charges it: `docker exec` allocates REAL anonymous memory inside
     the container, which the kernel charges to that container's cgroup
-    (`memory.current` rises by the allocation — probe 2026-09-23:
-    1.1 GB charge moved memory.current 1.5 MB -> 1.1 GB).
+    (`memory.current` rises by the allocation).
 
-    The allocation is a bounded holder: `yes A | head -c N` materializes
-    ~N bytes of non-NUL anonymous pages inside the instance (the
-    image has bash/yes/head, probed 2026-09-23), held for `hold_s` so
-    the manager's shrunken 6 s drift rechecks observe it over the
-    S2.5 30 s sustained window. The holder exits after `hold_s`; the
-    pages are released; the test's `finally` tears the container down
-    regardless.
+    The holder is a detached in-container `python3` process holding a
+    `bytearray(n)` (docs/two-red-gpu-tests-fix.md, the PR #11 r1
+    technical-debt follow-up): anonymous pages held by a live process
+    are NOT reclaimable, so they charge `memory.current` durably for the
+    whole `hold_s`. The earlier iterations used a `dd` file on the
+    container rootfs — wrong, because a file's pages are RECLAIMABLE
+    page cache: the crash-state experiments measured a 3 GB synced dd
+    moving `memory.current` only ~0.5 MB (never near cap). The runtime
+    image bakes python3 for this (Dockerfile.runtime; verified in-build).
+
+    `hold_s` defaults to 75 s (bumped from 45): the S2.5 sustained
+    window is 30 s and the drift recheck cadence is shrunken to 6 s, so
+    the over-cap charge must outlive 30 s of clock PLUS the ~6 s of
+    recheck latency that starts the clock, with margin. The detection
+    below confirms the cap is crossed while the hold is still in force.
 
     Returns True only when the charge actually LANDED: `memory.current`
     is re-read and must EXCEED the manager's S2.2 `--memory` cap
@@ -519,9 +526,8 @@ def _inject_cgroup_pressure(
     two-red-gpu-tests.md Fix A). The old `0.5 * target` threshold was
     well below the cap the drift watch actually checks, so it could
     report "landed" at a level the watch never saw. The poll deadline
-    is extended PAST the dd write time (`hold_s + 60`) — the old
-    `hold_s - 10` (35 s) gave up before a ~45 s 13.7 GB write had
-    produced enough charged pages to cross the cap.
+    is `hold_s + 60` — past the allocation time, so the detection never
+    gives up before the charge is in force.
     """
     if cg is None:
         return False
@@ -539,52 +545,58 @@ def _inject_cgroup_pressure(
     except (OSError, ValueError):
         return False
     n = int(target_bytes)
-    # 2nd iteration (2026-09-23 re-run): the first attempt stored the
-    # allocation in a SHELL VARIABLE (`x=$(yes A | head -c N)`) — the
-    # shell copies that string into its own buffers (~2x the bytes), so
-    # a 13.7 GB target actually peaked ~27 GB inside a 15.87 GB kernel
-    # cap -> the holder was OOM-killed (rc=137) before the charge
-    # sustained. A regular FILE on the container rootfs is allocated
-    # ONCE (no copy amplification): `oflag=sync` faults the pages in
-    # immediately and they stay charged to the container's cgroup
-    # until the rm. (Not /dev/shm: the unit's --shm-size is 4g.)
+    # The holder allocates anonymous memory INSIDE the container via a
+    # detached `python3` process (docs/two-red-gpu-tests-fix.md, the PR
+    # #11 r1 technical-debt follow-up). Anonymous pages held by a live
+    # process are NOT reclaimable, so they charge the container's cgroup
+    # memory.current durably for the whole hold. The earlier iterations
+    # (shell-variable copy, then a `dd` file on the rootfs) failed: the
+    # shell variable copy-amp'd to ~2x and OOM-killed (rc=137); the `dd`
+    # file's pages are RECLAIMABLE page cache, so the crash-state
+    # experiments saw memory.current move only ~0.5 MB (a 3 GB synced dd
+    # held ~3.5 MB, not ~3 GB). A live python process holding a
+    # bytearray is the mechanism that actually lands the charge.
     #
-    # 3rd iteration: the exec must run DETACHED (the old blocking run
-    # returned only AFTER the `rm` had released the pages, so the
-    # re-read saw the post-release value: landed=False despite the
-    # charge having landed). The holder therefore runs in the
-    # background; the re-read happens at hold_s/2, WHILE the pin is
-    # held — and it must also be the value the manager's 6 s drift
-    # rechecks see over the S2.5 30 s sustained window.
+    # The exec must run DETACHED (docker exec -d): the holder holds the
+    # charge for `hold_s`, so a blocking exec would return only after the
+    # release and the re-read would see the post-release value. The holder
+    # script writes a bytearray(n) (n bytes of anonymous, resident pages),
+    # sleeps hold_s (keeping the pages charged for the S2.5 window), then
+    # exits; the pages are released on exit. The runtime image bakes
+    # python3 for this (Dockerfile.runtime, verified in-build).
+    holder_script = (
+        f"import time\n"
+        f"n = {n}\n"
+        f"b = bytearray(n)\n"
+        f"for i in range(0, n, 1 << 20):\n"
+        f"    b[i] = 1\n"
+        f"time.sleep({int(hold_s)})\n"
+    )
     holder = subprocess.Popen(
         [
             "docker",
             "exec",
+            "-d",
             container,
             "sh",
             "-c",
-            (
-                f"dd if=/dev/zero of=/bonsai2-drift-pin bs=1M "
-                f"count=$((n / 1048576)) oflag=sync status=none && "
-                f"sleep {int(hold_s)}; rm -f /bonsai2-drift-pin"
-            ),
+            f"python3 -c '{holder_script}'",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
     )
     try:
-        # dd at ~300 MB/s takes ~45 s for 13.7 GB. G3 PR#11 r1
-        # disposition / technical debt (Fix A, docs/pr11-two-red-gpu-
-        # tests.md): the detection must (1) check the condition the
-        # drift watch reacts to — `memory.current > cap_bytes` (the
-        # manager's decimal `--memory` cap), not `0.5 * target` — and
-        # (2) wait PAST the write time (`hold_s + 60`, ~105 s), not
-        # give up at `hold_s - 10` (35 s) before the 13.7 GB dd has
-        # produced enough charged pages to cross the cap. The pin is
-        # held for the full `sleep HOLD` after the write, so once the
-        # cap is crossed the charge is sustained > 30 s and check_drift
-        # fires.
+        # G3 PR#11 r1 disposition / technical debt (Fix A,
+        # docs/pr11-two-red-gpu-tests.md + docs/two-red-gpu-tests-fix.md):
+        # the detection must (1) check the condition the drift watch
+        # reacts to — `memory.current > cap_bytes` (the manager's decimal
+        # `--memory` cap), not `0.5 * target` — and (2) wait PAST the
+        # allocation time (`hold_s + 60`), not give up before the ~13.7 GB
+        # allocation has charged enough resident pages to cross the cap.
+        # The holder keeps the charge in force for the full `hold_s`, so
+        # once the cap is crossed the charge is sustained > 30 s and
+        # check_drift fires.
         deadline = time.monotonic() + hold_s + 60.0
         after = before
         while time.monotonic() < deadline:
@@ -605,15 +617,12 @@ def _inject_cgroup_pressure(
         try:
             holder.wait(timeout=hold_s + 120.0)
         except subprocess.TimeoutExpired:
-            # The pin file may outlive the docker exec if the engine
-            # restarts mid-hold; force-kill and clean the file.
+            # The holder may outlive the window if the engine restarts
+            # mid-hold; the detached python exec is reaped when the
+            # container is torn down in the test's finally, so no leftover
+            # charge leaks into the next phase (one-GPU/one-ports rule).
             holder.kill()
             holder.wait(timeout=30.0)
-            subprocess.run(
-                ["docker", "exec", container, "rm", "-f", "/bonsai2-drift-pin"],
-                capture_output=True,
-                check=False,
-            )
     landed = after > cap_bytes
     print(
         f"[2.11 #4] cgroup charge: {before} B -> {after} B "
@@ -929,12 +938,22 @@ class TestS28Acceptance(unittest.TestCase):
                 # still-live engine owned it. The root cause was the 20 s
                 # degraded window (2 fails x 10 s cadence) vs the unit's
                 # ~8-13 s self-recovery — the holder existed to stretch the
-                # down time past the restart. With the manager's documented
-                # BONSAI2_HEALTH_POLL_S hook the cadence is 2 s, so degraded
-                # = 2 consecutive fails = 4 s of down time, which the
-                # unit's RestartSec=5 floor outlasts: degraded is witnessed
-                # naturally at ~4 s, before the unit recovers. No holder.
+                # down time past the restart.
+                #
+                # The 2 s probe cadence alone is NOT enough on this box:
+                # each probe round-trips a 16-token completion with a ~15 s
+                # timeout (COMPLETION_RT_MAX_S=10 + 5 s socket cap), so a
+                # FAILED probe costs up to ~15 s regardless of cadence —
+                # degraded = 2 x ~15 s = ~30 s, longer than the unit's
+                # self-recovery. The BONSAI2_PROBE_TIMEOUT_S=3 hook
+                # (docs/two-red-gpu-tests-fix.md) caps the probe's socket
+                # timeout so a dead engine's failed probe fails in ~3 s
+                # instead of ~15 s. At the 2 s cadence, 2 consecutive
+                # fails then register in ~6-8 s, inside the ~8-20 s down
+                # window the unit's RestartSec=5 + warm reload leaves, so
+                # degraded is witnessed naturally, no port holder.
                 env["BONSAI2_HEALTH_POLL_S"] = "2"
+                env["BONSAI2_PROBE_TIMEOUT_S"] = "3"
                 # G3 PR#11 r1 disposition / technical debt: capture the
                 # manager's stderr (its _log probe-cycle trace) to a file
                 # so a red degraded-witness can be diagnosed from the
@@ -978,10 +997,11 @@ class TestS28Acceptance(unittest.TestCase):
                         check=True,
                     )
                     # Witness the degraded state first (2 consecutive
-                    # fails at the BONSAI2_HEALTH_POLL_S=2 s cadence ->
-                    # ~4 s; the unit's RestartSec=5 floor keeps the
-                    # engine down past that, so no port holder is
-                    # needed — the holder's EADDRINUSE race is gone).
+                    # fails at the BONSAI2_HEALTH_POLL_S=2 s cadence with
+                    # the BONSAI2_PROBE_TIMEOUT_S=3 s cap -> ~6-8 s; the
+                    # unit's RestartSec=5 + warm reload outlasts that, so
+                    # no port holder is needed — the holder's EADDRINUSE
+                    # race is gone).
                     # Observe the state over the window (don't assume a
                     # fixed down time — docs/pr11-two-red-gpu-tests.md):
                     # log the instance-0 state timeline to the manager
