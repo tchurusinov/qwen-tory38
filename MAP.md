@@ -694,6 +694,61 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-24 — Technical-debt hotfix: PR #11 r1 disposition Fix A for @gpu #2/#4 (branch `hotfix-gpu-2-4-techdebt`, hotfix PR, no G3 review per user)
+
+- agent/model: Hermes qwen3.8-27b (user-directed: the doc's fixes,
+  technical debt, hotfix PR, no code review on it)
+- phase(s): P2 carry-in (2.11 DOD #4, the two red @gpu tests from
+  `docs/pr11-two-red-gpu-tests.md`)
+- items checked: none new — this is a disposition of the PR #11 r1
+  technical debt; the 2.11 [x] stands.
+- machine state: nothing installed/running — repo work only. Changes:
+  * `bin/bonsai2-manager`: `run_probe_loop` honors the documented test
+    env hook `BONSAI2_HEALTH_POLL_S` (fallback to the serving.yaml
+    `health_poll_s` value when unset/non-positive; same pattern as
+    `BONSAI2_DRIFT_RECHECK_S` / `BONSAI2_DRIFT_PRESSURE_S`) — the doc's
+    Fix A for #2.
+  * `tests/gpu/test_lifecycle_2_11.py` test #2: sets
+    `BONSAI2_HEALTH_POLL_S=2` and drops the `_port_holder` machinery
+    (the EADDRINUSE race is gone); the degraded-witness window now logs
+    the instance-0 state timeline + the manager's stderr tail (captured
+    to `manager-2.log` in the health dir) on failure.
+  * `tests/gpu/test_lifecycle_2_11.py` `_inject_cgroup_pressure` +
+    test #4: landed = `memory.current > cap_bytes` (the manager's
+    decimal `--memory` cap, the SAME condition `check_drift` reacts to;
+    the old `0.5 * alloc` threshold was below it) and the detection
+    deadline is `hold_s + 60` (past the ~45 s dd write time) instead of
+    `hold_s - 10` — the doc's Fix A for #4.
+  * `tests/test_manager.py`: 2 hermetic pins for the cadence hook
+    (unset -> yaml value; `=2` -> 2 s; `=0` -> yaml value).
+- next: user runs the 2 @gpu tests to confirm / keep the technical
+  debt disposition honest. KNOWN-RED STATE at this commit (observed
+  this session, NOT hidden):
+  * #2: the 2 s cadence alone did not register 2 consecutive probe
+    fails within the ~8-13 s down window on this box — each probe
+    round-trips a 16-token completion with a ~15 s timeout
+    (`COMPLETION_RT_MAX_S=10 + 5 s`), so a failed probe costs up to ~15
+    s regardless of cadence; degraded = 2 x ~15 s = ~30 s, longer than
+    the unit's self-recovery. The timeline + manager-log capture in the
+    test now makes the actual cycle timings observable. Follow-up (not
+    this hotfix): a `BONSAI2_PROBE_TIMEOUT_S` hook to shorten the
+    probe round-trip on the 2 s cadence, and/or a shorter down window.
+  * #4: the dd-to-container-rootfs charge moved `memory.current` ~0.5
+    MB on this box (observed live: 1344086016 B -> 1344610304 B over the
+    105 s window) — reclaimable page-cache does not charge
+    `memory.current` the way the doc assumed; the mechanism needs
+    anonymous memory held by a live process (the runtime image has no
+    python3 — verified — so the holder must be pure C/sh, e.g. a
+    `dd`-free mmap via `stress`-style tooling or a small C binary baked
+    into the image). The detection fix (cap threshold + deadline) is
+    correct and stays; the pin mechanism is the remaining gap.
+- blockers/intricacies: the doc's Fix A assumed instant probes (#2) and
+  page-cache charging (#4); both assumptions failed on this box. The
+  hotfix lands the doc's fixes verbatim + diagnostics so the next
+  session can fix against observed timings, not assumptions.
+- spec deltas: none (the env hook is a test hook, same pattern as the
+  two existing documented test hooks; no locked value moved).
+
 ### 2026-09-23 — G3 PR #11 r1 disposition iteration 2: @gpu #2/#4 test-harness fixes, verification PENDING (branch `phase2-lifecycle`)
 
 - agent/model: Hermes qwen3.8-27b (user-directed: fixes -> log -> commit -> push -> r1 disposition comment -> r2 review -> stop)
