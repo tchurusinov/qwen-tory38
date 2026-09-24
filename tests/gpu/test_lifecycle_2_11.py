@@ -6,7 +6,8 @@ test drives the manager's surfaces directly, the same way the Phase-3
 `bonsai2-unload` / `bonsai2-reload` commands will):
 
   #1 Cold boot -> main + N healthy <= boot_target_s (recorded T).
-  #2 Single-instance crash -> auto-recovered (reload half < 15 s);
+  #2 Single-instance crash -> auto-recovered (reload half < 30 s;
+     S1.8 #4, amended 15 -> 30 s on 2026-09-24);
      main unaffected; health.json transitions
      healthy -> degraded -> healthy.
   #3 N=0 mode end-to-end (S2.7 test: override the main footprint to
@@ -14,7 +15,7 @@ test drives the manager's surfaces directly, the same way the Phase-3
      main-only reported) + the S2.4 sibling: the N'=0 PTQ1_0 fallback
      retry live at its fallback footprint.
   #4 5-minute drift simulation -> ctx-reduce event at the halved ctx,
-     the instance healthy again < 15 s, zero restarts on the other
+     the instance healthy again < 30 s, zero restarts on the other
      instance, N unchanged.
   #5 Unload/reload cycle (S2.7 test): `unload --all` -> main-only
      `user_unloaded`, the drift cycle does NOT re-spawn; `reload --all`
@@ -33,16 +34,19 @@ which this test uses verbatim):
     just before the manager starts to its exit 0; the S2.8 #1 budget
     is the serving.yaml `boot_target_s` read LIVE (the shared whole-
     boot deadline the manager enforces against it, G3 PR #10 r15).
-  * S2.8 #2: the engine's in-container PID (llama-server is PID 1 via
-    the nvidia entrypoint, probed 2026-09-22) is killed with kill -9
-    while the manager's probe loop runs; recovery = the unit's own
-    `Restart=on-failure` (RestartSec=5) + the manager's S2.2
-    escalation backstop. The health.json state sequence
-    healthy->degraded->healthy is witnessed by polling the document
-    every 0.2 s. The S1.8 #4 15 s budget covers the RELOAD half (the
-    MAP 1.11 convention: teardown/restart prefix measured, not
-    charged) — here the prefix is the 10 s probe-cadence degraded lag
-    + systemd's RestartSec=5, so the assert is on the reload half,
+  * S2.8 #2: the engine (llama-server is PID 1 via the nvidia
+    entrypoint, probed 2026-09-22) is killed with `docker kill -s TERM`
+    (PID 1 ignores an unhandled SIGKILL — `docker exec kill -9 1`
+    returns rc=0 but the engine survives; measured 2026-09-24,
+    docs/two-red-gpu-tests-fix.md) while the manager's probe loop runs;
+    recovery = the unit's own `Restart=on-failure` (RestartSec=5) +
+    the manager's S2.2 escalation backstop. The health.json state
+    sequence healthy->degraded->healthy is witnessed by polling the
+    document every 0.2 s. The S1.8 #4 30 s budget (amended from 15 s
+    on 2026-09-24 — measured reload half 25.5 s) covers the RELOAD
+    half (the MAP 1.11 convention: teardown/restart prefix measured,
+    not charged) — here the prefix is the 10 s probe-cadence degraded
+    lag + systemd's RestartSec=5, so the assert is on the reload half,
     with the total logged for the S2.7 reboot test.
   * S2.8 #3: a crafted serving.yaml overrides
     `main_stack.footprint_gb` to 120 GB AND points `container` at a
@@ -71,7 +75,8 @@ which this test uses verbatim):
     `ctx_reduced: true` + the halved ctx, instance 0's host PID
     changed (a real in-place restart), instance 1's host PID did NOT
     change + its state stayed healthy (zero restarts on the other
-    instance), N unchanged, healthy again < 15 s at the halved ctx.
+    instance), N unchanged, healthy again < 30 s at the halved ctx
+    (S1.8 #4, amended 15 -> 30 s on 2026-09-24).
   * S2.8 #5: the control-queue request files
     (`control/unload-all.json` / `control/reload-all.json` — the shape
     the Phase-3 commands will write) drive the manager's MAP 2.10
@@ -113,8 +118,11 @@ RUNTIME_IMAGE = "bonsai2-server:1.0"
 PORT_BASE = 30101
 SETTLE_S = 20  # post-boot probe-loop window (2 cycles at the 10 s cadence)
 MANAGER_TIMEOUT_S = 300
-POLL_S = 0.2  # health.json witness poll (tight enough for the 15 s budget)
-RELOAD_BUDGET_S = 15.0  # S2.8 #2 reload half (S1.8 #4 / MAP 1.11 convention)
+POLL_S = 0.2  # health.json witness poll (tight enough for the 30 s budget)
+# S1.8 #4, amended 15 -> 30 s on 2026-09-24: measured S2.6 boot 11 s +
+# RestartSec=5 + probe-confirmation; see SPEC delta +
+# docs/two-red-gpu-tests-fix.md.
+RELOAD_BUDGET_S = 30.0  # S2.8 #2 reload half
 DRIFT_RECHECK_S = 6  # the manager's documented env hook (5-min cadence shrunk)
 
 
@@ -1043,9 +1051,10 @@ class TestS28Acceptance(unittest.TestCase):
                     print(
                         f"[2.11 #2] degraded witnessed at {degraded_at - kill_t0:.1f} s"
                     )
-                    # The S1.8 #4 15 s budget is the RELOAD half,
-                    # measured from the degraded witness (the engine
-                    # may already be reloading under the 5 s
+                    # The S1.8 #4 30 s budget (amended from 15 s on
+                    # 2026-09-24 — measured reload half 25.5 s) is the
+                    # RELOAD half, measured from the degraded witness
+                    # (the engine may already be reloading under the 5 s
                     # RestartSec floor; the prefix is measured, not
                     # charged — the MAP 1.11 convention).
                     reload_t0 = time.monotonic()
@@ -1423,8 +1432,9 @@ class TestS28Acceptance(unittest.TestCase):
                     )
                     # N unchanged: both instances still in the document.
                     self.assertEqual(len(health["instances"]), 2)
-                    # Healthy again < 15 s at the halved ctx (the fresh
-                    # load is the warm-cache reload, the MAP 1.11 band).
+                    # Healthy again < 30 s at the halved ctx (S1.8 #4,
+                    # amended 15 -> 30 s on 2026-09-24; the fresh load
+                    # is the measured 11 s boot + probe-confirmation).
                     _poll_until(
                         health_dir,
                         RELOAD_BUDGET_S,
