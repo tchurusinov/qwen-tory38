@@ -165,6 +165,33 @@ a live process, and the image needs a way to allocate it (python3).
 
 ---
 
+## Implementation status (this session)
+
+Landed on `hotfix-gpu-2-4-techdebt`:
+- `b49cad2`: the `BONSAI2_PROBE_TIMEOUT_S` hook in the manager (threaded
+  through `run_probe_loop` -> `_refresh_states` -> `instance_healthy` ->
+  `_probe_*`), 2 hermetic pins in `tests/test_manager.py`, the
+  `Dockerfile.runtime` python3 bake + in-build `ERR_NO_PYTHON3` assertion,
+  the test #4 holder rewritten to the in-container python3 bytearray, test
+  #2 setting `BONSAI2_PROBE_TIMEOUT_S=3`.
+- `f202317`: the #4 hold widened to 120 s (the cap can be crossed
+  ~30-45 s after the holder starts, so the charge must outlive any
+  drift-clock start inside the 90 s halve-poll window) + the rebuilt
+  runtime image's S1.6 `image.pin` re-recorded in
+  `etc/subagent-engine.yaml` (digest `sha256:6b4cd79f...`).
+
+Hermetic: 220 tests OK (was 218; +2 probe-timeout pins). gate.sh PASS
+(baseline unchanged: shellcheck soft-skipped, the 4 ruff errors in
+`bin/bonsai2-manager` pre-date this work — identical on main).
+
+@gpu re-run of #2 + #4 in progress against the new image
+(`bonsai2-server:1.0` @ 6b4cd79f, python3 3.12.3 verified in-image).
+Machine audit before the run: ~51 GB available, ports 30101/30102 free,
+no stale bonsai2 containers, the main stack holding ~60 GB GPU (unchanged
+by the run).
+
+---
+
 ## The fix (what lands next)
 
 Both are small, targeted, and follow the PR #11 doc's ranked fixes plus the
