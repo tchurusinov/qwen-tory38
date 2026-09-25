@@ -1298,6 +1298,35 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             EXIT_MANAGER_DOWN,
             f"health.json port for i={instance_i} not numeric: {port!r}",
         )
+    # G3 PR#15 r1 P1-1: validate/CREATE the --out target BEFORE taking
+    # the per-key dedup lock — an exit-2 from inside the lock released
+    # the dedup lock while the aborted spawn was still unfixed, letting
+    # a same-key spawn create a second record in the gap.
+    out_path: Path | None = None
+    if parsed["out"] is not None:
+        op: Path = parsed["out"].expanduser().resolve()
+        if op.parent.is_file():
+            return emit(
+                {
+                    "error": "ERR_ARGS",
+                    "detail": f"--out {op} : parent is a file",
+                },
+                EXIT_ARGS,
+                f"--out {op}: parent is a file",
+            )
+        # P1 #5 (G3 PR#12 r1): validate/CREATE the --out parent at
+        # spawn time (the worker used to mkdir it at write time, so
+        # a --out under an impossible deep path was only discovered
+        # mid-task). An OSError here -> a spawn-time rejection, exit 2.
+        try:
+            op.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return emit(
+                {"error": "ERR_ARGS", "detail": f"--out {op}: {exc}"},
+                EXIT_ARGS,
+                f"--out {op}: {exc}",
+            )
+        out_path = op
     # S3.4 / MAP 3.5: claim a task id + record + dedup entry under the
     # per-key lock so two concurrent same-key spawns cannot both create a
     # record (the one that loses the lock writes its record, then re-reads
@@ -1311,31 +1340,9 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         else:
             dup_winner = None
             task_id = new_task_id(d)
-            if parsed["out"] is None:
+            if out_path is None:
                 result_file = str(d["base"] / f"{task_id}.json")
             else:
-                out_path = parsed["out"].expanduser().resolve()
-                if out_path.parent.is_file():
-                    return emit(
-                        {
-                            "error": "ERR_ARGS",
-                            "detail": f"--out {out_path} : parent is a file",
-                        },
-                        EXIT_ARGS,
-                        f"--out {out_path}: parent is a file",
-                    )
-                # P1 #5 (G3 PR#12 r1): validate/CREATE the --out parent at
-                # spawn time (the worker used to mkdir it at write time, so
-                # a --out under an impossible deep path was only discovered
-                # mid-task). An OSError here -> a spawn-time rejection, exit 2.
-                try:
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                except OSError as exc:
-                    return emit(
-                        {"error": "ERR_ARGS", "detail": f"--out {out_path}: {exc}"},
-                        EXIT_ARGS,
-                        f"--out {out_path}: {exc}",
-                    )
                 result_file = str(out_path)
             deadline_s = (
                 parsed["deadline"]
@@ -1486,6 +1493,11 @@ def cmd_collect(argv: list[str], env: dict | None = None) -> int:
         )
     task_id = argv[0]
     d = results_dirs(cfg)
+    # MAP 3.4 (the PLAN's collect half of the reaper wiring): reap BEFORE
+    # the read — a stale `running` record (dead worker pid) is turned
+    # terminal here, so collect maps it to 21/22 instead of polling 0
+    # forever. Idempotent; terminal records are skipped.
+    reap_stale(d, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr))
     try:
         rec = read_task(d, task_id)
     except TaskNotFound as exc:
@@ -1557,20 +1569,28 @@ def cmd_steer(argv: list[str], env: dict | None = None, poll_s: float = 0.05) ->
         rec = read_task(
             d, task_id
         )  # re-read under the lock (a worker may be mid-write)
+        if rec.get("state") in TERMINAL_STATES:
+            # G3 PR#15 r1 P1-3: S3.2 lists exit 0 as "steer on a
+            # NON-TERMINAL task" — a terminal steer is the same family as
+            # "unknown task" (2): the operation has no effect, the caller
+            # should collect instead. (Previously: recorded + exit 0 with
+            # a "already done" detail.)
+            return emit(
+                {
+                    "task_id": task_id,
+                    "state": rec.get("state"),
+                    "error": "ERR_TASK_TERMINAL",
+                    "detail": (
+                        f"task {task_id} is already {rec.get('state')!r} — "
+                        "steer applies to a non-terminal task (S3.2)"
+                    ),
+                },
+                EXIT_ARGS,
+                f"steer on terminal task {task_id}",
+            )
         rec.setdefault("steer_messages", []).append({"message": message, "ts": now})
         rec["updated_ts"] = now
         write_task(d, rec)
-    if rec.get("state") in TERMINAL_STATES:
-        # a steer on a finished task is accepted (the record carries it
-        # for the audit) — S3.2 '0 = operation accepted (steer on a
-        # non-terminal task ...)' does not list terminal as an error,
-        # and there is no 4xx-style 'already done' code in the closed
-        # set: 0 with a detail is the mapping.
-        return emit(
-            spawn_json(rec),
-            EXIT_OK,
-            f"steer recorded; task {task_id} already {rec.get('state')}",
-        )
     if wait_s is None:
         return emit(
             spawn_json(rec), EXIT_OK, f"steer recorded on {task_id} (no --wait)"
@@ -1590,7 +1610,22 @@ def cmd_steer(argv: list[str], env: dict | None = None, poll_s: float = 0.05) ->
                 EXIT_OK,
                 f"steer: {task_id} {start_state!r} -> {fresh.get('state')!r} within {wait_s} s",
             )
-    fresh = read_task(d, task_id)
+    try:
+        fresh = read_task(d, task_id)
+    except TaskNotFound:
+        # G3 PR#15 r1 P2-2: the record vanished mid-window (cancel +
+        # reaper raced the poll) — the task is unknown now; exit 2, not
+        # an uncaught TaskNotFound (exit 1, outside the S3.2 closed set).
+        return emit(
+            {
+                "task_id": task_id,
+                "state": None,
+                "error": "ERR_TASK_UNKNOWN",
+                "detail": f"task {task_id} vanished during the steer wait window",
+            },
+            EXIT_ARGS,
+            f"steer --wait: task {task_id} gone",
+        )
     return emit(
         spawn_json(fresh),
         EXIT_QUEUE_WAIT,
@@ -1676,9 +1711,13 @@ def cmd_cancel(argv: list[str], env: dict | None = None) -> int:
         if not _pid_alive(pid):
             break
         time.sleep(0.05)
-    if _pid_alive(pid):
-        _signal_process_tree(pid, signum=signal.SIGKILL)
-        time.sleep(0.1)
+    # G3 PR#15 r1 P2-4: the post-grace SIGKILL goes to the WHOLE GROUP,
+    # unconditionally — the wait loop above only tracks the leader pid,
+    # so a child that outlived the leader (within the group) still gets
+    # the SIGKILL here. On a fully-dead group the killpg is a
+    # ProcessLookupError = no-op (the success case).
+    _signal_process_tree(pid, signum=signal.SIGKILL)
+    time.sleep(0.1)
     # the worker's SIGTERM handler marks the record itself when it can;
     # this is the belt-and-braces path for a worker that died between
     # its handler running and the record landing (or one that ignored

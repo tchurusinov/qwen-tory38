@@ -439,6 +439,63 @@ class TestCollect(Base):
         self.assertEqual(code, 2)
         self.assertEqual(doc.get("error"), "ERR_TASK_UNKNOWN")
 
+    def test_exit_21_stale_running_reaped_before_read(self):
+        """G3 PR#15 r1 P0: collect reaps BEFORE the read — a stale
+        running record (dead worker pid) maps to 21, not a perpetual 0
+        poll (the PLAN's collect half of the reaper wiring)."""
+        self._write_cfg()
+        self._write_health([self._inst(0, free_port())])
+        self._write_task("t-stale-col", state="running", worker_pid=999999)
+        code, doc, _ = self._run("bonsai2-collect", ["t-stale-col"])
+        self.assertEqual(code, 21, "the dead-pid record is reaped to failed")
+        self.assertEqual(doc["state"], "failed")
+        self.assertEqual(doc.get("error"), "ERR_ENGINE_DOWN")
+
+
+# ------------------------------------------------------------------------
+# 3.4 / 3.5 — spawn --out validation outside the dedup lock
+# ------------------------------------------------------------------------
+class TestSpawnOutValidation(Base):
+    """G3 PR#15 r1 P1-1: --out parent validation happens BEFORE the
+    per-key dedup lock is taken, so an exit-2 abort leaves the dedup
+    key free (no entry, no orphaned record)."""
+
+    def test_out_parent_is_file_exit_2_no_dedup_entry(self):
+        self._write_cfg()
+        self._write_health([self._inst(0, free_port())])
+        blocker = self.results / "blocker"
+        blocker.parent.mkdir(parents=True, exist_ok=True)
+        blocker.write_text("i am a file, not a dir")
+        out, _ = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = H.cmd_spawn(
+                ["-i", "out task", "--out", str(blocker / "child.json")],
+                self.env,
+                poll_s=0.05,
+            )
+        self.assertEqual(code, 2)
+        d = self._results()
+        ids = [r.get("task_id") for r in H.iter_tasks(d)]
+        self.assertEqual(ids, [], "no record was created for the aborted spawn")
+        # the dedup key must be free: a second spawn (same prompt, valid
+        # --out) creates a fresh task instead of no-op'ing to a ghost.
+        (self.results / "outdir").mkdir(parents=True, exist_ok=True)
+        out2, _ = io.StringIO(), io.StringIO()
+        with redirect_stdout(out2), redirect_stderr(io.StringIO()):
+            code2 = H.cmd_spawn(
+                [
+                    "-i",
+                    "out task",
+                    "--out",
+                    str(self.results / "outdir" / "child.json"),
+                ],
+                self.env,
+                poll_s=0.05,
+            )
+        self.assertEqual(code2, 0, "the key was free after the aborted spawn")
+        ids2 = [r.get("task_id") for r in H.iter_tasks(d)]
+        self.assertEqual(len(ids2), 1)
+
 
 # ------------------------------------------------------------------------
 # 3.7 — steer / cancel
@@ -484,6 +541,20 @@ class TestSteerCancel(Base):
         self._write_task("t-noargs", state="running")
         code, _doc, _ = self._run("bonsai2-steer", ["t-noargs"])
         self.assertEqual(code, 2)
+
+    def test_steer_exit_2_terminal_task(self):
+        """G3 PR#15 r1 P1-3: steer on a terminal task -> 2 (S3.2 lists
+        0 as 'steer on a NON-TERMINAL task'; a terminal steer is the
+        unknown-task family, not a silent record + 0)."""
+        self._write_cfg()
+        self._write_health([self._inst(0, free_port())])
+        for state in ("done", "failed", "timeout"):
+            self._write_task(f"t-term-{state}", state=state)
+            code, doc, _ = self._run(
+                "bonsai2-steer", [f"t-term-{state}", "-m", "too late"]
+            )
+            self.assertEqual(code, 2, f"steer on {state!r} task -> 2")
+            self.assertEqual(doc.get("error"), "ERR_TASK_TERMINAL")
 
     def test_cancel_exit_2_unknown_task(self):
         self._write_cfg()
