@@ -31,11 +31,14 @@ never the SKU. VRAM budget (this box, 121.6 GiB — recompute at install):
 |---|---|
 | main stack (qwen3.8-27b NVFP4, SGLang, fresh load) | ~76.4 GB |
 | OS + other containers reserved | 8.0 GB |
-| subagent pool | ~37.2 GB → N = floor(37.2 / 11.5) = 3 default |
+| subagent pool | ~37.2 GB → N = floor(37.2 / 14.78) = 2 default |
 
 The main agent eats 75–80/120 GB in the preferred configuration; the
 35–40 GB remainder is what this project exists to use. Per-instance
-budget is 11.5 GB (weights + KV + 5 % margin, SPEC S1.4).
+budget is 14.78 GB (14.08 GB measured q4_0 footprint + 5 % margin,
+SPEC S1.4 — re-anchored from the FP16-era 11.5 GB at MAP 1.7,
+2026-09-22; the original 3 was an estimate, N = 2 is the worked
+example on this box).
 
 **MVP safety rule (standing):** write the code with the full project in
 mind — full capability, N instances, all paths — but **load, test, and
@@ -214,9 +217,10 @@ automatically by a git pre-commit hook (Phase 0 installs it):
 - Upstream is update-happy: **never track upstream main.** The pin
   moves only via a PR + S5 quick bench (SPEC S5.5).
 - Install scope: the fork source lives **in the repo** at
-  `third_party/llama.cpp` (git submodule pinned at the fork commit,
-  `UNRESOLVED: fork-vendoring` — alternative: plain clone + pin file in
-  `ARTIFACTS.md`; decide at MAP 1.1). Nothing is installed system-wide
+  `third_party/llama.cpp` (git submodule pinned at the fork commit —
+  decided at MAP 1.1, 2026-09-20: in-repo, project-wide, never
+  system-wide; `.gitmodules` tracks the `prism` branch). Nothing is
+  installed system-wide
   (`/usr/local` stays clean). The runtime binary is baked into the
   `bonsai2-server` docker image (SPEC S6.1); host-side only
   `/opt/bonsai2/{bin,etc,cache}` is created, all of it documented in

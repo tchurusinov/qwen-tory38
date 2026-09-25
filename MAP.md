@@ -486,11 +486,14 @@ Exit: S2.8 acceptance (all five, runnable on this box).
       N unchanged, healthy again < 15 s at the halved ctx); #5 `unload
       --all` → main-only `user_unloaded`, cgroups gone, NO re-spawn on the
       drift cycle; `reload --all` → 2 healthy within `boot_target_s` (the
-      ack files are the completion signal). Hermetic 207/207; gate PASS.
-      PENDING: the green @gpu run (first full-discovery run hit a
-      test-harness port-holder on the shared 30101/30102 precondition —
-      see the session-log entry; the fix is a bounded port-free retry in
-      `_preconditions`, then a re-run to green before the G3 loop).)
+      the ack files are the completion signal). Hermetic 207/207; gate PASS.
+      @gpu: first full-discovery run hit a test-harness port-holder on the
+      shared 30101/30102 precondition; that debt closed green 2026-09-24 in
+      the PR #13 hotfix (@gpu #2/#4 GREEN — `docker kill -s TERM` kill,
+      `BONSAI2_PROBE_TIMEOUT_S` hook, cgroup-charge target fix + python3
+      holder; the 15 s -> 30 s reload-budget spec amendment; observed run
+      `Ran 2 tests in 131.3 s, OK`, local log `test-logs/gpu-verify24c.log`,
+      gitignored). See the 2026-09-24 session entries.
 
 ### Phase 3 — Harness control scripts, the main-agent API (SPEC S3)
 

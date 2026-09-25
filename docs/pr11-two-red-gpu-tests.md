@@ -1,5 +1,15 @@
 # qwen-tory38 — PR #11 follow-up: the two red @gpu tests
 
+> **Status update (2026-09-24, after PR #13 merged):** both tests are now
+> GREEN on this box (PR #13 hotfix, merged `1dc1ff5` — `docker kill -s
+> TERM` kill, `BONSAI2_PROBE_TIMEOUT_S` hook, cgroup-charge target fix +
+> python3 holder; observed run `Ran 2 tests in 131.3 s, OK`, local log
+> `test-logs/gpu-verify24c.log` (gitignored, see the 2026-09-24 MAP
+> session log for timings); the 15 s → 30 s reload-budget spec
+> amendment). This doc is the point-in-time diagnosis of the red state —
+> historical record, kept for context. The full root-cause + fix record:
+> `docs/two-red-gpu-tests-fix.md`.
+
 Date: 2026-09-24. Scope: the S2.8 acceptance run (MAP 2.11,
 `tests/gpu/test_lifecycle_2_11.py`), specifically the two tests that are
 still red after the PR #11 round-1 disposition. Everything here is grounded

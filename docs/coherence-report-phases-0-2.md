@@ -1,5 +1,13 @@
 # qwen-tory38 — Coherence Report, Phases 0-2
 
+> **Snapshot status (written 2026-09-24 at commit `1e40dc7`):** this is a
+> point-in-time assessment, not a living doc. Since it was written, two
+> PRs merged to `main`: PR #13 (the two red @gpu tests — closed green,
+> plus the 15 s → 30 s reload-budget spec amendment) and PR #12 (MAP
+> 3.1–3.3: S3.1 core library, S3.2 status family, S3.3 spawn/taskworker —
+> so the "Phase 3: not started" line below is stale against current
+> `main`). For live progress: `MAP.md`.
+
 Date: 2026-09-24. Scope: everything merged to `main` through PR #11
 (MAP 0.1-2.11). Question this answers: what did phases 0-2 actually build,
 does it meet the spec, does it solve the problem the project set out to
