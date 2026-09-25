@@ -1333,9 +1333,14 @@ same exit-code contract.
 ### 5.6 Standard workload set (used by S4.6's fresh-session test)
 
 M1 (code-gen), M2 (test batch), M3 (fan-out), plus one M4-style diff
-review — the four shapes a real session actually does. A fresh session
-completing these with S3.2-only commands + 4.2-verified results = the
-skill works.
+review — the four text-only shapes a real session actually does
+(`--tools off`, the S5.2 baseline note) — plus the S4.2 tool-loop
+rows M9 (spec-chunk implementation + self-verify) and M10 (test batch
++ structured report), run with `--tools on` (the capability-layer
+half of the same workload set). A fresh session completing these with
+S3.2-only commands + 4.2-verified results = the skill works (the
+M9/M10 half is ledger-verified per the amended S4.2 self-report rule;
+S4.7 #4).
 
 ### 5.7 Configuration — `bench.yaml`
 

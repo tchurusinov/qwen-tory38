@@ -663,8 +663,10 @@ Exit: S4.7 acceptance (all four). Skill is installed for Hermes/pi as
       audit blocks the skill PR (S4.6).
 - [ ] 5.6 Fresh-session test: new main-agent session, skill + S3.2
       commands only (mock engine), completes the S5.6 standard workload
-      set (M1, M2, M3 + one M4-style diff review); command log ⊆ S3.2,
-      all results verified per S4.2 (S4.6, S5.6).
+      set (M1, M2, M3 + one M4-style diff review, text-only; plus the
+      M9/M10 tool-loop rows with `--tools on`, ledger-verified per the
+      amended S4.2 self-report rule — S5.6/S4.7 #4); command log ⊆
+      S3.2, all results verified per S4.2 (S4.6, S5.6).
 - [ ] 5.7 S4.7 acceptance: audit passes (citations exist, win/lose
       recomputed or table updated in same PR); fresh-session workload
       complete; two synthetic loss scenarios → audit flags the stale
