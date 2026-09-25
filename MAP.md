@@ -507,20 +507,20 @@ Exit: hermetic closed-set suite green + S3.8 acceptance (all five).
 - [x] 3.3 `bonsai2-spawn`: least-loaded deadline-aware routing, tie-break
       lowest i; queue FIFO with priority preemption; `queue_wait_max_s`
       expiry → exit 8 `state: "queued"` (S3.3, S3.2).
-- [ ] 3.4 Slot model + deadline enforcement: one slot per task for its
+- [x] 3.4 Slot model + deadline enforcement: one slot per task for its
       lifetime; `--deadline` expiry → abort, task `timeout` (exit 22),
       slot freed (S3.4).
-- [ ] 3.5 spawn idempotency: dedup key = prompt hash + `--tools/--ctx/
+- [x] 3.5 spawn idempotency: dedup key = prompt hash + `--tools/--ctx/
       --priority` (not `--out`), 24 h TTL, `/run/bonsai2/dedup/`; live
       duplicate → existing task_id, no double slot (S3.4).
-- [ ] 3.6 `bonsai2-collect`: read result file; task JSON + `answer /
+- [x] 3.6 `bonsai2-collect`: read result file; task JSON + `answer /
       reasoning / usage`; 20/21/22 terminal, 0 = non-terminal poll, 2 =
       unknown TASK_ID (S3.2).
-- [ ] 3.7 `bonsai2-steer` / `bonsai2-cancel`: steer-and-wait → exit 8 on
+- [x] 3.7 `bonsai2-steer` / `bonsai2-cancel`: steer-and-wait → exit 8 on
       no state change in SECS; cancel SIGTERM → SIGKILL after 5 s;
       engine-down mid-task → `engine_retried` once on next instance,
       second failure → `failed` (S3.2, S1.5).
-- [ ] 3.8 `bonsai2-unload` / `bonsai2-reload`: manager-mediated;
+- [x] 3.8 `bonsai2-unload` / `bonsai2-reload`: manager-mediated;
       `bunloaded` state; zero-running → main-only
       `user_unloaded`; idempotent no-op; partial reload →
       `"state": "partial"` exit 0; dead manager → 84 (S3.2).
@@ -695,7 +695,63 @@ SPEC.md `status` → `active`.
 - blockers/intricacies: (what bit, spec refs, what the next agent should
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
--->
+--->
+
+### 2026-09-25 — Phase 3: MAP 3.4–3.8 implemented (branch `phase3-harness-34-38`, pending G3 review)
+
+- agent/model: Hermes qwen3.8-27b (session: implementation carried over
+  from the docs-doctor session, verified + finished here — the 3
+  end-to-end tests were written but unrun; the live-SIGTERM cancel test
+  failed on its first run, root-caused, and fixed)
+- phase(s): P3 (3.4/3.5/3.6/3.7/3.8)
+- items checked: 3.4, 3.5, 3.6, 3.7, 3.8 (claimed in the PR DOD;
+  pending G3+G4). The `[x]` flips above are the claim — they hold at
+  merge, per the PR #12 precedent (the flip landed there with the merge
+  commit; here the user directed the check in the PR session).
+- implemented: `reap_stale()` + manager-side `reap_tasks_once()` wired
+  into the manager steady loop (3.4: dead-pid -> failed/ERR_ENGINE_DOWN,
+  past-deadline+grace -> timeout/ERR_DEADLINE; `running_ts` stamped on
+  first promotion in both claim paths); `dedup_lookup/_record/_entry_path`
+  + spawn-level dedup (3.5: key = prompt sha256 + tools/ctx/priority,
+  24 h TTL, per-key lock with post-lock re-read, unwritable dedup dir
+  degrades never fails); `cmd_collect` 20/21/22/0/2 (3.6);
+  `cmd_steer` (advisory, `steer_messages`, `--wait SECS` -> 8) +
+  `cmd_cancel` (SIGTERM the process group, SIGKILL after 5 s, worker
+  SIGTERM handler marks failed/ERR_CANCELLED at signal time, exit-0
+  contract kept) (3.7); `cmd_unload`/`cmd_reload` via the MAP 2.10
+  control/ queue with ack-`<id>.json` polling, 84 when health.json is
+  absent (3.8); five thin deploy files `bin/bonsai2-{collect,steer,
+  cancel,unload,reload}`.
+- verification: `tests/test_harness_34_38.py` 35/35 OK (32 from the
+  prior session + 3 end-to-end: dedup no-op with a real spawn,
+  different-priority = new key, live SIGTERM cancel); full hermetic
+  suite 338 tests OK; `scripts/gate.sh` PASS (ruff format/check clean,
+  secret scan, yaml, bash -n; shellcheck soft-skip as baseline).
+- test root cause (worth knowing): the live-SIGTERM cancel test asserted
+  `os.kill(pid, 0)` fails after cancel — but in a hermetic run the test
+  process IS the worker's parent (in production the spawn CLI exits and
+  init reaps), so the worker sits as a **zombie** and `kill(pid, 0)`
+  still succeeds. The test now asserts via `/proc/<pid>/stat` state:
+  zombie -> `waitpid` (asserts exit 0) -> gone. A probe (`/proc/<pid>`
+  state loop) confirmed the cancel itself was correct — the process died
+  at signal time, state `Z` until reaped.
+- machine state: nothing installed/running; the branch carries
+  uncommitted work now committed in this PR; no env vars. The mock
+  model-download test logs 11 backoff lines but passes (the download
+  test fixture tolerates connection resets — pre-existing).
+- next: G3 — `scripts/review.sh phase3-harness-34-38 main`, post the raw
+  output (G3b-post), reconcile (G3c), disposition comment; then the G4
+  merge gate. After merge: MAP 3.9 (exit-code closed-set test), 3.10
+  (fixture hardening), 3.11 (table-driven suite), 3.12 (S3.8 acceptance).
+- blockers/intricacies: none at the code level. One semantics fork to
+  read in the PR's `## Uncertainties & decisions`: **steer is advisory in
+  v1** — the v1 engine is a stateless fire-and-collect stream, so
+  `steer_messages` is append-only on the record and the worker does not
+  consume it mid-attempt; the effect lands on the next attempt/retry.
+  The SPEC's steer line (S3.2) is unchanged: `steer` = record + optional
+  wait, exit 8 on no state change.
+- spec deltas: none (implemented as written; the advisory-steer note
+  lives in the worker/harness docstrings and the PR body, not the spec).
 
 ### 2026-09-24 — Phase 3: PR #12 G3 closed (3 review rounds), G4 merge approved (branch `phase3-harness-api`)
 

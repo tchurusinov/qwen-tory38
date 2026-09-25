@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""bonsai2-steer — record a steer on one subagent task + optional
+wait-for-state-change (S3.2; MAP 3.7).
+
+Thin deploy file; the flow lives in `bonsai2_harness.py`
+(`cmd_steer`).
+
+Usage (the S3.2 surface, locked):
+  bonsai2-steer <TASK_ID> -m MESSAGE [--wait SECS]
+
+Steering is ADVISORY in v1 (the engine is a stateless fire-and-collect
+stream, S1.3): the message is recorded on the task's record
+(`steer_messages`) and observed by the worker between attempts.
+Steering does not move slots (S3.4).
+
+Exit codes (S3.2 closed set, per-command mapping):
+  0  = operation accepted (the steer was recorded; with `--wait SECS`,
+       a state change was observed within the window)
+  8  = `--wait SECS` expired with no state change (the task is still
+       running or queued — the S3.2 manager-side wait budget)
+  2  = TASK_ID unknown / malformed args / bad config
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bonsai2_harness as H  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(H.dispatch("bonsai2-steer", sys.argv[1:]))

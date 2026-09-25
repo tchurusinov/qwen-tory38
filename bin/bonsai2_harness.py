@@ -107,6 +107,7 @@ import hashlib
 import json
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -126,6 +127,7 @@ EXIT_QUEUE_WAIT = 8
 EXIT_MAIN_ONLY = 80
 EXIT_MAIN_DOWN = 82
 EXIT_MANAGER_DOWN = 84
+EXIT_POOL_WAIT = 84  # S3.2 unload/reload: manager down == its own 84 (same code, alias for readability)
 EXIT_CLOSED_SET = frozenset({0, 2, 3, 4, 5, 8, 20, 21, 22, 80, 82, 84})
 
 DEFAULT_CONFIG_PATH = "/opt/bonsai2/etc/harness.yaml"
@@ -160,6 +162,19 @@ PRIORITY_RANK = {"high": 0, "normal": 1, "low": 2}
 TERMINAL_STATES = ("done", "failed", "timeout")
 CHARGED_STATES = ("queued", "running")  # S3.4 whole-lifetime slot charge
 ROUTABLE_STATES = ("healthy", "degraded")
+
+# S3.4 reaper: the states a worker OWNS (it has started; a pid exists). The
+# reaper only touches these — the claimer only touches `queued`, so the two
+# never race on the same record. A terminal record is already free.
+REAPABLE_STATES = ("running", "engine_retried")
+
+# S3.4 deadline backstop grace: the worker's per-chunk socket cap (60 s) + a
+# margin. The reaper marks an ALIVE worker's record timed out only when the
+# task's own --deadline is exceeded by MORE than this — the worker is the
+# deadline authority between its attempts; the reaper is the backstop for a
+# single hung attempt (S3.4 "manager enforces; on expiry the instance gets an
+# abort, task -> timeout, slot freed").
+REAP_DEADLINE_GRACE_S = 65.0
 
 
 class ConfigError(Exception):
@@ -660,6 +675,7 @@ def claim_own_task(d: dict, doc: dict, task_id: str) -> tuple[dict | None, bool]
         if running >= _inst_total(entry):
             return None, False
         rec["state"] = "running"
+        rec["running_ts"] = time.time()
         rec["updated_ts"] = time.time()
         write_task(d, rec)
         return rec, True
@@ -711,6 +727,10 @@ def claim_slot(d: dict, doc: dict) -> dict | None:
                 ),
             )
             head["state"] = "running"
+            # S3.4 reaper: the task's running clock starts on first
+            # promotion (the whole-lifetime --deadline, S3.4 — a retry
+            # keeps the original start, so the deadline spans retries).
+            head.setdefault("running_ts", time.time())
             head["updated_ts"] = time.time()
             write_task(d, head)
             return head
@@ -741,6 +761,192 @@ def start_worker(d: dict, rec: dict, log=print) -> int:
         f"worker started for {rec['task_id']} (pid {proc.pid}, i={rec.get('instance')})"
     )
     return proc.pid
+
+
+# --------------------------------------------------------------------------
+# S3.4 reaper (stale running records + the deadline backstop)
+# --------------------------------------------------------------------------
+def _pid_alive(pid) -> bool:
+    """`os.kill(pid, 0)` liveness. A dead/missing pid is False; the
+    reaper treats pid=None (a record that was running before the worker
+    was started, or a pre-3.4 record) as a live-but-unverifiable pid
+    ONLY for the deadline backstop — the pid-dead rule needs a pid."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # pid exists, not ours
+    except OSError:
+        return False
+    return True
+
+
+def reap_stale(
+    d: dict, *, grace_s: float = REAP_DEADLINE_GRACE_S, log=print
+) -> list[str]:
+    """S3.4 reaper: one pass over the task records that the WORKER owns.
+
+    Two rules, both freeing the slot (S3.4 "one slot per task for its
+    lifetime; cancel/deadline/terminal frees it"):
+      * pid-dead: a REAPABLE record (`running` / `engine_retried`) whose
+        `worker_pid` is missing or dead -> the worker died without
+        updating its record -> `failed` / `ERR_ENGINE_DOWN` + slot freed.
+        This is the "stale running record" the worker docstring defers to
+        the Phase-3 reaper ("a crashed worker leaves its record
+        running... the Phase-3 reaper (MAP 3.4) turns a stale running
+        record into failed/ERR_ENGINE_DOWN").
+      * deadline backstop: a REAPABLE record whose worker pid is ALIVE but
+        `running_ts + deadline_s + grace_s < now` -> the worker is stuck in
+        a single attempt past the task's own --deadline beyond the
+        per-chunk socket cap + grace -> `timeout` / `ERR_DEADLINE` + slot
+        freed (S3.4 "manager enforces; on expiry the instance gets an
+        abort, task -> timeout, slot freed").
+
+    `queued` records are NOT reaped here (the claimer owns them — a queued
+    record has no worker and its own queue_wait budget is the spawn's,
+    S3.3). Terminal records are free already. Each write is the atomic
+    tmp+rename (`write_task`). Idempotent: a record already reaped is
+    terminal and skipped. Returns the reaped task_ids (order = record
+    order). The pass is ONE iter_tasks scan (the round-2/3 O(N_tasks)
+    scaling-hazard fix, named for MAP 3.4: the reaper must not re-glob +
+    re-parse the task dir per record).
+    """
+    now = time.time()
+    reaped: list[str] = []
+    for rec in iter_tasks(d):
+        if rec.get("state") not in REAPABLE_STATES:
+            continue
+        pid = rec.get("worker_pid")
+        deadline_s = rec.get("deadline_s")
+        running_ts = rec.get("running_ts")
+        pid_gone = pid is not None and not _pid_alive(pid)
+        deadline_gone = (
+            running_ts is not None
+            and isinstance(deadline_s, (int, float))
+            and not isinstance(deadline_s, bool)
+            and now > (float(running_ts) + float(deadline_s) + float(grace_s))
+        )
+        if not pid_gone and not deadline_gone:
+            continue
+        prior = rec.get("state")
+        rec["state"] = "timeout" if deadline_gone else "failed"
+        rec["error"] = "ERR_DEADLINE" if deadline_gone else "ERR_ENGINE_DOWN"
+        rec["detail"] = (
+            f"reaper: worker pid {pid} dead — record left {prior!r}; slot freed (S3.4)"
+            if pid_gone and not deadline_gone
+            else f"reaper: deadline {deadline_s} s exceeded by more than the {grace_s:.0f} s grace — hung attempt; slot freed (S3.4)"
+        )
+        rec["updated_ts"] = now
+        write_task(d, rec)
+        reaped.append(rec["task_id"])
+        log(f"reaper: {rec['task_id']} -> {rec['state']} ({rec['error']})")
+    return reaped
+
+
+# --------------------------------------------------------------------------
+# S3.4 spawn idempotency (dedup, 24 h TTL)
+# --------------------------------------------------------------------------
+def _dedup_key_hash(dedup_key: str) -> str:
+    """A filesystem-safe, fixed-width name for the dedup entry (the
+    dedup key is a JSON string — hash it to one sha256 hex token)."""
+    return hashlib.sha256(dedup_key.encode("utf-8")).hexdigest()
+
+
+def dedup_entry_path(cfg: dict, dedup_key: str) -> Path:
+    """The S3.4 24 h TTL dedup entry path (S3.6 `dedup_dir`):
+    `<dedup_dir>/<sha256(dedup_key)>.json`. The entry is
+    `{task_id, ts, dedup_key}` — the LIVE task the key maps to."""
+    return Path(cfg["dedup_dir"]) / f"{_dedup_key_hash(dedup_key)}.json"
+
+
+def dedup_lookup(cfg: dict, dedup_key: str, env: dict | None = None) -> dict | None:
+    """The S3.4 dedup lookup: a LIVE task within the TTL whose key matches.
+
+    Returns the referenced task record when the entry exists, is fresh
+    (`now - ts < dedup_ttl_h`), and the referenced task is still non-terminal
+    (queued/running/engine_retried) — else None (a terminal or expired task
+    frees the key; the caller creates a fresh task). A missing/unreadable
+    entry is None (the dedup dir is scratch under /run — a miss is not an
+    error, just a new task). Read-only (the write happens after the caller
+    creates the record, so two same-key spawns under the per-key lock each
+    see the other's task and the second no-ops)."""
+    path = dedup_entry_path(cfg, dedup_key)
+    if not path.is_file():
+        return None
+    try:
+        entry = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(entry, dict):
+        return None
+    ts = entry.get("ts")
+    ttl_h = float(cfg["dedup_ttl_h"])
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    if time.time() - float(ts) >= ttl_h * 3600.0:
+        return None
+    task_id = entry.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
+    d = results_dirs(cfg)
+    try:
+        rec = read_task(d, task_id)
+    except TaskNotFound:
+        return None
+    if rec.get("state") in TERMINAL_STATES:
+        return None
+    return rec
+
+
+def dedup_record(cfg: dict, dedup_key: str, task_id: str) -> None:
+    """Write the S3.4 dedup entry for a freshly-created task (the caller
+    holds the per-key lock, so a same-key spawn cannot slip in between the
+    lookup and this write).
+
+    The dedup dir is SCRATCH under /run (S3.4: 'a miss is not an error,
+    just a new task') — so an unwritable/absent dir degrades to a missed
+    dedup, not a failed spawn. The task record is already written by the
+    time this runs; sinking the whole submission over a bookkeeping entry
+    would be the wrong trade. An OSError here is swallowed (the next
+    same-key spawn simply creates a fresh task instead of no-op-ing)."""
+    path = dedup_entry_path(cfg, dedup_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {"task_id": task_id, "ts": time.time(), "dedup_key": dedup_key}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(entry, indent=2) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        # scratch dir unavailable (e.g. /run/bonsai2 not yet created on a
+        # cold boot, or the dir is unwritable) — the task proceeds without
+        # the idempotency entry. Never raises: a spawn must not fail here.
+        return
+
+
+# --------------------------------------------------------------------------
+# S3.2 task-result read (collect's answer/reasoning/usage)
+# --------------------------------------------------------------------------
+def read_result(rec: dict) -> dict:
+    """The S3.2 collect payload fields `answer` / `reasoning` / `usage`,
+    from the task's result file (the worker's S3.2 write). Absent/invalid
+    file -> all three null (a failed/timeout task may not have written it;
+    collect still returns the task's terminal state + code)."""
+    out = {"answer": None, "reasoning": None, "usage": None}
+    rf = rec.get("result_file")
+    if not isinstance(rf, str) or not rf:
+        return out
+    try:
+        data = json.loads(Path(rf).read_text())
+    except (OSError, json.JSONDecodeError):
+        return out
+    if isinstance(data, dict):
+        for k in ("answer", "reasoning", "usage"):
+            if k in data:
+                out[k] = data[k]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1027,6 +1233,33 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         )
     d = results_dirs(cfg)
     ensure_results_dirs(d)
+    # Resolve the prompt CONTENT now (the S3.4 dedup key is the content
+    # hash — for -p that is the file content, not the path argument).
+    prompt = parsed["prompt"]
+    if not parsed["prompt_inline"]:
+        try:
+            prompt = Path(parsed["prompt"]).expanduser().resolve().read_text()
+        except OSError as exc:
+            return emit(
+                {"error": "ERR_ARGS", "detail": f"-p {parsed['prompt']}: {exc}"},
+                EXIT_ARGS,
+                str(exc),
+            )
+    # MAP 3.5 / S3.4 spawn idempotency (dedup): the dedup key is the prompt
+    # content hash + --tools/--ctx/--priority (NOT --out — it only selects
+    # where the result file is written). The CLAIM + record happen under a
+    # per-key lock at record creation (below); after releasing it, the
+    # entry is RE-READ: if a concurrent same-key spawn's entry replaced it
+    # in the gap, this spawn no-ops to that task (no double slot).
+    dedup_key = json.dumps(
+        {
+            "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "tools": parsed["tools"],
+            "ctx": parsed["ctx"],
+            "priority": parsed["priority"],
+        },
+        sort_keys=True,
+    )
     target, err, detail = route_target(doc, d, parsed["ctx"])
     if err:
         code = EXIT_CTX if err == "ERR_CTX_TOO_LONG" else EXIT_PORT
@@ -1065,77 +1298,154 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             EXIT_MANAGER_DOWN,
             f"health.json port for i={instance_i} not numeric: {port!r}",
         )
-    task_id = new_task_id(d)
-    if parsed["out"] is None:
-        result_file = str(d["base"] / f"{task_id}.json")
-    else:
-        out_path = parsed["out"].expanduser().resolve()
-        if out_path.parent.is_file():
+    # G3 PR#15 r1 P1-1: validate/CREATE the --out target BEFORE taking
+    # the per-key dedup lock — an exit-2 from inside the lock released
+    # the dedup lock while the aborted spawn was still unfixed, letting
+    # a same-key spawn create a second record in the gap.
+    out_path: Path | None = None
+    if parsed["out"] is not None:
+        op: Path = parsed["out"].expanduser().resolve()
+        if op.parent.is_file():
             return emit(
-                {"error": "ERR_ARGS", "detail": f"--out {out_path} : parent is a file"},
+                {
+                    "error": "ERR_ARGS",
+                    "detail": f"--out {op} : parent is a file",
+                },
                 EXIT_ARGS,
-                f"--out {out_path}: parent is a file",
+                f"--out {op}: parent is a file",
             )
-        # P1 #5 (G3 PR#12 r1): validate/CREATE the --out parent at spawn
-        # time (the worker used to mkdir it at write time, so a --out under
-        # an impossible deep path was only discovered mid-task). An OSError
-        # here (parent path uncreatable) is a spawn-time rejection, exit 2.
+        # P1 #5 (G3 PR#12 r1): validate/CREATE the --out parent at
+        # spawn time (the worker used to mkdir it at write time, so
+        # a --out under an impossible deep path was only discovered
+        # mid-task). An OSError here -> a spawn-time rejection, exit 2.
         try:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
+            op.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             return emit(
-                {"error": "ERR_ARGS", "detail": f"--out {out_path}: {exc}"},
+                {"error": "ERR_ARGS", "detail": f"--out {op}: {exc}"},
                 EXIT_ARGS,
-                f"--out {out_path}: {exc}",
+                f"--out {op}: {exc}",
             )
-        result_file = str(out_path)
-    prompt = parsed["prompt"]
-    if not parsed["prompt_inline"]:
-        try:
-            prompt = Path(parsed["prompt"]).expanduser().resolve().read_text()
-        except OSError as exc:
+        out_path = op
+    # S3.4 / MAP 3.5: claim a task id + record + dedup entry under the
+    # per-key lock so two concurrent same-key spawns cannot both create a
+    # record (the one that loses the lock writes its record, then re-reads
+    # the entry after releasing — and no-ops to the winner's live task).
+    dedup_lock_name = "dedup-" + _dedup_key_hash(dedup_key)
+    task_id: str | None = None
+    with lock_wait(d["base"], dedup_lock_name):
+        dup = dedup_lookup(cfg, dedup_key)
+        if dup is not None:
+            dup_winner = dup
+        else:
+            # dup is None — create the record + entry under the lock.
+            # (A terminal entry under the key cannot reach the else side:
+            # dedup_lookup filters terminal records out, so the re-read
+            # below is the race detector — see G3 PR#15 r1 P1-3.)
+            dup_winner = None
+            task_id = new_task_id(d)
+            if out_path is None:
+                result_file = str(d["base"] / f"{task_id}.json")
+            else:
+                result_file = str(out_path)
+            deadline_s = (
+                parsed["deadline"]
+                if parsed["deadline"] is not None
+                else float(cfg["task_default_deadline_s"])
+            )
+            now = time.time()
+            rec = {
+                "task_id": task_id,
+                "state": "queued",
+                "instance": instance_i,
+                "port": port,
+                "result_file": result_file,
+                "error": None,
+                "detail": None,
+                "prompt": prompt,
+                "dedup_key": dedup_key,
+                "tools": parsed["tools"],
+                "ctx_need": parsed["ctx"],
+                "priority": parsed["priority"],
+                "deadline_s": deadline_s,
+                "created_ts": now,
+                "worker_pid": None,
+                "instances_tried": [],
+                "updated_ts": now,
+            }
+            write_task(d, rec)
+            dedup_record(cfg, dedup_key, task_id)
+    # S3.4 / MAP 3.5: after the per-key lock, two outcomes:
+    #  1. dup_winner is not None  -> a live task was found (or was created
+    #     by a concurrent same-key spawn that held the lock first) -> return
+    #     it, no new slot.
+    #  2. dup_winner is None      -> we created the record under the lock;
+    #     re-read the entry to detect a RACE (another spawn's entry replaced
+    #     ours in the gap): if the key now maps to a different live task,
+    #     no-op to that task.
+    if dup_winner is not None:
+        dup_fresh = read_task(d, dup_winner["task_id"])
+        return emit(
+            spawn_json(dup_fresh),
+            EXIT_OK,
+            f"dedup: duplicate of live task {dup_fresh['task_id']} "
+            f"(same prompt hash + --tools/--ctx/--priority within {cfg['dedup_ttl_h']} h) — no new slot",
+        )
+    dup2 = dedup_lookup(cfg, dedup_key)
+    if dup2 is not None and dup2.get("task_id") != task_id:
+        # G3 PR#15 r1 P1-3: our entry was replaced by a concurrent
+        # same-key spawn's (dedup_record's os.replace is not
+        # compare-and-swap — a writer that lost the stale-lock race can
+        # overwrite the entry in the gap after release). The entry now
+        # points at the winner; OUR record is an orphan duplicate (both
+        # would be charged = a double slot, S3.4). Two outcomes:
+        #   * winner LIVE    -> the prompt is executing under the winner;
+        #     ours is the loser: mark it failed/ERR_DUPLICATE (slot freed)
+        #     and return the winner. The entry already points at the
+        #     winner — leave it.
+        #   * winner TERMINAL -> the entry is stale (its task just ended);
+        #     OURS is the live task for this prompt: re-point the entry
+        #     at us so the key tracks the live one (otherwise the next
+        #     same-key spawn would create a third record) and return
+        #     ours.
+        winner = read_task(d, dup2["task_id"])
+        if winner.get("state") not in TERMINAL_STATES:
+            with lock_wait(d["base"], f"task-{task_id}"):
+                ours = read_task(d, task_id)
+                if ours.get("state") not in TERMINAL_STATES:
+                    ours["state"] = "failed"
+                    ours["error"] = "ERR_DUPLICATE"
+                    ours["detail"] = (
+                        f"dedup race: key now owned by live task "
+                        f"{winner['task_id']!r}; this record is the loser"
+                    )
+                    ours["updated_ts"] = time.time()
+                    write_task(d, ours)
             return emit(
-                {"error": "ERR_ARGS", "detail": f"-p {parsed['prompt']}: {exc}"},
-                EXIT_ARGS,
-                str(exc),
+                spawn_json(winner),
+                EXIT_OK,
+                f"dedup: duplicate of live task {winner['task_id']!r} "
+                f"(raced a concurrent same-key spawn) — no new slot",
             )
-    # S3.4 dedup key (MAP 3.5 owns the 24 h TTL lookup; the key is
-    # recorded now: prompt hash + tools/ctx/priority — NOT --out).
-    dedup_key = json.dumps(
-        {
-            "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            "tools": parsed["tools"],
-            "ctx": parsed["ctx"],
-            "priority": parsed["priority"],
-        },
-        sort_keys=True,
-    )
-    deadline_s = (
-        parsed["deadline"]
-        if parsed["deadline"] is not None
-        else float(cfg["task_default_deadline_s"])
-    )
-    now = time.time()
-    rec = {
-        "task_id": task_id,
-        "state": "queued",
-        "instance": instance_i,
-        "port": port,
-        "result_file": result_file,
-        "error": None,
-        "detail": None,
-        "prompt": prompt,
-        "dedup_key": dedup_key,
-        "tools": parsed["tools"],
-        "ctx_need": parsed["ctx"],
-        "priority": parsed["priority"],
-        "deadline_s": deadline_s,
-        "created_ts": now,
-        "worker_pid": None,
-        "instances_tried": [],
-        "updated_ts": now,
-    }
-    write_task(d, rec)
+        with lock_wait(d["base"], f"task-{task_id}"):
+            ours = read_task(d, task_id)
+            if ours.get("state") not in TERMINAL_STATES:
+                ours["detail"] = (
+                    f"dedup race: entry pointed at terminal task "
+                    f"{winner['task_id']!r}; this task {task_id!r} "
+                    "owns the key"
+                )
+                ours["updated_ts"] = time.time()
+                write_task(d, ours)
+        dedup_record(cfg, dedup_key, task_id)
+        fresh = read_task(d, task_id)
+        return emit(
+            spawn_json(fresh),
+            EXIT_OK,
+            f"dedup: raced a concurrent same-key spawn; winner {winner['task_id']!r} "
+            f"terminal — task {task_id} owns the key",
+        )
+    assert task_id is not None  # created under the lock (both return paths above exit)
     # P0 #1 (G3 PR#12 r1): the fast path is a CLAIM, so it runs under
     # the slot-claim lock (claim_own_task). A None result = the slot
     # was taken by a concurrent claim (or the instance drifted
@@ -1160,12 +1470,16 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
     # the manager may have re-written it mid-wait (an instance bdown,
     # ctx halved, slots_total changed), and the claim pass must route
     # on the live document, not the one from spawn entry.
+    # MAP 3.4: the reaper runs every poll — a dead worker's slot is freed
+    # and its queue position drained, so the queue actually forward-
+    # progresses.
     wait_deadline = time.monotonic() + float(cfg["queue_wait_max_s"])
     while True:
         try:
             doc = load_health_doc(env=env)
         except HealthMissing:
             pass  # the manager dropped the document mid-wait — keep the last good one
+        reap_stale(d, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr))
         claimed = claim_slot(d, doc)
         if claimed is not None:
             start_worker(
@@ -1188,6 +1502,579 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
 
 
 # --------------------------------------------------------------------------
+# S3.2 command surface: collect / steer / cancel (MAP 3.6, 3.7)
+# --------------------------------------------------------------------------
+def _collect_json(rec: dict) -> dict:
+    """The S3.2 collect payload: the task JSON (spawn shape) + the
+    result-file fields `answer` / `reasoning` / `usage` (S3.2: 'read
+    result file; task JSON + answer/reasoning/usage'). A terminal task
+    with a result file carries the worker's written values; a missing
+    result file (failed/timeout before the write, or the write target
+    was moved) carries nulls — the state + error are the verdict."""
+    out = spawn_json(rec)
+    out.update(read_result(rec))
+    return out
+
+
+def cmd_collect(argv: list[str], env: dict | None = None) -> int:
+    """`bonsai2-collect <TASK_ID>` (S3.2; MAP 3.6).
+
+    Exit codes (the S3.2 per-command mapping, locked):
+      * 20 = the task is `done` — the result payload is the verdict;
+      * 21 = `failed`; 22 = `timeout` (the task's terminal state);
+      * 0  = non-terminal (`queued`/`running`/`engine_retried`) — the
+             current-state JSON is returned; the caller polls (S3.2:
+             '0 = task non-terminal, current-state JSON returned
+             (caller polls)');
+      * 2  = TASK_ID unknown (S3.2: '2 = TASK_ID unknown').
+    The command never touches the engine — it reads the task record +
+    the result file, so it works on a dead stack (the record is the
+    source of truth, S3.1)."""
+    try:
+        cfg = load_config(env)
+    except ConfigError as exc:
+        return emit({"error": "ERR_CONFIG", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    if len(argv) != 1:
+        return emit(
+            {"error": "ERR_ARGS", "detail": "usage: bonsai2-collect <TASK_ID>"},
+            EXIT_ARGS,
+            "usage: bonsai2-collect <TASK_ID>",
+        )
+    task_id = argv[0]
+    d = results_dirs(cfg)
+    # MAP 3.4 (the PLAN's collect half of the reaper wiring): reap BEFORE
+    # the read — a stale `running` record (dead worker pid) is turned
+    # terminal here, so collect maps it to 21/22 instead of polling 0
+    # forever. Idempotent; terminal records are skipped.
+    reap_stale(d, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr))
+    try:
+        rec = read_task(d, task_id)
+    except TaskNotFound as exc:
+        return emit(
+            {
+                "task_id": task_id,
+                "state": None,
+                "error": "ERR_TASK_UNKNOWN",
+                "detail": str(exc),
+            },
+            EXIT_ARGS,
+            str(exc),
+        )
+    payload = _collect_json(rec)
+    state = rec.get("state")
+    if state == "done":
+        return emit(payload, 20, None)
+    if state == "failed":
+        return emit(payload, 21, None)
+    if state == "timeout":
+        return emit(payload, 22, None)
+    return emit(payload, EXIT_OK, f"task {task_id} state {state!r} — poll again")
+
+
+def cmd_steer(argv: list[str], env: dict | None = None, poll_s: float = 0.05) -> int:
+    """`bonsai2-steer <TASK_ID> -m MESSAGE [--wait SECS]` (S3.2; MAP 3.7).
+
+    Steering a subagent task: the v1 engine is a stateless fire-and-
+    collect stream (S1.3), so the steer is ADVISORY — it is recorded on
+    the task (`steer_messages`, append-only) and its effect is bounded
+    by what the worker observes: the worker re-reads its record between
+    attempts, and a `queued` record that gets steered keeps its queue
+    position (steering does not move slots, S3.4). The steer-and-wait
+    window is the S3.2 exit-8 shape: no state change within SECS -> 8
+    (the task is still running/queued; the manager-side wait budget).
+
+    Exit codes (the S3.2 per-command mapping, locked):
+      * 0  = operation accepted (a non-terminal task got the steer
+             recorded; with `--wait`, a state change was observed
+             within the window);
+      * 8  = `--wait SECS` expired with no state change (the task is
+             still running or queued — S3.2: '8 = no state change
+             within SECS');
+      * 2  = TASK_ID unknown / malformed args."""
+    try:
+        cfg = load_config(env)
+    except ConfigError as exc:
+        return emit({"error": "ERR_CONFIG", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    parsed = _parse_steer_args(argv)
+    if isinstance(parsed, str):
+        return emit({"error": "ERR_ARGS", "detail": parsed}, EXIT_ARGS, parsed)
+    task_id, message, wait_s = parsed
+    d = results_dirs(cfg)
+    try:
+        rec = read_task(d, task_id)
+    except TaskNotFound as exc:
+        return emit(
+            {
+                "task_id": task_id,
+                "state": None,
+                "error": "ERR_TASK_UNKNOWN",
+                "detail": str(exc),
+            },
+            EXIT_ARGS,
+            str(exc),
+        )
+    now = time.time()
+    with lock_wait(d["base"], f"task-{task_id}"):
+        rec = read_task(
+            d, task_id
+        )  # re-read under the lock (a worker may be mid-write)
+        if rec.get("state") in TERMINAL_STATES:
+            # G3 PR#15 r1 P1-3: S3.2 lists exit 0 as "steer on a
+            # NON-TERMINAL task" — a terminal steer is the same family as
+            # "unknown task" (2): the operation has no effect, the caller
+            # should collect instead. (Previously: recorded + exit 0 with
+            # a "already done" detail.)
+            return emit(
+                {
+                    "task_id": task_id,
+                    "state": rec.get("state"),
+                    "error": "ERR_TASK_TERMINAL",
+                    "detail": (
+                        f"task {task_id} is already {rec.get('state')!r} — "
+                        "steer applies to a non-terminal task (S3.2)"
+                    ),
+                },
+                EXIT_ARGS,
+                f"steer on terminal task {task_id}",
+            )
+        rec.setdefault("steer_messages", []).append({"message": message, "ts": now})
+        rec["updated_ts"] = now
+        write_task(d, rec)
+    if wait_s is None:
+        return emit(
+            spawn_json(rec), EXIT_OK, f"steer recorded on {task_id} (no --wait)"
+        )
+    # steer-and-wait: poll until the state changes or the window closes.
+    start_state = rec.get("state")
+    deadline = time.monotonic() + float(wait_s)
+    while time.monotonic() < deadline:
+        time.sleep(poll_s)
+        try:
+            fresh = read_task(d, task_id)
+        except TaskNotFound:
+            break
+        if fresh.get("state") != start_state:
+            return emit(
+                spawn_json(fresh),
+                EXIT_OK,
+                f"steer: {task_id} {start_state!r} -> {fresh.get('state')!r} within {wait_s} s",
+            )
+    try:
+        fresh = read_task(d, task_id)
+    except TaskNotFound:
+        # G3 PR#15 r1 P2-2: the record vanished mid-window (cancel +
+        # reaper raced the poll) — the task is unknown now; exit 2, not
+        # an uncaught TaskNotFound (exit 1, outside the S3.2 closed set).
+        return emit(
+            {
+                "task_id": task_id,
+                "state": None,
+                "error": "ERR_TASK_UNKNOWN",
+                "detail": f"task {task_id} vanished during the steer wait window",
+            },
+            EXIT_ARGS,
+            f"steer --wait: task {task_id} gone",
+        )
+    return emit(
+        spawn_json(fresh),
+        EXIT_QUEUE_WAIT,
+        f"steer: no state change on {task_id} within {wait_s} s (still {fresh.get('state')!r})",
+    )
+
+
+def cmd_cancel(argv: list[str], env: dict | None = None) -> int:
+    """`bonsai2-cancel <TASK_ID> [--graceful]` (S3.2; MAP 3.7).
+
+    SIGTERM the task's worker, SIGKILL after 5 s if it did not exit
+    (the S3.2 mapping: 'cancel SIGTERM -> SIGKILL after 5 s'). A
+    terminal record is an already-done no-op (S3.2: '0 = ... an
+    already-terminal no-op'); a `queued` record (no worker yet) is
+    marked `failed` / `ERR_CANCELLED` directly (nothing to signal).
+    CANCEL FREES THE SLOT (S3.4) — the record leaves the charged
+    states, so the claim pass can promote the next queued task.
+
+    Exit codes: 0 = accepted (signal sent / already terminal);
+    2 = TASK_ID unknown / malformed args."""
+    try:
+        cfg = load_config(env)
+    except ConfigError as exc:
+        return emit({"error": "ERR_CONFIG", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    if not argv:
+        return emit(
+            {
+                "error": "ERR_ARGS",
+                "detail": "usage: bonsai2-cancel <TASK_ID> [--graceful]",
+            },
+            EXIT_ARGS,
+            "usage: bonsai2-cancel <TASK_ID> [--graceful]",
+        )
+    if argv[0] not in ("--graceful",):
+        task_id = argv[0]
+    else:
+        return emit(
+            {
+                "error": "ERR_ARGS",
+                "detail": "usage: bonsai2-cancel <TASK_ID> [--graceful]",
+            },
+            EXIT_ARGS,
+            "usage: bonsai2-cancel <TASK_ID> [--graceful]",
+        )
+    d = results_dirs(cfg)
+    try:
+        rec = read_task(d, task_id)
+    except TaskNotFound as exc:
+        return emit(
+            {
+                "task_id": task_id,
+                "state": None,
+                "error": "ERR_TASK_UNKNOWN",
+                "detail": str(exc),
+            },
+            EXIT_ARGS,
+            str(exc),
+        )
+    state = rec.get("state")
+    if state in TERMINAL_STATES:
+        return emit(spawn_json(rec), EXIT_OK, f"{task_id} already {state!r} — no-op")
+    now = time.time()
+    pid = rec.get("worker_pid")
+    if state == "queued" or not isinstance(pid, int) or pid <= 0 or not _pid_alive(pid):
+        # no live worker to signal: mark the record failed directly
+        # (the slot frees — S3.4 "cancel frees the slot").
+        with lock_wait(d["base"], f"task-{task_id}"):
+            rec = read_task(d, task_id)
+            if rec.get("state") not in TERMINAL_STATES:
+                rec["state"] = "failed"
+                rec["error"] = "ERR_CANCELLED"
+                rec["detail"] = (
+                    f"cancelled before its worker started (was {state!r}) — slot freed (S3.4)"
+                )
+                rec["updated_ts"] = now
+                write_task(d, rec)
+        return emit(
+            spawn_json(rec), EXIT_OK, f"cancelled queued/unstarted task {task_id}"
+        )
+    _signal_process_tree(pid, signum=signal.SIGTERM)
+    deadline = time.monotonic() + CANCEL_KILL_GRACE_S
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.05)
+    # G3 PR#15 r1 P2-4: the post-grace SIGKILL goes to the WHOLE GROUP,
+    # unconditionally — the wait loop above only tracks the leader pid,
+    # so a child that outlived the leader (within the group) still gets
+    # the SIGKILL here. On a fully-dead group the killpg is a
+    # ProcessLookupError = no-op (the success case).
+    _signal_process_tree(pid, signum=signal.SIGKILL)
+    time.sleep(0.1)
+    # the worker's SIGTERM handler marks the record itself when it can;
+    # this is the belt-and-braces path for a worker that died between
+    # its handler running and the record landing (or one that ignored
+    # the signal entirely). Under the lock so a racing write cannot
+    # clobber the terminal state.
+    with lock_wait(d["base"], f"task-{task_id}"):
+        rec = read_task(d, task_id)
+        if rec.get("state") not in TERMINAL_STATES:
+            rec["state"] = "failed"
+            rec["error"] = "ERR_CANCELLED"
+            rec["detail"] = (
+                f"cancelled: worker pid {pid} signalled ({rec.get('state')!r} -> failed) — slot freed (S3.4)"
+            )
+            rec["updated_ts"] = time.time()
+            write_task(d, rec)
+    return emit(
+        spawn_json(rec), EXIT_OK, f"cancelled {task_id} (worker pid {pid} signalled)"
+    )
+
+
+# --------------------------------------------------------------------------
+# S3.2 command surface: unload / reload (pool control, MAP 3.8)
+# --------------------------------------------------------------------------
+def _control_dir() -> Path:
+    """The manager's control-request queue: /run/bonsai2/control/
+    (the manager's process_control reads it; S3.2 'Both are
+    manager-mediated'). BONSAI2_HEALTH_DIR redirects the base (the
+    hermetic hook — the manager writes health.json next to control/)."""
+    return Path(os.environ.get("BONSAI2_HEALTH_DIR") or DEFAULT_HEALTH_DIR) / "control"
+
+
+def _write_control_request(rtype: str, instances: list[int] | str) -> tuple[str, Path]:
+    """Write one control-request file (the manager's S3.2 shape:
+    `{"type": ..., "instances": ..., "request_id": ...}`). Returns
+    (request_id, path)."""
+    import uuid
+
+    control = _control_dir()
+    control.mkdir(parents=True, exist_ok=True)
+    req_id = uuid.uuid4().hex
+    req = {"type": rtype, "instances": instances, "request_id": req_id}
+    path = control / f"{rtype}-{req_id}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(req, indent=2) + "\n")
+    os.replace(tmp, path)
+    return req_id, path
+
+
+def _wait_control_ack(
+    req_id: str, timeout_s: float, poll_s: float = 0.05
+) -> dict | None:
+    """Poll for the manager's ack (`ack-<request_id>.json`). The manager
+    processes control requests once per health cycle (the S2.2
+    `health_poll_s` cadence); a dead manager writes no ack -> None
+    (the S3.2 exit-84 path). A malformed ack (not a dict) is treated as
+    no ack yet (the manager rewrites it next cycle — actually it renames
+    the request .done after the ack, so a bad ack is sticky: the caller
+    surfaces the error, no infinite loop)."""
+    control = _control_dir()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        ack_path = control / f"ack-{req_id}.json"
+        if ack_path.is_file():
+            try:
+                ack = json.loads(ack_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                time.sleep(poll_s)
+                continue
+            if isinstance(ack, dict) and ack.get("request_id") == req_id:
+                return ack
+        time.sleep(poll_s)
+    return None
+
+
+def _parse_pool_args(argv: list[str]) -> tuple[list[int] | str | None, str | None]:
+    """Parse `--all` / `--instances i[,i,...]` for unload/reload.
+    Returns (targets, error): targets is 'all' or [int, ...] and error
+    is None on success; targets is None and error a message on a
+    malformed call (S3.2: '2 = malformed args (unknown instance index,
+    both selectors given)')."""
+    all_flag = False
+    inst: list[int] | None = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--all":
+            all_flag = True
+            i += 1
+        elif a == "--instances":
+            if i + 1 >= len(argv):
+                return None, "ERR_ARGS: --instances needs a value (i[,i,...])"
+            raw = argv[i + 1]
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            if not parts:
+                return None, "ERR_ARGS: --instances got an empty list"
+            for p in parts:
+                if not p.isdigit():
+                    return (
+                        None,
+                        f"ERR_ARGS: unknown instance index {p!r} (need non-negative ints)",
+                    )
+                inst = inst or []
+                inst.append(int(p))
+            i += 2
+        else:
+            return (
+                None,
+                f"ERR_ARGS: unknown argument {a!r} (expected --all | --instances i[,i,...])",
+            )
+    if all_flag and inst is not None:
+        return None, "ERR_ARGS: both --all and --instances given (pick one)"
+    if all_flag:
+        return "all", None
+    if inst is None:
+        return None, "ERR_ARGS: need --all or --instances i[,i,...]"
+    return inst, None
+
+
+DEFAULT_SERVING_YAML = "/opt/bonsai2/etc/serving.yaml"
+
+
+def _pool_wait_budget(cfg: dict) -> float:
+    """The unload/reload wait budget: boot_target_s + 2 health cycles +
+    15 s slack. The manager processes the request once per health cycle;
+    the reload path inside the cycle includes the S2.2 health probe up
+    to boot_target_s, so the budget must comfortably exceed it. The
+    values come from serving.yaml (the manager's own config — the env
+    override BONSAI2_SERVING_YAML redirects it, the hermetic hook); a
+    missing/malformed file falls back to the defaults (180 s boot +
+    10 s poll) and the budget is still a safe over-estimate."""
+    boot, poll = 180.0, 10.0
+    try:
+        srv = Path(os.environ.get("BONSAI2_SERVING_YAML") or DEFAULT_SERVING_YAML)
+        if srv.is_file():
+            data = _load_yaml_map(srv)
+            bt = data.get("boot_target_s", boot)
+            if isinstance(bt, (int, float)) and not isinstance(bt, bool) and bt > 0:
+                boot = float(bt)
+            hp = (data.get("manager") or {}).get("health_poll_s", poll)
+            if isinstance(hp, (int, float)) and not isinstance(hp, bool) and hp > 0:
+                poll = float(hp)
+    except (OSError, ValueError, KeyError, ConfigError) as exc:
+        # the budget is a heuristic, not a verdict: a malformed
+        # serving.yaml falls back to the defaults (stderr note).
+        print(
+            f"bonsai2: pool wait budget: serving.yaml unreadable ({exc}); using defaults",
+            file=sys.stderr,
+            flush=True,
+        )
+    return boot + 2 * poll + 15.0
+
+
+def _cmd_pool(op: str, argv: list[str], env: dict | None = None) -> int:
+    """The shared S3.2 unload/reload flow (MAP 3.8): manager-mediated
+    via the control/ queue. Exit codes: 0 = operation done (incl. the
+    no-op case and a partial reload, which reports "state": "partial");
+    2 = malformed args; 84 = manager down (no ack within the budget —
+    'a dead manager -> exit 84')."""
+    try:
+        cfg = load_config(env)
+    except ConfigError as exc:
+        return emit({"error": "ERR_CONFIG", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    targets, parse_err = _parse_pool_args(argv)
+    if parse_err is not None:
+        return emit({"error": "ERR_ARGS", "detail": parse_err}, EXIT_ARGS, parse_err)
+    assert targets is not None  # parse_err None => targets is 'all' or a list
+    # a dead manager never writes an ack — check the document first so
+    # the 84 path is immediate, not budget-long (S3.2: 'a dead manager
+    # -> exit 84').
+    try:
+        load_health_doc(env=env)
+    except HealthMissing as exc:
+        return emit(
+            {"error": "ERR_MANAGER_DOWN", "detail": str(exc), "type": op},
+            EXIT_MANAGER_DOWN,
+            str(exc),
+        )
+    req_id, _path = _write_control_request(op, targets)
+    budget = _pool_wait_budget(cfg)
+    ack = _wait_control_ack(req_id, budget)
+    if ack is None:
+        return emit(
+            {
+                "error": "ERR_MANAGER_DOWN",
+                "detail": f"no ack within {budget:.0f} s — the manager is not processing control/{op} (S3.2: manager down)",
+                "type": op,
+                "request_id": req_id,
+            },
+            EXIT_MANAGER_DOWN,
+            f"control ack timeout ({budget:.0f} s) for {op}",
+        )
+    state = ack.get("state")
+    if state == "error":
+        return emit(
+            {
+                "error": "ERR_ARGS",
+                "detail": f"manager rejected the {op}: {ack.get('detail')}",
+                "type": op,
+            },
+            EXIT_ARGS,
+            f"manager rejected {op}: {ack.get('detail')}",
+        )
+    payload = {"type": op, "request_id": req_id, "state": state}
+    if op == "unload":
+        payload["unloaded"] = ack.get("unloaded", [])
+        return emit(
+            payload, EXIT_OK, f"unloaded {payload['unloaded']} (state {state!r})"
+        )
+    payload["reloaded"] = ack.get("reloaded", [])
+    if ack.get("detail"):
+        payload["detail"] = ack.get("detail")
+    return emit(payload, EXIT_OK, f"reloaded {payload['reloaded']} (state {state!r})")
+
+
+def cmd_unload(argv: list[str], env: dict | None = None) -> int:
+    """`bonsai2-unload [--all | --instances i[,i,...]]` (S3.2; MAP 3.8).
+
+    The manager SIGTERMs the targeted instance units (instant VRAM
+    release), marks them `bunloaded` in health.json. Zero running
+    instances -> main-only `user_unloaded` (S2.4). Idempotent: an
+    already-unloaded index is a no-op for that index. JSON carries
+    {"unloaded": [i...]}. Exit: 0 / 2 (args) / 84 (manager down)."""
+    return _cmd_pool("unload", argv, env)
+
+
+def cmd_reload(argv: list[str], env: dict | None = None) -> int:
+    """`bonsai2-reload [--all | --instances i[,i,...]]` (S3.2; MAP 3.8).
+
+    Re-spawns the targeted indexes through the S1.4 allocation tier +
+    S2.2 unit start + health re-probe. A tier fail at a target leaves
+    it `bunloaded`; the others proceed; the JSON carries
+    {"reloaded": [i...], "state": "partial"} + a WARN_VRAM_SHORTFALL
+    detail (exit 0 — 'a partial reload ... is still a valid state').
+    Exit: 0 / 2 (args) / 84 (manager down)."""
+    return _cmd_pool("reload", argv, env)
+
+
+# --------------------------------------------------------------------------
+# S3.2 task-signal helper (cancel's SIGTERM/SIGKILL)
+# --------------------------------------------------------------------------
+CANCEL_KILL_GRACE_S = 5.0  # S3.2: 'cancel SIGTERM -> SIGKILL after 5 s'
+
+
+def _signal_process_tree(pid: int, signum: int) -> None:
+    """SIGTERM/SIGKILL the worker's PROCESS GROUP (start_worker uses
+    start_new_session=True, so the worker is a group leader: signalling
+    the group reaches its children too). A ProcessLookupError (the
+    worker already exited between our checks) is the success case."""
+    try:
+        os.killpg(pid, signum)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        try:
+            os.kill(pid, signum)
+        except OSError:
+            return
+    except OSError:
+        try:
+            os.kill(pid, signum)
+        except OSError:
+            return
+
+
+def _parse_steer_args(argv: list[str]) -> tuple[str, str, float | None] | str:
+    """Parse `bonsai2-steer <TASK_ID> -m MESSAGE [--wait SECS]`.
+    Returns (task_id, message, wait_s|None) or an error string."""
+    task_id: str | None = None
+    message: str | None = None
+    wait_s: float | None = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "-m":
+            if i + 1 >= len(argv):
+                return "ERR_ARGS: -m needs a MESSAGE value"
+            message = argv[i + 1]
+            i += 2
+        elif a == "--wait":
+            if i + 1 >= len(argv):
+                return "ERR_ARGS: --wait needs a SECS value"
+            try:
+                wait_s = float(argv[i + 1])
+            except ValueError:
+                return f"ERR_ARGS: --wait needs a number, got {argv[i + 1]!r}"
+            if wait_s < 0:
+                return "ERR_ARGS: --wait SECS must be >= 0"
+            i += 2
+        elif a.startswith("--wait="):
+            try:
+                wait_s = float(a.split("=", 1)[1])
+            except ValueError:
+                return f"ERR_ARGS: --wait= needs a number, got {a!r}"
+            i += 1
+        else:
+            if task_id is None:
+                task_id = a
+                i += 1
+            else:
+                return f"ERR_ARGS: unexpected argument {a!r} (usage: bonsai2-steer <TASK_ID> -m MESSAGE [--wait SECS])"
+    if task_id is None:
+        return "ERR_ARGS: missing TASK_ID (usage: bonsai2-steer <TASK_ID> -m MESSAGE [--wait SECS])"
+    if message is None:
+        return "ERR_ARGS: -m MESSAGE is required"
+    return task_id, message, wait_s
+
+
+# --------------------------------------------------------------------------
 # entry-point dispatch (the thin deploy files call this)
 # --------------------------------------------------------------------------
 def dispatch(name: str, argv: list[str], env: dict | None = None) -> int:
@@ -1199,6 +2086,16 @@ def dispatch(name: str, argv: list[str], env: dict | None = None) -> int:
         return cmd_health(argv, env)
     if name == "bonsai2-spawn":
         return cmd_spawn(argv, env)
+    if name == "bonsai2-collect":
+        return cmd_collect(argv, env)
+    if name == "bonsai2-steer":
+        return cmd_steer(argv, env)
+    if name == "bonsai2-cancel":
+        return cmd_cancel(argv, env)
+    if name == "bonsai2-unload":
+        return cmd_unload(argv, env)
+    if name == "bonsai2-reload":
+        return cmd_reload(argv, env)
     raise SystemExit(f"bonsai2_harness.dispatch: unknown command {name!r}")
 
 

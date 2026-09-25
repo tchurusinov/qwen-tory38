@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""bonsai2-cancel — stop one subagent task (S3.2; MAP 3.7).
+
+Thin deploy file; the flow lives in `bonsai2_harness.py`
+(`cmd_cancel`).
+
+Usage (the S3.2 surface, locked):
+  bonsai2-cancel <TASK_ID> [--graceful]
+
+Signal path: SIGTERM the task's worker (its process group), SIGKILL
+after 5 s if it did not exit (the S3.2 'cancel SIGTERM -> SIGKILL
+after 5 s'). A terminal task is an already-done no-op; a queued task
+(no worker yet) is marked failed directly. CANCEL FREES THE SLOT
+(S3.4) — the record leaves the charged states, so the claim pass can
+promote the next queued task.
+
+Exit codes (S3.2 closed set, per-command mapping):
+  0  = operation accepted (signal sent, or the task was already
+       terminal — the no-op case)
+  2  = TASK_ID unknown / malformed args / bad config
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bonsai2_harness as H  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(H.dispatch("bonsai2-cancel", sys.argv[1:]))
