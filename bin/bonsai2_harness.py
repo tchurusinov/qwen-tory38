@@ -70,19 +70,22 @@ Task records (S3.3/S3.4):
     priority, NOT --out — S3.4) is computed and recorded here; the 24 h
     TTL lookup in <results_dir>/dedup/ lands with 3.5.
 
-Exit-code mapping for THIS PR's commands (S3.2 closed set, per command):
-  * status / list-instances / health: 0, 82 (main-endpoint probe fails),
-    84 (health.json absent/invalid); health adds no main probe (it dumps
-    the manager's raw document). status/load-config also 2 on malformed
-    harness.yaml (the S3.2 "malformed config" case).
-  * spawn: 0 (accepted — running, or promoted out of the queue in time),
-    2 (malformed args / malformed config), 3 (routing candidate
-    bfailed=ERR_PORT_IN_USE or bdown=ERR_INSTANCE_UNHEALTHY at
-    submission — S4.5: wait one health cycle, re-spawn), 5 (no instance
-    ctx fits the requested --ctx, ERR_CTX_TOO_LONG, S1.5), 8 (queue_wait
-    expired, state "queued"), 80 (main-only mode: the S2.4
-    {"reason": ...} JSON echoing health.json), 82 (main endpoint
-    unhealthy), 84 (health.json absent/invalid).
+# Exit-code mapping for THIS PR's commands (S3.2 closed set, per command):
+#  * status / list-instances / health: 0, 82 (main-endpoint probe fails),
+#    84 (health.json absent/invalid); health adds no main probe (it dumps
+#    the manager's raw document). status/load-config also 2 on malformed
+#    harness.yaml (the S3.2 "malformed config" case).
+#  * spawn: 0 (accepted — running, or promoted out of the queue in time),
+#    2 (malformed args / malformed config), 3 (routing candidate
+#    bfailed=ERR_PORT_IN_USE or bdown=ERR_INSTANCE_UNHEALTHY at
+#    submission — S4.5: wait one health cycle, re-spawn), 4 (routing
+#    candidate bfailed with an S1.4 engine-level bfailed_reason
+#    [ERR_VRAM_OOM / ERR_HASH* / ERR_DOWNLOAD*] at submission — the S1.5
+#    engine-level failure, S4.4: requeue on another or run on main),
+#    5 (no instance ctx fits the requested --ctx, ERR_CTX_TOO_LONG, S1.5),
+#    8 (queue_wait expired, state "queued"), 80 (main-only mode: the S2.4
+#    {"reason": ...} JSON echoing health.json), 82 (main endpoint
+#    unhealthy), 84 (health.json absent/invalid).
 
 The worker (`bin/bonsai2-taskworker.py`, not an S3.2 command — it is the
 spawn's detached child):
@@ -117,11 +120,16 @@ from pathlib import Path
 
 # --------------------------------------------------------------------------
 # S3.2 closed set (the single source — S3.8 #3: any other exit code from a
-# S3.2 script is a harness bug).
+# S3.2 script is a harness bug). The set is LOCKED at exactly these 12
+# values (S3.2 'Closed set: {0, 2, 3, 4, 5, 8, 20, 21, 22, 80, 82, 84} —
+# 12 codes'); EXIT_CLOSED_SET is asserted against that literal by the
+# closed-set suite (MAP 3.9 / S3.8 #3) so a stray code cannot be added
+# here unnoticed, and `emit` enforces it at every emit site.
 # --------------------------------------------------------------------------
 EXIT_OK = 0
 EXIT_ARGS = 2
 EXIT_PORT = 3
+EXIT_ENGINE = 4
 EXIT_CTX = 5
 EXIT_QUEUE_WAIT = 8
 EXIT_MAIN_ONLY = 80
@@ -129,6 +137,52 @@ EXIT_MAIN_DOWN = 82
 EXIT_MANAGER_DOWN = 84
 EXIT_POOL_WAIT = 84  # S3.2 unload/reload: manager down == its own 84 (same code, alias for readability)
 EXIT_CLOSED_SET = frozenset({0, 2, 3, 4, 5, 8, 20, 21, 22, 80, 82, 84})
+
+# S3.2 per-command exit mapping (the locked "Per-command exit mapping"
+# block under the S3.2 exit-code table). This is the DECLARATIVE record of
+# which closed-set codes each S3.2 command may emit — the single source the
+# MAP 3.9 closed-set test asserts against (S3.8 #3: "a test asserts no
+# stray code can be emitted"):
+#   * the closed set is exactly the S3.2 literal (no drift — asserted);
+#   * every command's allowed set is a SUBSET of the closed set (no stray
+#     code);
+#   * every S3.2 command has a mapping (the 9 commands dispatch() implements
+#     today; `bonsai2-bench`'s 0/2 subset is S3.5/S5.4 and lands in P4/MAP
+#     4.7 — declared there, not wired in dispatch() yet).
+# `emit` still enforces the GLOBAL closed set at every emit site (a stray
+# code anywhere is a ValueError, not a silent exit-1); this table is what
+# pins the PER-COMMAND subset so a command cannot grow a code its S3.2 row
+# does not allow.
+COMMAND_EXIT_CODES: dict[str, frozenset[int]] = {
+    # 0 accepted, 2 args/config, 3 bfailed(port)/bdown, 4 bfailed(engine),
+    # 5 ctx too long, 8 queue_wait, 80 main-only, 82 main down, 84 mgr down
+    "bonsai2-spawn": frozenset({0, 2, 3, 4, 5, 8, 80, 82, 84}),
+    # 0 accepted/state-change, 2 unknown task/args, 8 --wait no state change
+    "bonsai2-steer": frozenset({0, 2, 8}),
+    # 0 accepted/terminal no-op, 2 unknown task/args
+    "bonsai2-cancel": frozenset({0, 2}),
+    # 0 ok, 2 args/config, 82 main down, 84 health missing
+    "bonsai2-status": frozenset({0, 2, 82, 84}),
+    "bonsai2-list-instances": frozenset({0, 2, 82, 84}),
+    # 0 ok, 2 args, 84 health missing (no main probe — the raw doc dump)
+    "bonsai2-health": frozenset({0, 2, 84}),
+    # 20 done, 21 failed, 22 timeout, 0 non-terminal poll, 2 unknown task
+    "bonsai2-collect": frozenset({0, 2, 20, 21, 22}),
+    # 0 done (incl. no-op / partial), 2 args, 84 manager down
+    "bonsai2-unload": frozenset({0, 2, 84}),
+    "bonsai2-reload": frozenset({0, 2, 84}),
+}
+
+
+def command_allowed_codes(command: str) -> frozenset[int]:
+    """The closed-set codes `command` may emit (the S3.2 per-command
+    mapping). KeyError when the command has no S3.2 mapping (a non-S3.2
+    command, or a new command the mapping has not been extended for —
+    the closed-set test uses this to catch the latter)."""
+    if command not in COMMAND_EXIT_CODES:
+        raise KeyError(f"no S3.2 exit-code mapping for {command!r}")
+    return COMMAND_EXIT_CODES[command]
+
 
 DEFAULT_CONFIG_PATH = "/opt/bonsai2/etc/harness.yaml"
 DEFAULT_ENGINE_YAML = "/opt/bonsai2/etc/subagent-engine.yaml"
@@ -560,6 +614,9 @@ def route_target(
         S1.5 exit-5 condition at submission);
       * ERR_PORT_IN_USE -> the routing candidate is bfailed (S1.5: port
         collision at boot, the manager is mid-clear);
+      * ERR_ENGINE_OOM -> the routing candidate is bfailed with
+        `bfailed_reason` an S1.4 engine-level cause (OOM/download/hash —
+        the S3.2 exit-4 condition at submission);
       * ERR_INSTANCE_UNHEALTHY -> the routing candidate is bdown (S1.5:
         unhealthy > 30 s — S4.5: wait one health cycle, re-spawn).
 
@@ -612,6 +669,24 @@ def route_target(
             ),
         )
     if cand.get("state") == "bfailed":
+        reason = cand.get("bfailed_reason")
+        if isinstance(reason, str) and reason.startswith(
+            ("ERR_VRAM_OOM", "ERR_HASH", "ERR_DOWNLOAD")
+        ):
+            # S1.5: the engine-level bfailed causes (OOM/download/hash)
+            # are the S3.2 exit-4 condition at submission — the instance
+            # is bfailed AND the manager recorded WHY (an S1.4 engine
+            # cause), so the main agent's S4.4 4-path applies: check
+            # status, requeue on another or run on main.
+            return (
+                cand,
+                "ERR_ENGINE_OOM",
+                (
+                    f"routing candidate i={cand.get('i')} is bfailed ({reason} — "
+                    "engine-level failure: OOM/download/hash, S1.5 — check status, "
+                    "requeue on another instance or run on main)"
+                ),
+            )
         return (
             cand,
             "ERR_PORT_IN_USE",
@@ -1186,7 +1261,8 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
 def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) -> int:
     """bonsai2-spawn (S3.2/S3.3) — the full submission flow documented in
     the module docstring; the S3.2 per-command exit mapping:
-    0 accepted, 2 malformed args/config, 3 candidate bfailed/bdown,
+    0 accepted, 2 malformed args/config, 3 candidate bfailed(bport)/bdown,
+    4 candidate bfailed with an S1.4 engine-level cause (S1.5),
     5 ctx too long, 8 queue_wait expired (state "queued"), 80 main-only
     (the S2.4 {"reason": ...} JSON), 82 main unhealthy, 84 manager
     down / health.json absent."""
@@ -1262,7 +1338,14 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
     )
     target, err, detail = route_target(doc, d, parsed["ctx"])
     if err:
-        code = EXIT_CTX if err == "ERR_CTX_TOO_LONG" else EXIT_PORT
+        if err == "ERR_CTX_TOO_LONG":
+            code = EXIT_CTX
+        elif err == "ERR_ENGINE_OOM":
+            code = (
+                EXIT_ENGINE  # S1.5: bfailed with an engine-level cause -> S3.2 exit 4
+            )
+        else:
+            code = EXIT_PORT
         return emit(
             {
                 "task_id": None,
@@ -1919,7 +2002,9 @@ def _pool_wait_budget(cfg: dict) -> float:
     return boot + 2 * poll + 15.0
 
 
-def _cmd_pool(op: str, argv: list[str], env: dict | None = None) -> int:
+def _cmd_pool(
+    op: str, argv: list[str], env: dict | None = None, poll_s: float = 0.05
+) -> int:
     """The shared S3.2 unload/reload flow (MAP 3.8): manager-mediated
     via the control/ queue. Exit codes: 0 = operation done (incl. the
     no-op case and a partial reload, which reports "state": "partial");
@@ -1946,7 +2031,7 @@ def _cmd_pool(op: str, argv: list[str], env: dict | None = None) -> int:
         )
     req_id, _path = _write_control_request(op, targets)
     budget = _pool_wait_budget(cfg)
-    ack = _wait_control_ack(req_id, budget)
+    ack = _wait_control_ack(req_id, budget, poll_s=poll_s)
     if ack is None:
         return emit(
             {
@@ -1981,7 +2066,7 @@ def _cmd_pool(op: str, argv: list[str], env: dict | None = None) -> int:
     return emit(payload, EXIT_OK, f"reloaded {payload['reloaded']} (state {state!r})")
 
 
-def cmd_unload(argv: list[str], env: dict | None = None) -> int:
+def cmd_unload(argv: list[str], env: dict | None = None, poll_s: float = 0.05) -> int:
     """`bonsai2-unload [--all | --instances i[,i,...]]` (S3.2; MAP 3.8).
 
     The manager SIGTERMs the targeted instance units (instant VRAM
@@ -1989,10 +2074,10 @@ def cmd_unload(argv: list[str], env: dict | None = None) -> int:
     instances -> main-only `user_unloaded` (S2.4). Idempotent: an
     already-unloaded index is a no-op for that index. JSON carries
     {"unloaded": [i...]}. Exit: 0 / 2 (args) / 84 (manager down)."""
-    return _cmd_pool("unload", argv, env)
+    return _cmd_pool("unload", argv, env, poll_s=poll_s)
 
 
-def cmd_reload(argv: list[str], env: dict | None = None) -> int:
+def cmd_reload(argv: list[str], env: dict | None = None, poll_s: float = 0.05) -> int:
     """`bonsai2-reload [--all | --instances i[,i,...]]` (S3.2; MAP 3.8).
 
     Re-spawns the targeted indexes through the S1.4 allocation tier +
@@ -2001,7 +2086,7 @@ def cmd_reload(argv: list[str], env: dict | None = None) -> int:
     {"reloaded": [i...], "state": "partial"} + a WARN_VRAM_SHORTFALL
     detail (exit 0 — 'a partial reload ... is still a valid state').
     Exit: 0 / 2 (args) / 84 (manager down)."""
-    return _cmd_pool("reload", argv, env)
+    return _cmd_pool("reload", argv, env, poll_s=poll_s)
 
 
 # --------------------------------------------------------------------------
@@ -2077,7 +2162,9 @@ def _parse_steer_args(argv: list[str]) -> tuple[str, str, float | None] | str:
 # --------------------------------------------------------------------------
 # entry-point dispatch (the thin deploy files call this)
 # --------------------------------------------------------------------------
-def dispatch(name: str, argv: list[str], env: dict | None = None) -> int:
+def dispatch(
+    name: str, argv: list[str], env: dict | None = None, poll_s: float = 0.25
+) -> int:
     if name == "bonsai2-status":
         return cmd_status(argv, env)
     if name == "bonsai2-list-instances":
@@ -2085,17 +2172,17 @@ def dispatch(name: str, argv: list[str], env: dict | None = None) -> int:
     if name == "bonsai2-health":
         return cmd_health(argv, env)
     if name == "bonsai2-spawn":
-        return cmd_spawn(argv, env)
+        return cmd_spawn(argv, env, poll_s=poll_s)
     if name == "bonsai2-collect":
         return cmd_collect(argv, env)
     if name == "bonsai2-steer":
-        return cmd_steer(argv, env)
+        return cmd_steer(argv, env, poll_s=poll_s)
     if name == "bonsai2-cancel":
         return cmd_cancel(argv, env)
     if name == "bonsai2-unload":
-        return cmd_unload(argv, env)
+        return cmd_unload(argv, env, poll_s=poll_s)
     if name == "bonsai2-reload":
-        return cmd_reload(argv, env)
+        return cmd_reload(argv, env, poll_s=poll_s)
     raise SystemExit(f"bonsai2_harness.dispatch: unknown command {name!r}")
 
 
