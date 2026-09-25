@@ -753,7 +753,7 @@ SPEC.md `status` → `active`.
   rebase onto a0164ce, clean, no conflicts; re-verified suite + gate on
   the rebased head). Merged via the Gitea API at commit **db-c8737**
   (2026-09-25T08:02:52Z); branch deleted remote + local; gate PASS on
-  merged main. G4 record = comment 818.
+  merged main. G4 record = comment 822.
 - test root cause (worth knowing): the live-SIGTERM cancel test asserted
   `os.kill(pid, 0)` fails after cancel — but in a hermetic run the test
   process IS the worker's parent (in production the spawn CLI exits and
