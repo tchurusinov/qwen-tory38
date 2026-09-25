@@ -117,7 +117,10 @@ class TestToolsWireProtocolProbe(unittest.TestCase):
             [
                 "docker",
                 "run",
-                "--rm",
+                # no --rm: the explicit docker rm -f in _stop_container
+                # owns the teardown, so docker logs survives for the
+                # early-death assertion below (with --rm the container
+                # vanishes before the error can be read).
                 "--name",
                 CONTAINER,
                 "--gpus",
@@ -133,16 +136,26 @@ class TestToolsWireProtocolProbe(unittest.TestCase):
                 "--ipc=host",
                 RUNTIME_IMAGE,
                 "/opt/bonsai2/bin/llama-server",
-                "--model /opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf",
-                "--ctx-size 8192",
-                "--parallel 1",
-                "--batch-size 512",
-                "--cache-type-k q4_0",
-                "--cache-type-v q4_0",
-                f"--port {PROBE_PORT}",
-                f"--api-key {API_KEY}",
-                f"--reasoning-format {REASONING_FORMAT}",
-                f"--alias {ALIAS}",
+                "--model",
+                "/opt/bonsai2/models/bonsai-2-27b-gguf-PQ2_0.gguf",
+                "--ctx-size",
+                "8192",
+                "--parallel",
+                "1",
+                "--batch-size",
+                "512",
+                "--cache-type-k",
+                "q4_0",
+                "--cache-type-v",
+                "q4_0",
+                "--port",
+                str(PROBE_PORT),
+                "--api-key",
+                API_KEY,
+                "--reasoning-format",
+                REASONING_FORMAT,
+                "--alias",
+                ALIAS,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -151,10 +164,16 @@ class TestToolsWireProtocolProbe(unittest.TestCase):
         cls.deadline = time.monotonic() + START_TIMEOUT_S
         while time.monotonic() < cls.deadline:
             if cls.proc.poll() is not None:
+                tail = subprocess.run(
+                    ["docker", "logs", "--tail", "30", CONTAINER],
+                    capture_output=True,
+                    check=False,
+                )
+                log_tail = tail.stderr.decode("utf-8", "replace")[-1500:]
+                _stop_container()
                 raise AssertionError(
                     f"probe instance exited early (rc {cls.proc.returncode}) — "
-                    "the image/model load failed (check docker logs "
-                    f"{CONTAINER} in the test log)"
+                    f"the image/model load failed. docker logs tail:\n{log_tail}"
                 )
             if not _port_free(PROBE_PORT):
                 break
