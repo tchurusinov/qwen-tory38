@@ -912,7 +912,7 @@ class TestManagerReaperPass(unittest.TestCase):
             old = os.environ.get("BONSAI2_RESULTS_DIR")
             os.environ["BONSAI2_RESULTS_DIR"] = env["BONSAI2_RESULTS_DIR"]
             try:
-                self.assertEqual(_MGR.reap_tasks_once(Path(tmp)), [])
+                self.assertEqual(_MGR.reap_tasks_once(), [])
             finally:
                 if old is None:
                     os.environ.pop("BONSAI2_RESULTS_DIR", None)
@@ -945,7 +945,7 @@ class TestManagerReaperPass(unittest.TestCase):
             old = os.environ.get("BONSAI2_RESULTS_DIR")
             os.environ["BONSAI2_RESULTS_DIR"] = str(results)
             try:
-                reaped = _MGR.reap_tasks_once(Path(tmp), log=lambda m: None)
+                reaped = _MGR.reap_tasks_once(log=lambda m: None)
                 self.assertEqual(reaped, ["t-mgr"])
                 fresh = H.read_task(d, "t-mgr")
                 self.assertEqual(fresh["state"], "failed")

@@ -787,7 +787,11 @@ def allocation_tier(
 # instance health probe (S2.2) — the 'healthy' definition
 # --------------------------------------------------------------------------
 def _probe_models(
-    port: int, alias: str, api_key: str, timeout: float = 5.0, probe_timeout_s: float | None = None
+    port: int,
+    alias: str,
+    api_key: str,
+    timeout: float = 5.0,
+    probe_timeout_s: float | None = None,
 ) -> bool:
     """GET /v1/models -> 200 + the alias in the body (S2.2, half 1).
 
@@ -875,9 +879,7 @@ def instance_healthy(
     healthy gate (COMPLETION_RT_MAX_S) is unchanged."""
     return _probe_models(
         port, alias, api_key, probe_timeout_s=probe_timeout_s
-    ) and _probe_completion(
-        port, alias, api_key, probe_timeout_s=probe_timeout_s
-    )
+    ) and _probe_completion(port, alias, api_key, probe_timeout_s=probe_timeout_s)
 
 
 def main_healthy(endpoint: str, timeout: float = 5.0) -> bool:
@@ -986,7 +988,9 @@ def systemctl_restart_instance(i: int, base: list[str] | None = None) -> int:
     cmd = (base or systemctl_base()) + ["restart", f"bonsai2-server@{i}"]
     r = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if r.returncode != 0:
-        _log(f"systemctl restart bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}")
+        _log(
+            f"systemctl restart bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}"
+        )
     return r.returncode
 
 
@@ -999,7 +1003,9 @@ def systemctl_stop_instance(i: int, base: list[str] | None = None) -> int:
     cmd = (base or systemctl_base()) + ["stop", f"bonsai2-server@{i}"]
     r = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if r.returncode != 0:
-        _log(f"systemctl stop bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}")
+        _log(
+            f"systemctl stop bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}"
+        )
     return r.returncode
 
 
@@ -1121,7 +1127,9 @@ def rewrite_unit_model(unit_path: Path, model_file: str, *, log=_log) -> bool:
     return True
 
 
-def rewrite_unit_memory(unit_path: Path, old_budget_gb: float, new_budget_gb: float, *, log=_log) -> bool:
+def rewrite_unit_memory(
+    unit_path: Path, old_budget_gb: float, new_budget_gb: float, *, log=_log
+) -> bool:
     """S2.4 fallback boot path (MAP 2.7): rewrite the instance unit's
     `--memory` / `--memory-swap` flags from the PQ2_0 budget to the
     PTQ1_0 budget (the S2.2 `--memory` = the per-instance budget, so
@@ -1172,8 +1180,6 @@ def rewrite_unit_memory(unit_path: Path, old_budget_gb: float, new_budget_gb: fl
     return True
 
 
-
-
 def wait_instance_healthy(
     i: int, cfg: dict, boot_deadline_s: float | None = None
 ) -> bool:
@@ -1206,6 +1212,7 @@ def wait_instance_healthy(
             return True
         time.sleep(HEALTH_PROBE_POLL_S)
     return last
+
 
 # --------------------------------------------------------------------------
 # S3.4 reaper pass (manager-side deadline enforcement, MAP 3.4)
@@ -1261,7 +1268,7 @@ def _results_dirs_from_harness_cfg() -> Path | None:
     return base if (base / "tasks").is_dir() else None
 
 
-def reap_tasks_once(health_dir: Path, log=_log) -> list[str]:
+def reap_tasks_once(log=_log) -> list[str]:
     """One manager-side S3.4 reaper pass (runs every health cycle,
     after the control pass): reaps stale `running`/`engine_retried`
     task records (dead worker pid -> failed/ERR_ENGINE_DOWN; the
@@ -1270,7 +1277,13 @@ def reap_tasks_once(health_dir: Path, log=_log) -> list[str]:
     live in the harness results dir (this function's convention); a
     missing dir = nothing to reap (hermetic boots with no tasks).
     Returns the reaped task_ids. The pass is fault-tolerant at the
-    caller (a reaper error must never kill the steady loop)."""
+    caller (a reaper error must never kill the steady loop).
+
+    G3 PR#15 r2 P0-2: the signature used to take a `health_dir`
+    argument it never used — the results dir is the harness's own
+    convention (BONSAI2_RESULTS_DIR, else harness.yaml), not derivable
+    from the health dir (they are siblings in the hermetic rig, nested
+    under /run/bonsai2 in production). The dead parameter went."""
     base = _results_dirs_from_harness_cfg()
     if base is None:
         return []
@@ -1368,9 +1381,7 @@ class Runtime:
 
     @property
     def running(self) -> list[int]:
-        return [
-            i for i in self.spawned if self.entries[i].state != "bunloaded"
-        ]
+        return [i for i in self.spawned if self.entries[i].state != "bunloaded"]
 
     @property
     def running_states(self) -> list[str]:
@@ -1385,7 +1396,9 @@ class Runtime:
         return [self.entries[i].state for i in self.running]
 
 
-def initial_states(spawned: list[int], start_rc: dict[int, int], cfg: dict) -> list[str]:
+def initial_states(
+    spawned: list[int], start_rc: dict[int, int], cfg: dict
+) -> list[str]:
     """The first health.json's states (the skeleton's build, kept as a
     function so the boot path and the tests share it): a unit whose
     `systemctl start` returned non-zero reflects its S1.5 bfailed path
@@ -1411,7 +1424,9 @@ def _instance_unit_path(i: int, sysctl_base: list[str]) -> Path:
     """The instance unit's path (system or user scope, following
     `sysctl_base` — the same scope split as `systemctl_base`)."""
     if sysctl_base and sysctl_base[-1] == "--user":
-        return Path.home() / ".config" / "systemd" / "user" / f"bonsai2-server@{i}.service"
+        return (
+            Path.home() / ".config" / "systemd" / "user" / f"bonsai2-server@{i}.service"
+        )
     return Path("/etc/systemd/system") / f"bonsai2-server@{i}.service"
 
 
@@ -1493,8 +1508,7 @@ def check_escalation(
 
     def _nrestarts(i: int) -> int:
         show = unit_show(
-            base
-            + ["show", "-p", "NRestarts", f"bonsai2-server@{i}"],
+            base + ["show", "-p", "NRestarts", f"bonsai2-server@{i}"],
             capture_output=True,
             text=True,
             check=False,
@@ -1732,7 +1746,9 @@ def process_control(
         try:
             req = json.loads(req_file.read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            log(f"control: unreadable request {req_file.name}: {exc} — leaving in place")
+            log(
+                f"control: unreadable request {req_file.name}: {exc} — leaving in place"
+            )
             continue
         rtype = req.get("type")
         targets = req.get("instances")
@@ -1747,7 +1763,8 @@ def process_control(
         # isinstance).
         if rtype not in ("unload", "reload") or not (
             targets == "all"
-            or isinstance(targets, list) and all(type(t) is int for t in targets)
+            or isinstance(targets, list)
+            and all(type(t) is int for t in targets)
         ):
             ack.update(
                 state="error",
@@ -1755,7 +1772,11 @@ def process_control(
             )
             _write_ack(control_dir, req_file, ack)
             continue
-        idxs = [i for i in range(int(runtime.cfg["count"]))] if targets == "all" else list(targets)
+        idxs = (
+            [i for i in range(int(runtime.cfg["count"]))]
+            if targets == "all"
+            else list(targets)
+        )
         idxs = [i for i in idxs if 0 <= i < len(runtime.entries)]
         if rtype == "unload":
             done = []
@@ -2024,8 +2045,10 @@ def write_boot_target_s(serving_yaml: Path, boot_target_s: float, *, log=_log) -
     tmp = serving_yaml.with_suffix(serving_yaml.suffix + ".tmp")
     tmp.write_text("".join(lines))
     os.replace(tmp, serving_yaml)
-    log(f"S2.6: measured boot {boot_target_s:.1f} s -> boot_target_s={target} "
-        f"written to {serving_yaml.name}")
+    log(
+        f"S2.6: measured boot {boot_target_s:.1f} s -> boot_target_s={target} "
+        f"written to {serving_yaml.name}"
+    )
     return True
 
 
@@ -2180,7 +2203,12 @@ def fallback_retry(
     rewrite_unit_memory(unit0, float(cfg["budget_gb"]), fb_budget, log=log)
 
     exit_code, spawned, detail, start_rc = spawn(
-        fb_cfg, 1, fb_need, log=log, sysctl_base=sysctl_base, boot_deadline_s=boot_deadline_s
+        fb_cfg,
+        1,
+        fb_need,
+        log=log,
+        sysctl_base=sysctl_base,
+        boot_deadline_s=boot_deadline_s,
     )
     ctx_in_use = int(cfg["ctx_size"])
     if exit_code == EXIT_OK and spawned:
@@ -2358,9 +2386,7 @@ def run_probe_loop(
         # pass from the runtime (the entries are indexed by i, so the
         # snapshot is the set as of cycle start).
         running_snapshot = list(runtime.running)
-        _refresh_states(
-            runtime, running_snapshot, log, probe_timeout_s=probe_timeout_s
-        )
+        _refresh_states(runtime, running_snapshot, log, probe_timeout_s=probe_timeout_s)
         check_escalation(runtime, now, base=base, log=log)
         control_dir = health_dir / "control"
         try:
@@ -2373,8 +2399,11 @@ def run_probe_loop(
         # S3.4 (MAP 3.4): the manager-side deadline enforcement — one
         # reaper pass per cycle (stale running records -> terminal +
         # slot freed). A reaper error never kills the steady loop.
+        # (G3 PR#15 r2 P0-2: the reaper resolves its results dir from
+        # the harness convention, not the health dir — the parameter
+        # went.)
         try:
-            reaped = reap_tasks_once(health_dir, log=log)
+            reaped = reap_tasks_once(log=log)
             if reaped:
                 log(f"S3.4 reaper: {len(reaped)} task(s) reaped: {reaped}")
         except Exception as exc:  # noqa: BLE001
@@ -2388,9 +2417,7 @@ def run_probe_loop(
                 base=base,
                 log=log,
             )
-        write_health(
-            health_dir, build_runtime_health(cfg, runtime, main_ok)
-        )
+        write_health(health_dir, build_runtime_health(cfg, runtime, main_ok))
         if settle_s > 0 and (time.monotonic() - t0) >= settle_s:
             log(f"probe loop: settled {settle_s:.0f}s (cycle {cycle}), exit 0")
             return EXIT_OK
@@ -2631,9 +2658,7 @@ def main(argv: list[str] | None = None) -> int:
     # unit. A clean start that has not gone healthy yet is `degraded`
     # (alive-but-unproven), not bfailed.
     boot_states = initial_states(spawned, start_rc, cfg)
-    write_health(
-        health_dir, build_health(cfg, boot_states, main_ok, main_only_reason)
-    )
+    write_health(health_dir, build_health(cfg, boot_states, main_ok, main_only_reason))
     notify_sd(f"STATUS=bonsai2-manager: booted {len(spawned)} instance(s)")
 
     # The steady loop owns per-instance state from here (MAP 2.6/2.8/
