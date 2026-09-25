@@ -39,7 +39,10 @@ this map is the *how far along* (mutable, updated as work lands).
 
 LLM-to-LLM subagent orchestration · main-stack changes (consume :30001,
 never touch it) · vision/mmproj · multi-box v1 · fine-tuning · LLM-judge
-bench mode · kill-for-drift instance retirement · stateful subagents.
+bench mode · kill-for-drift instance retirement · stateful subagents ·
+dedicated subagent browser tool (driven via the python/bash tools
+against the host venv; first-class `browser` tool is a v2 candidate —
+SPEC S0 non-goal 7).
 (See SPEC.md "Out of scope".)
 
 ## Open items / standing blockers
@@ -543,10 +546,44 @@ Exit: hermetic closed-set suite green + S3.8 acceptance (all five).
       offload command (spawn) exit 80 with S2.4 JSON (reads exit 0 with
       `main_only_reason` per the S3.2 per-command table — S2.4/S3.8#4
       delta amended, session log); unload/reload mock cases.
+- [ ] 3.13 Host-side 4-tool module `bin/bonsai2_tools.py` (bash /
+      read_file / write_file / python): workdir containment (reject
+      escape above the workdir root — `/`-rooted and `..`-crossing
+      paths rejected; symlinks inside the workdir allowed, symlinks out
+      rejected at open); per-tool subprocess timeout via process-group
+      kill at `tool_timeout_s`; output truncation at
+      `tool_output_max_kb`; stdlib-only, no engine, no network.
+      Hermetic cases: valid call → result; malformed → error result;
+      workdir escape → rejected call; timeout kill; truncation
+      (S3.4, spec amendment 2026-09-25).
+- [ ] 3.14 Taskworker tool loop: when `rec["tools"] == "on"`, the
+      single-attempt body becomes the step-loop (send message history →
+      parse tool call — native tools-array vs text-JSON per the
+      @gpu wire-protocol probe at the pin → execute: host module or the
+      instance `/tools` endpoint per `tool_execution` → append →
+      repeat; final answer → done); `--tools off` stays a single
+      completion byte-identical to the pre-loop path; loop bounds
+      (`tool_invalid_max` → `ERR_TOOL_INVALID_CALL`, step overrun →
+      `ERR_TOOL_TIMEOUT`, `--max-steps` → `timeout` / `ERR_DEADLINE`);
+      task record + result file gain `tool_log` / `steps`; steer
+      injected at the next step boundary (S4.3); cancel kills the
+      current step's subprocess, then the worker (5 s SIGKILL
+      backstop); @gpu wire-protocol probe (does the Bonsai chat
+      template emit `tool_calls` via the native array at
+      `9a9394a8`?) logged as a pin-reality delta (S3.4, S1.5, S1.3).
+- [ ] 3.15 Workdir + spawn flags: `--workdir DIR` (must exist,
+      writable; omitted → harness creates
+      `/run/bonsai2/workspaces/<task_id>`, 7-day rotation) +
+      `--max-steps` (default `task_max_steps` = 32, range 1-128) on
+      spawn; `--tools` defaults ON; dedup key gains the `--workdir`
+      term; collect payload gains `tool_log` / `steps` / `workdir`
+      (S3.1); `etc/harness.yaml` template + `bonsai2_render_config.py`
+      validator gain the S3.6 tool_* keys + the S1.6 `tools:` block
+      (S3.2, S3.4, S3.6, S1.6).
 
 ### Phase 4 — Bench framework (SPEC S5)
 
-Exit: one full M1–M8 run committed with S5.9 acceptance (all four).
+Exit: one full M1–M10 run committed with S5.9 acceptance (all five).
 
 - [ ] 4.1 `bench.yaml` + schema validation (S5.7); invalid scenario id →
       exit 2 (S5.8 config test).
@@ -575,26 +612,51 @@ Exit: one full M1–M8 run committed with S5.9 acceptance (all four).
 - [ ] 4.8 S5.8 tests: dogfood (M7 row parses), rubric golden in/out pairs
       per scorer (hermetic), mock-endpoint full M1+M2 run (zero
       network/GPU, timings sane).
-- [ ] 4.9 Live full M1–M8 run on this box; commit `bench-results/`; every
-      row carries the box-state snapshot; M8 verdict recorded (S5.9 #1).
-- [ ] 4.10 Re-bench policy wired (S5.5): quick bench (M1+M2+M7, `--quick`)
-      on every engine-pin bump / model re-download / weekly optional
-      cron; > 10 % t/s or auto-rubric regression blocks the pin-bump PR;
-      full bench on revision/quant change or S4.2 row flip.
+- [ ] 4.9 M9/M10 capability-layer goldens + scorers (the amendment
+      doc's "4.11", renumbered so the live full run comes AFTER them):
+      M9 spec-chunk fixture in `bench/goldens/` (small library spec,
+      3 functions + a 3-case suite); M10 10-file test batch; M9
+      scorer (main-side re-run exit 0 + tool_log shows the test run
+      with exit 0 + the spec's 3 functions exist in the workdir); M10
+      scorer (report JSON parseable + 10/10 files covered + main
+      re-runs 2/10 files, verdicts agree); the scenarios run in both
+      `tool_execution` modes (host + engine), mode recorded in the
+      row; box-state snapshot + rotation per S5.2 (S5.2, S5.3).
+- [ ] 4.10 Live full M1–M10 run on this box; commit `bench-results/`;
+      every row carries the box-state snapshot; M8 verdict recorded
+      (S5.9 #1); M9/M10 verdicts + the host-vs-engine comparison
+      recorded (S5.9 #5). [was 4.9]
+- [ ] 4.11 Re-bench policy wired (S5.5): quick bench (M1+M2+M7,
+      `--quick`) on every engine-pin bump / model re-download / weekly
+      optional cron; > 10 % t/s or auto-rubric regression blocks the
+      pin-bump PR; full bench (now M1–M10, S5.5) on revision/quant
+      change or S4.2 row flip. [was 4.10]
 
 ### Phase 5 — Harness skill, the doctrine (SPEC S4)
 
-Exit: S4.7 acceptance (all three). Skill is installed for Hermes/pi as
+Exit: S4.7 acceptance (all four). Skill is installed for Hermes/pi as
 `bonsai2-harness` (S4.1).
 
 - [ ] 5.1 `SKILL.md` skeleton: frontmatter, when-to-use, command
-      reference = exactly S3.2 (the skill never invents commands) (S4.1).
+      reference = exactly S3.2 (the skill never invents commands) (S4.1),
+      + the S4.1 prompt templates (one proven template per S4.2
+      tool-loop row: workdir contract, definition of done = test
+      command + expected exit code, final-answer contract).
 - [ ] 5.2 Work-allocation table (S4.2): every row carries a `[M#]`
-      citation from the Phase 4 run; self-report rule (verification cost
-      is part of task cost).
-- [ ] 5.3 Session economy (S4.3) + cost doctrine (S4.4) with the
-      re-benched t/s constants from Phase 4 replacing the a-priori 29/4800
-      floors; win rule + two-consecutive-loss flip.
+      citation from the Phase 4 run; self-report rule — amended
+      "unverified claim WITH EVIDENCE" (`--tools on` results carry the
+      tool_log ledger, S3.1; ledger-first verification: claimed suite
+      ran with exit 0, claimed files exist in the workdir, then
+      main re-runs the named check); the S4.2 tool-loop rows (spec-chunk
+      [M9], test-batch [M10], browser-via-python-tool) included.
+- [ ] 5.3 Session economy (S4.3, incl. the amended steer guidance:
+      `--tools on` steer injected at the next step boundary; `--tools
+      off` steer advisory for the next attempt) + cost doctrine (S4.4)
+      with the re-benched t/s constants from Phase 4 replacing the
+      a-priori 29/4800 floors (UNCALIBRATED until then, 20% dispatch
+      margin) + the `--tools on` dispatch-cost term (steps_est ×
+      tool duration + prefill of tool results); win rule +
+      two-consecutive-loss flip.
 - [ ] 5.4 Failure doctrine (S4.5): one paragraph per S3.2 exit code.
 - [ ] 5.5 Doctrine audit script: `bench.yaml` scenario rows ↔ S4.2
       citations + win/lose recompute → `doctrine-audit.json`; failing
@@ -605,7 +667,11 @@ Exit: S4.7 acceptance (all three). Skill is installed for Hermes/pi as
       all results verified per S4.2 (S4.6, S5.6).
 - [ ] 5.7 S4.7 acceptance: audit passes (citations exist, win/lose
       recomputed or table updated in same PR); fresh-session workload
-      complete; two synthetic loss scenarios → audit flags the stale row.
+      complete; two synthetic loss scenarios → audit flags the stale
+      row; tool-loop doctrine — the S4.2 tool-loop rows (M9/M10-cited)
+      complete the standard workload set with `--tools on` in a fresh
+      session, every result ledger-verified per the amended S4.2
+      self-report rule; command set still S3.2-only (S4.7 #4).
 
 ### Phase 6 — GB10 packaging: one-command install (SPEC S6)
 
@@ -622,7 +688,12 @@ the pieces are already testable by hand — `install.sh` is the deliverable.
       (`available_gpu_mem` + pool, read-only; fallbacks: live cgroup,
       then 76.4 default + `WARN_MAIN_STACK_DEAD`) → compute N via S1.4
       (with S2.4 PTQ1_0/ctx-halve fallbacks) → write the four YAMLs
-      (S1.6/S2.6/S3.6/S5.7) → install units → start manager → health
+      (S1.6/S2.6/S3.6/S5.7 — the four carry the S3.6 tool-loop keys:
+      `tool_execution`, `tool_python_bin`, `tool_timeout_s`,
+      `tool_output_max_kb`, `task_max_steps`, `tool_invalid_max`,
+      `workspace_dir`, and the S1.6 `tools:` block; install deploys
+      `bin/bonsai2_tools.py` to `/opt/bonsai2/bin/` and creates
+      `/run/bonsai2/workspaces/`) → install units → start manager → health
       checks (180 s budget, main-only/partial variants) → stack-ready
       report (JSON + human table). Exit codes: 0 full or main-only, 4
       live-margin OOM, 3 arch mismatch, 2 config.
@@ -659,7 +730,7 @@ SPEC.md `status` → `active`.
       criterion (Global testing discipline).
 - [ ] 7.2 Global acceptance #1–#4: cold boot ≤ 180 s; fresh session
       completes the standard workload set with S3.2-only commands, all
-      results S4.2-verified; full M1–M8 committed with every S4.2 row
+      results S4.2-verified; full M1–M10 committed with every S4.2 row
       citing a bench row and M8 ≤ 5 %; one-command install S6.8 ×4.
 - [ ] 7.3 Global acceptance #5 — 72 h soak: all N instances up (restarts
       per instance ≤ 2), no main-stack t/s regression beyond the 5 %
@@ -697,7 +768,108 @@ SPEC.md `status` → `active`.
 - blockers/intricacies: (what bit, spec refs, what the next agent should
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
---->
+-->
+
+### 2026-09-25 — SPEC amendment: subagent capability layer (tool loop) back-integrated into SPEC.md + MAP 3.13–3.15 / 4.9 (docs-only PR, no code yet)
+- agent/model: Hermes qwen3.8-27b (session `spec-ammendments-expanding-subagent-capabilities` branch)
+- phase(s): P3 (3.13–3.15 NEW), P4 (4.9 NEW, 4.10/4.11 renumbered), P5/P6/P7 (annotations), S0/S1/S3/S4/S5/S6 (SPEC)
+- items checked: none (docs-only; the capability layer is specced, not yet implemented)
+- machine state: no bonsai2 units installed on this box yet (Phase 6);
+  branch `spec-ammendments-expanding-subagent-capabilities` off main
+  @ 34112bc (post PR #16). This session back-integrated the agreed
+  subagent capability layer (tool loop) from
+  `docs/spec-amendments-subagent-capabilities.md` (the decision doc,
+  user-agreed 2026-09-25; its source analysis:
+  `docs/state-of-implementation-report.md`) into SPEC.md — the
+  amendments A1–A15 of that doc, applied at the SPEC sites:
+  * S0: capability-boundary paragraph (bounded agentic loop, 4-tool
+    host-side set, self-report WITH EVIDENCE / tool_log) + non-goal 7
+    (no dedicated browser tool; camoufox via python/bash against the
+    host venv).
+  * S1.3: `--tools {toolset}` engine-side mode note (7-tool built-in
+    set at pin 9a9394a8; host-side path needs no flag).
+  * S1.5: 3 new task-level error rows (ERR_TOOL_INVALID_CALL /
+    ERR_TOOL_TIMEOUT → collect 21; loop max-steps → ERR_DEADLINE 22).
+    The closed-set exit codes {0,2,3,4,5,8,20,21,22,80,82,84} are
+    UNCHANGED.
+  * S1.6: `tools:` block (enabled: false + the 7-tool set) + manager
+    validation (ERR_CONFIG on unknown tool name, same discipline as
+    kv_cache).
+  * S2.2: note — install.sh appends `--tools {set}` to the unit's
+    docker run when tools.enabled; engine-side execution counts
+    against the instance `--memory` cap.
+  * S3.1: result-file shape locked ({answer, reasoning, usage,
+    tool_log, steps, workdir}; tool_log entry schema; ledger survives
+    failure).
+  * S3.2: spawn gains `--max-steps` / `--workdir`; `--tools` defaults
+    ON; `--tools off` byte-identical to the pre-loop path; collect
+    payload gains tool_log/steps/workdir; `--ctx` + `--tools on` note
+    (pre-submission gate on requested ctx only; loop growth bounded by
+    engine live ctx → 400 → ERR_CTX_TOO_LONG 21).
+  * S3.4: tool-loop section (loop semantics, slot model unchanged,
+    deadline bounds the whole loop, per-tool timeout, tool_invalid_max,
+    max-steps → timeout/ERR_DEADLINE, steer injected at the next step
+    boundary, cancel kills the step's subprocess then the worker,
+    reaper unchanged); host-side (default, bin/bonsai2_tools.py — the
+    ONLY toolset a subagent sees) vs engine-side (`tool_execution`
+    flag) dual mode; dedup key gains `--workdir`.
+  * S3.6: harness.yaml gains tool_execution / tool_python_bin /
+    tool_timeout_s / tool_output_max_kb / task_max_steps /
+    tool_invalid_max / workspace_dir.
+  * S4.1: prompt templates (one proven template per S4.2 tool-loop row:
+    workdir contract, definition of done, final-answer contract).
+  * S4.2: 3 new tool-loop rows ([M9] spec-chunk, [M10] test batch,
+    camoufox via python tool); self-report rule amended to "unverified
+    claim WITH EVIDENCE" (tool_log ledger, ledger-first verification).
+  * S4.3: steer guidance qualified per tools on/off (mid-loop vs
+    next-attempt).
+  * S4.4: t/s constants marked UNCALIBRATED until the S5 run (20%
+    dispatch margin meanwhile); `--tools on` dispatch-cost term
+    (steps_est × tool duration + prefill of tool results; v1 estimate
+    6 × (10 s + 0.3 s)).
+  * S4.7: acceptance #4 (tool-loop doctrine, ledger-verified, S3.2-only).
+  * S5.2: M9/M10 rows + the M1–M8 text-only baseline note; S5.3:
+    M9/M10 goldens in bench/goldens/; S5.5/S5.7: full bench = M1–M10,
+    quick unchanged M1+M2+M7 (M9/M10 full-bench-only in v1); S5.9:
+    acceptance #5 (M9/M10 pass + host-vs-engine comparison recorded).
+  * S6.3: install deploys bin/bonsai2_tools.py + creates
+    /run/bonsai2/workspaces/; the four YAMLs carry the new keys;
+    `--workdir`/`--max-steps` are task-time flags, not install-time
+    state. S6.6: no new deps for host-side execution (stdlib-only;
+    camoufox is the host's venv package).
+- MAP changes: Phase 3 NEW 3.13 (4-tool module + hermetic cases),
+  3.14 (taskworker loop + @gpu wire-protocol probe + dual-mode),
+  3.15 (workdir + spawn flags + config keys). Phase 4: NEW 4.9
+  (M9/M10 goldens + scorers, both tool_execution modes) — renumbered
+  from the amendment doc's "4.11" so the live full run (now 4.10,
+  M1–M10) comes AFTER the scenarios exist; old 4.10 → 4.11. Phase 5:
+  5.1/5.2/5.3/5.7 annotated (prompt templates, amended self-report
+  rule + tool-loop rows, amended steer guidance + UNCALIBRATED
+  constants + dispatch-cost term, S4.7 #4). Phase 6: 6.2 annotated
+  (YAML keys + tools.py deploy + workspaces dir). Phase 7: 7.2 says
+  M1–M10. Out-of-scope list gains the browser-tool non-goal.
+- next: MAP 3.13 — the host-side 4-tool module `bin/bonsai2_tools.py`.
+  Ordering: 3.9–3.12 (closed-set + acceptance floor) are MERGED (PR
+  #16, 2026-09-25); the capability layer builds on it. `--tools off`
+  must stay byte-identical to the pre-loop path, so the existing
+  341-test hermetic suite stays green; new cases are additive.
+- blockers/intricacies: the @gpu wire-protocol probe (MAP 3.14: does
+  the Bonsai chat template at pin 9a9394a8 actually emit tool_calls
+  via the native OpenAI tools array, or does it need the text-JSON
+  convention?) is a SPEC-DELTA input, not an acceptance gate — record
+  it as a pin-reality delta per the spec-amendment rule. The 5 open
+  uncertainties from the decision doc (wire protocol, host-vs-engine
+  default, tool-definition prefill overhead, M9/M10 rubric
+  thresholds, `--tools on` ctx auto-raise) live in the implementing
+  PR's `## Uncertainties & decisions`, not in the spec.
+- spec deltas: SPEC.md amendments A1–A15 of
+  docs/spec-amendments-subagent-capabilities.md (see above); the S0
+  "Division of labor" self-report sentence moved into the new
+  capability-boundary paragraph (re-asserted, amended, in S4.2);
+  "stateful subagents" remains a locked non-goal but now scoped to
+  CROSS-task state (intra-task loop history is in-scope, S3.4);
+  frontmatter last_reviewed 2026-09-19 → 2026-09-25; S5.2 v1 scope
+  M1–M8 → M1–M10 (ripple: S5.5/S5.7/S5.9 #1, S6.5, global #3, TOC).
 
 ### 2026-09-25 — Phase 3: MAP 3.9–3.12 implemented + live-verified with documented env failures (branch `phase3-harness-39-42`, PR pending — this entry ships in the PR commit)
 
