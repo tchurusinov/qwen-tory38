@@ -697,7 +697,7 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 --->
 
-### 2026-09-25 — Phase 3: MAP 3.4–3.8 implemented (branch `phase3-harness-34-38`, pending G3 review)
+### 2026-09-25 — Phase 3: MAP 3.4–3.8 merged (branch `phase3-harness-34-38`, PR #15; G3 rounds 1–2 closed, G4 approval in comment 817)
 
 - agent/model: Hermes qwen3.8-27b (session: implementation carried over
   from the docs-doctor session, verified + finished here — the 3
@@ -705,9 +705,7 @@ SPEC.md `status` → `active`.
   failed on its first run, root-caused, and fixed)
 - phase(s): P3 (3.4/3.5/3.6/3.7/3.8)
 - items checked: 3.4, 3.5, 3.6, 3.7, 3.8 (claimed in the PR DOD;
-  pending G3+G4). The `[x]` flips above are the claim — they hold at
-  merge, per the PR #12 precedent (the flip landed there with the merge
-  commit; here the user directed the check in the PR session).
+  checked here — G3 closed rounds 1–2, G4 approval comment 817).
 - implemented: `reap_stale()` + manager-side `reap_tasks_once()` wired
   into the manager steady loop (3.4: dead-pid -> failed/ERR_ENGINE_DOWN,
   past-deadline+grace -> timeout/ERR_DEADLINE; `running_ts` stamped on
@@ -722,11 +720,40 @@ SPEC.md `status` → `active`.
   control/ queue with ack-`<id>.json` polling, 84 when health.json is
   absent (3.8); five thin deploy files `bin/bonsai2-{collect,steer,
   cancel,unload,reload}`.
-- verification: `tests/test_harness_34_38.py` 35/35 OK (32 from the
-  prior session + 3 end-to-end: dedup no-op with a real spawn,
-  different-priority = new key, live SIGTERM cancel); full hermetic
-  suite 338 tests OK; `scripts/gate.sh` PASS (ruff format/check clean,
-  secret scan, yaml, bash -n; shellcheck soft-skip as baseline).
+- verification: `tests/test_harness_34_38.py` 38/38 OK at merge (35 at
+  branch start + 3 regression cases from the G3 r1 fixes); full
+  hermetic suite 341 tests OK; `scripts/gate.sh` PASS on the merge head
+  and on main after the merge (ruff format/check clean, secret scan,
+  yaml, bash -n; shellcheck soft-skip as baseline).
+- G3 review loop (branch `phase3-harness-34-38`, PR #15):
+  * **Round 1** (raw = comment 809; 1 P0, 3 P1, 4 P2): P0 collect
+    reaps before read (581d9cf); P1-1 --out validation moved out of
+    the per-key dedup lock; P1-2/P1-3 steer semantics — terminal steer
+    -> exit 2 ERR_TASK_TERMINAL, dedup-race loser marked
+    failed/ERR_DUPLICATE (7a199ee); P2-2 steer --wait vanished-record
+    -> exit 2; P2-4 post-grace SIGKILL unconditional to the whole
+    process group. P2-1 (dedup entry vs slot grant) + P2-3 (O(N_tasks)
+    I/O under the spawn queue-wait poll) deferred as notes.
+    Disposition = comment 812.
+  * **Round 2** (raw = comment 814; 3 P0, 5 P1, 4 P2): P0-2
+    `reap_tasks_once` dead `health_dir` parameter — FIXED (1f8911a,
+    parameter dropped; the results dir is the harness convention, not
+    derivable from the health dir). P0-1 (cross-lock deadlock) WAIVED
+    false positive — verified lock graph: task and slot-claim are
+    leaves, the only nesting is dedup->results, no cycle. P0-3
+    (post-lock dedup race) WAIVED — re-description of the r1 P1-3 race
+    that 7a199ee already closes. Disposition = comment 816.
+  * **P1/P2 backlog from round 2** (5 P1 / 4 P2, comment 814) not
+    dispositioned before the merge — the G4 approval (comment 817)
+    scoped the merge to the P0s; the backlog is input to the post-MVP
+    CI/CD proposal (see the AGENTS.md POST-IMPLEMENTATION section),
+    not a blocker for 3.9+.
+- G4: user approval in comment 817 ("otherwise approved, feel free to
+  merge"; resolve the PR #14 docs-doctor base drift first — done via
+  rebase onto a0164ce, clean, no conflicts; re-verified suite + gate on
+  the rebased head). Merged via the Gitea API at commit **db-c8737**
+  (2026-09-25T08:02:52Z); branch deleted remote + local; gate PASS on
+  merged main. G4 record = comment 818.
 - test root cause (worth knowing): the live-SIGTERM cancel test asserted
   `os.kill(pid, 0)` fails after cancel — but in a hermetic run the test
   process IS the worker's parent (in production the spawn CLI exits and
@@ -739,10 +766,10 @@ SPEC.md `status` → `active`.
   uncommitted work now committed in this PR; no env vars. The mock
   model-download test logs 11 backoff lines but passes (the download
   test fixture tolerates connection resets — pre-existing).
-- next: G3 — `scripts/review.sh phase3-harness-34-38 main`, post the raw
-  output (G3b-post), reconcile (G3c), disposition comment; then the G4
-  merge gate. After merge: MAP 3.9 (exit-code closed-set test), 3.10
-  (fixture hardening), 3.11 (table-driven suite), 3.12 (S3.8 acceptance).
+- next: MAP 3.9 (exit-code closed-set test), 3.10 (fixture hardening),
+  3.11 (table-driven suite), 3.12 (S3.8 acceptance). The round-2 P1/P2
+  backlog (comment 814: 5 P1 / 4 P2) feeds the post-MVP CI/CD proposal
+  per the AGENTS.md POST-IMPLEMENTATION section.
 - blockers/intricacies: none at the code level. One semantics fork to
   read in the PR's `## Uncertainties & decisions`: **steer is advisory in
   v1** — the v1 engine is a stateless fire-and-collect stream, so
