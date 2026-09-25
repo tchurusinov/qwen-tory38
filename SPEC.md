@@ -810,7 +810,8 @@ bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
                (default task_max_steps, range 1-128); --workdir DIR
                confines the toolset to that directory (must exist,
                writable; when omitted the harness creates
-               <workspace_dir>/<task_id> under /run/bonsai2/workspaces/,
+               <workspace_dir>/<task_id> — the directory is S3.6's
+               `workspace_dir` key, default `/run/bonsai2/workspaces/` —
                rotated with the 7-day results window, S3.1).
 bonsai2-steer  <TASK_ID> -m MESSAGE [--wait SECS]  # steer-and-wait: block up to SECS for state change
 bonsai2-cancel <TASK_ID> [--graceful]              # SIGTERM then SIGKILL after 5 s
