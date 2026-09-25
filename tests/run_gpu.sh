@@ -7,6 +7,10 @@
 # run is auditable: log at <repo>/test-logs/gpu-<ts>.log.
 #
 # Usage: tests/run_gpu.sh [extra args passed to unittest]
+#   * no args -> `python3 -m unittest discover -s tests/gpu -v` (the whole
+#     @gpu suite);
+#   * args   -> `python3 -m unittest <args>` (target a module/case, e.g.
+#     `tests/run_gpu.sh tests.gpu.test_tools_probe`).
 # Convention: never run @gpu tests in parallel with a live review or
 # subagent session (one-box constraint, AGENTS.md).
 
@@ -39,7 +43,15 @@ LOG="$LOGDIR/gpu-$TS.log"
 # `set +e`/`set -e` toggle around this block was a no-op — `set -e`
 # was never globally enabled — and made the intent look load-bearing;
 # dropped it and documented the intent instead).
-python3 -m unittest discover -s tests/gpu -v 2>&1 | tee -a "$LOG"
+# The documented "extra args passed to unittest" contract: no args ->
+# the whole @gpu suite (discover); args -> a targeted unittest invocation
+# (e.g. `tests/run_gpu.sh tests.gpu.test_tools_probe`).
+if [ "$#" -gt 0 ]; then
+  UNITTEST_CMD=(python3 -m unittest -v "$@")
+else
+  UNITTEST_CMD=(python3 -m unittest discover -s tests/gpu -v)
+fi
+"${UNITTEST_CMD[@]}" 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
 # "NO TESTS RAN" (exit 5) is the documented Phase-0 state (tests/gpu/ is
 # empty until MAP 1.7 adds the first @gpu test) — not a failure.
