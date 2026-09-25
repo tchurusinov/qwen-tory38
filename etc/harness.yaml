@@ -13,5 +13,13 @@ queue_wait_max_s: 60
 instance_healthy_timeout_s: 30
 task_default_deadline_s: 600
 main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
+# --- subagent capability layer (S3.4 tool loop, the 2026-09-25 amendment) ---
+tool_execution: host           # host | engine (dual-mode, both tested; S3.4)
+tool_python_bin: /usr/bin/python3   # interpreter for the python tool (host venv for camoufox: ~/prod/.venv/bin/python)
+tool_timeout_s: 60             # per-tool subprocess timeout
+tool_output_max_kb: 32         # tool output truncation in tool_log
+task_max_steps: 32             # default --max-steps (range 1-128)
+tool_invalid_max: 3            # consecutive malformed tool calls -> ERR_TOOL_INVALID_CALL
+workspace_dir: /run/bonsai2/workspaces   # per-task scratch workdirs (7-day rotation)
 # boot_target_s lives in serving.yaml (S2.6), not here: it is a
 # boot-lifecycle measurement owned by install/manager

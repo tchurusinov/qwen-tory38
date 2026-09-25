@@ -160,6 +160,10 @@ class SpawnBase(unittest.TestCase):
             "results_dir": str(self.results),
             "dedup_dir": str(self.health_dir / "dedup"),
             "queue_wait_max_s": 2,
+            # MAP 3.15: per-task workdirs live under the rig's temp tree
+            # (the S3.6 default /run/bonsai2/workspaces/ is root-owned on
+            # this box — spawn's auto-workdir creation must not hit it).
+            "workspace_dir": str(self.tmp / "workspaces"),
         }
         data.update(overrides)
         self.cfg.write_text("\n".join(f"{k}: {v}" for k, v in data.items()) + "\n")
@@ -783,9 +787,19 @@ class TestSpawnQueuePromotion(SpawnBase):
             # prompt hash, and two SAME-key spawns correctly no-op the
             # second (that is S3.5, tested separately) — this test is the
             # claim-lock race, so each spawn must be its own task.
+            # `--tools off` pins this test to the pre-loop single-completion
+            # path it was written to verify (the P0 #1 claim-lock race,
+            # G3 PR#12 r1) — not the S3.4 tool loop's extra per-step record
+            # writes, which would race the detached "slow" worker against
+            # tearDown's rmtree of the rig (the tool loop is covered by the
+            # dedicated 3.14 cases, MAP 3.13/3.14).
             ident = threading.get_ident()
             with redirect_stdout(routed_out), redirect_stderr(routed_err):
-                code = H.cmd_spawn(["-i", f"race task {ident}"], self.env, poll_s=0.05)
+                code = H.cmd_spawn(
+                    ["-i", f"race task {ident}", "--tools", "off"],
+                    self.env,
+                    poll_s=0.05,
+                )
             raw = getattr(tls, "out", io.StringIO()).getvalue()
             tls.out = None
             try:

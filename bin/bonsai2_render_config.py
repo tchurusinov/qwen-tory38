@@ -97,6 +97,22 @@ COUNT_MAX = 8  # S1.4 clamp
 KV_CACHE_TYPES = frozenset(
     {"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}
 )
+# S1.6 (the 2026-09-25 amendment, A8): the fork's built-in server toolset
+# at pin 9a9394a8 (tools/server/server-tools.cpp structs at the pin):
+# read_file, write_file, edit_file, exec_shell_command, file_glob_search,
+# grep_search, get_info. `tools.set` in subagent-engine.yaml must be a
+# subset of this set (the S1.6 manager-validation convention).
+FORK_TOOL_NAMES = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "exec_shell_command",
+        "file_glob_search",
+        "grep_search",
+        "get_info",
+    }
+)
 
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -384,6 +400,40 @@ def validate_engine_config(data) -> tuple[list[str], list[str]]:
             f"{ERR_CONFIG}: kv_cache: {kvc!r} not a supported --cache-type-k/v "
             f"value ({', '.join(sorted(KV_CACHE_TYPES))})"
         )
+    # --- tools (S1.6, the 2026-09-25 amendment A8): the engine-side tool
+    # mode block. Absent = host-side default (valid). Present: `enabled`
+    # must be a bool, `set` a list of names from the fork's built-in
+    # 7-tool set at pin 9a9394a8; `enabled: true` with an unknown tool
+    # name = ERR_CONFIG at config load (the S1.6 convention — the
+    # footprint must never silently gate on a set the config didn't ask
+    # for, same discipline as kv_cache, S1.6 delta 2026-09-23). ---
+    tools = data.get("tools")
+    if tools is not None:
+        if not isinstance(tools, dict):
+            errors.append(f"{ERR_CONFIG}: tools: not a mapping")
+        else:
+            enabled = tools.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                errors.append(f"{ERR_CONFIG}: tools.enabled: not a bool: {enabled!r}")
+            tool_set = tools.get("set")
+            if tool_set is not None:
+                if not (
+                    isinstance(tool_set, list)
+                    and all(isinstance(t, str) and t for t in tool_set)
+                ):
+                    errors.append(
+                        f"{ERR_CONFIG}: tools.set: not a list of tool names: {tool_set!r}"
+                    )
+                else:
+                    unknown = [t for t in tool_set if t not in FORK_TOOL_NAMES]
+                    if unknown:
+                        enabled_true = enabled in (True, None)
+                        where = "tools.set (enabled)" if enabled_true else "tools.set"
+                        errors.append(
+                            f"{ERR_CONFIG}: {where}: unknown tool name(s) "
+                            f"{unknown} at pin 9a9394a8 "
+                            f"(allowed: {', '.join(sorted(FORK_TOOL_NAMES))})"
+                        )
     return errors, warnings
 
 

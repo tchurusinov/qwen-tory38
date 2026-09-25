@@ -200,6 +200,15 @@ CONFIG_DEFAULTS: dict = {
     "instance_healthy_timeout_s": 30,
     "task_default_deadline_s": 600,
     "main_tps_guardrail_pct": 5,
+    # --- subagent capability layer (S3.4 tool loop; the 2026-09-25
+    # spec amendment's S3.6 block, MAP 3.15) ---
+    "tool_execution": "host",  # host | engine (S3.4 dual-mode)
+    "tool_python_bin": "/usr/bin/python3",  # the python tool's interpreter
+    "tool_timeout_s": 60,  # per-tool subprocess timeout
+    "tool_output_max_kb": 32,  # tool output truncation (S3.1/S3.4)
+    "task_max_steps": 32,  # default --max-steps (range 1-128)
+    "tool_invalid_max": 3,  # consecutive bad calls -> ERR_TOOL_INVALID_CALL
+    "workspace_dir": "/run/bonsai2/workspaces",  # per-task scratch workdirs
 }
 _INT_KEYS = (
     "dedup_ttl_h",
@@ -207,6 +216,10 @@ _INT_KEYS = (
     "instance_healthy_timeout_s",
     "task_default_deadline_s",
     "main_tps_guardrail_pct",
+    "tool_timeout_s",
+    "tool_output_max_kb",
+    "task_max_steps",
+    "tool_invalid_max",
 )
 
 # S3.4 priority ranks (lower = earlier; S3.3 "high jumps the queue").
@@ -267,8 +280,12 @@ def emit(payload: dict, code: int, detail: str | None = None) -> int:
 
 def spawn_json(rec: dict, detail: str | None = None) -> dict:
     """The S3.1 spawn/steer/cancel/collect JSON object (field order as in
-    the SPEC example), from a task record (the record carries extras)."""
-    return {
+    the SPEC example), from a task record (the record carries extras).
+    `workdir` is the S3.2/S3.1 capability-layer field (the 2026-09-25
+    amendment): the resolved workdir the task runs in — present for
+    post-capability-layer records, absent for older ones (the S3.1
+    schema is open to new fields)."""
+    out = {
         "task_id": rec.get("task_id"),
         "state": rec.get("state"),
         "instance": rec.get("instance"),
@@ -277,6 +294,9 @@ def spawn_json(rec: dict, detail: str | None = None) -> dict:
         "error": rec.get("error"),
         "detail": rec.get("detail", detail),
     }
+    if rec.get("workdir") is not None:
+        out["workdir"] = rec["workdir"]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -317,6 +337,8 @@ def load_config(env: dict | None = None) -> dict:
         "main_endpoint_healthy_probe",
         "results_dir",
         "dedup_dir",
+        "tool_python_bin",
+        "workspace_dir",
     ):
         if key in data:
             val = data[key]
@@ -325,6 +347,16 @@ def load_config(env: dict | None = None) -> dict:
                     f"ERR_CONFIG: harness.yaml: {key} must be a non-empty string"
                 )
             cfg[key] = val
+    # S3.4 dual-mode flag: a string with a LOCKED value set (same
+    # discipline as the manager's kv_cache, S1.6 delta 2026-09-23).
+    if "tool_execution" in data:
+        val = data["tool_execution"]
+        if not isinstance(val, str) or val not in ("host", "engine"):
+            raise ConfigError(
+                f"ERR_CONFIG: harness.yaml: tool_execution must be host|engine "
+                f"(got {val!r})"
+            )
+        cfg["tool_execution"] = val
     for key in _INT_KEYS:
         if key in data:
             val = data[key]
@@ -422,6 +454,48 @@ def results_dirs(cfg: dict) -> dict:
 def ensure_results_dirs(d: dict) -> None:
     for p in (d["base"], d["tasks"], d["locks"]):
         p.mkdir(parents=True, exist_ok=True)
+
+
+# S3.2/S3.6 (the 2026-09-25 spec amendment): per-task scratch workdirs are
+# "rotated with the 7-day results window". Rotation = prune
+# <workspace_dir>/<task_id> subdirs whose mtime is older than 7 days.
+# Best-effort (a failed prune never blocks a spawn; the dir is scratch).
+WORKSPACE_ROTATION_AGE_S = 7 * 24 * 3600
+
+
+def rotate_workspaces(
+    workspace_dir, env: dict | None = None, now: float | None = None
+) -> int:
+    """Prune per-task workdirs older than the 7-day window. Returns the
+    number of subdirs removed. A missing/empty dir is a no-op (0). Only
+    DIRECTORY children are candidates (stray files are left alone); a
+    subdir whose most-recent file mtime is within the window is kept.
+    Best-effort: an OSError on any candidate is skipped (never raised)."""
+    root = Path(workspace_dir)
+    if not root.is_dir():
+        return 0
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        if not child.is_dir():
+            continue
+        try:
+            age = now - child.stat().st_mtime
+        except OSError:
+            continue
+        if age > WORKSPACE_ROTATION_AGE_S:
+            import shutil
+
+            try:
+                shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 def task_path(d: dict, task_id: str) -> Path:
@@ -1005,11 +1079,25 @@ def dedup_record(cfg: dict, dedup_key: str, task_id: str) -> None:
 # S3.2 task-result read (collect's answer/reasoning/usage)
 # --------------------------------------------------------------------------
 def read_result(rec: dict) -> dict:
-    """The S3.2 collect payload fields `answer` / `reasoning` / `usage`,
-    from the task's result file (the worker's S3.2 write). Absent/invalid
-    file -> all three null (a failed/timeout task may not have written it;
-    collect still returns the task's terminal state + code)."""
-    out = {"answer": None, "reasoning": None, "usage": None}
+    """The S3.2 collect payload fields `answer` / `reasoning` / `usage` +
+    the S3.1 capability-layer fields `tool_log` / `steps` / `workdir`
+    (the 2026-09-25 amendment's result-file shape: the taskworker writes
+    {answer, reasoning, usage, tool_log, steps, workdir}). Absent/invalid
+    file -> the answer/reasoning/usage are null AND tool_log/steps are
+    the S3.2 no-file defaults (`tool_log is [] for --tools off tasks`,
+    `steps` null when the file is absent) — a failed/timeout task may not
+    have written it; collect still returns the task's terminal state +
+    code. `workdir` comes from the RECORD (the S3.1 'main's verification
+    entry point') when the record carries it; the result file echoes it
+    for post-capability-layer records."""
+    out = {
+        "answer": None,
+        "reasoning": None,
+        "usage": None,
+        "tool_log": [],
+        "steps": None,
+        "workdir": rec.get("workdir"),
+    }
     rf = rec.get("result_file")
     if not isinstance(rf, str) or not rf:
         return out
@@ -1018,7 +1106,7 @@ def read_result(rec: dict) -> dict:
     except (OSError, json.JSONDecodeError):
         return out
     if isinstance(data, dict):
-        for k in ("answer", "reasoning", "usage"):
+        for k in ("answer", "reasoning", "usage", "tool_log", "steps", "workdir"):
             if k in data:
                 out[k] = data[k]
     return out
@@ -1179,14 +1267,22 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
     emit it). Returns the parsed dict, or the detail string on failure.
 
     [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off] [--ctx N]
-    [--deadline SECS] [--out FILE] [--priority low|normal|high]
-    """
+    [--deadline SECS] [--max-steps N] [--workdir DIR]
+    [--out FILE] [--priority low|normal|high]
+
+    `--tools` defaults ON (the S3.4 agentic loop; the 2026-09-25 spec
+    amendment). `--max-steps` defaults to the S3.6 `task_max_steps`
+    (range 1-128, enforced here). `--workdir` must exist + be writable
+    (validated at spawn; when omitted the harness creates
+    <workspace_dir>/<task_id> at claim time, S3.2/S3.6)."""
     args = {
         "prompt": None,
         "prompt_inline": False,
-        "tools": "off",
+        "tools": "on",
         "ctx": None,
         "deadline": None,
+        "max_steps": None,
+        "workdir": None,
         "out": None,
         "priority": "normal",
     }
@@ -1242,6 +1338,21 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
             if i + 1 >= len(argv):
                 return "ERR_ARGS: --out needs a FILE"
             args["out"] = Path(argv[i + 1])
+            i += 2
+            continue
+        if a == "--max-steps":
+            if i + 1 >= len(argv) or not argv[i + 1].isdigit() or int(argv[i + 1]) <= 0:
+                return "ERR_ARGS: --max-steps must be a positive integer"
+            v = int(argv[i + 1])
+            if not (1 <= v <= 128):
+                return "ERR_ARGS: --max-steps must be in 1-128 (S3.4)"
+            args["max_steps"] = v
+            i += 2
+            continue
+        if a == "--workdir":
+            if i + 1 >= len(argv):
+                return "ERR_ARGS: --workdir needs a DIR"
+            args["workdir"] = Path(argv[i + 1]).expanduser()
             i += 2
             continue
         if a == "--priority":
@@ -1333,6 +1444,12 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             "tools": parsed["tools"],
             "ctx": parsed["ctx"],
             "priority": parsed["priority"],
+            # S3.4 (the 2026-09-25 spec amendment, A4): --workdir is part of
+            # "everything that determines what the task will do" — same
+            # prompt in two workdirs is two different tasks.
+            "workdir": str(parsed["workdir"])
+            if parsed["workdir"] is not None
+            else None,
         },
         sort_keys=True,
     )
@@ -1410,6 +1527,31 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 f"--out {op}: {exc}",
             )
         out_path = op
+    # S3.2 (the 2026-09-25 spec amendment, A4): --workdir must exist and
+    # be writable at SPAWN time (the tool loop's confinement root; an
+    # impossible dir is a spawn-time rejection, exit 2 — same discipline
+    # as the --out parent above). When omitted, the harness creates
+    # <workspace_dir>/<task_id> at record-creation time (S3.6
+    # workspace_dir, default /run/bonsai2/workspaces/).
+    workdir_explicit: Path | None = None
+    if parsed["workdir"] is not None:
+        wd = parsed["workdir"].expanduser().resolve()
+        if not wd.is_dir():
+            return emit(
+                {
+                    "error": "ERR_ARGS",
+                    "detail": f"--workdir {wd}: not a directory (must exist, S3.2)",
+                },
+                EXIT_ARGS,
+                f"--workdir {wd}: not a directory",
+            )
+        if not os.access(wd, os.W_OK):
+            return emit(
+                {"error": "ERR_ARGS", "detail": f"--workdir {wd}: not writable"},
+                EXIT_ARGS,
+                f"--workdir {wd}: not writable",
+            )
+        workdir_explicit = wd
     # S3.4 / MAP 3.5: claim a task id + record + dedup entry under the
     # per-key lock so two concurrent same-key spawns cannot both create a
     # record (the one that loses the lock writes its record, then re-reads
@@ -1436,6 +1578,46 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 if parsed["deadline"] is not None
                 else float(cfg["task_default_deadline_s"])
             )
+            # S3.2/S3.6 (the 2026-09-25 spec amendment): the task's
+            # workdir. Explicit --workdir is validated above; when
+            # omitted the harness creates <workspace_dir>/<task_id>
+            # NOW, under the per-key dedup lock (a concurrent same-key
+            # spawn no-ops to this task and shares the dir — the key
+            # already includes the workdir term, so two distinct
+            # workdirs can never dedup onto each other).
+            if workdir_explicit is not None:
+                workdir = str(workdir_explicit)
+            else:
+                auto_wd = Path(cfg["workspace_dir"]) / task_id
+                try:
+                    auto_wd.parent.mkdir(parents=True, exist_ok=True)
+                    auto_wd.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    # emit inside the lock is fine (the with-block releases
+                    # it on return): no record exists yet, so the key is
+                    # free for the caller's corrected spawn.
+                    return emit(
+                        {
+                            "error": "ERR_ARGS",
+                            "detail": f"cannot create workdir {auto_wd}: {exc}",
+                        },
+                        EXIT_ARGS,
+                        f"workdir creation failed: {exc}",
+                    )
+                workdir = str(auto_wd)
+                # S3.2: rotate the per-task workdirs with the 7-day window
+                # (best-effort; never blocks the spawn).
+                try:
+                    rotate_workspaces(cfg["workspace_dir"])
+                except Exception:  # noqa: BLE001, S110 — rotation is best-effort
+                    pass
+            # S3.4 --max-steps: the flag value, else the S3.6
+            # task_max_steps default (range 1-128, enforced at parse).
+            max_steps = (
+                parsed["max_steps"]
+                if parsed["max_steps"] is not None
+                else int(cfg["task_max_steps"])
+            )
             now = time.time()
             rec = {
                 "task_id": task_id,
@@ -1451,6 +1633,8 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 "ctx_need": parsed["ctx"],
                 "priority": parsed["priority"],
                 "deadline_s": deadline_s,
+                "workdir": workdir,
+                "max_steps": max_steps,
                 "created_ts": now,
                 "worker_pid": None,
                 "instances_tried": [],

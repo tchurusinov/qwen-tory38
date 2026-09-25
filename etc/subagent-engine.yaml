@@ -57,3 +57,7 @@ sampling:                          # locked from model card (S1.6)
 reasoning_format: deepseek      # S1.3: content/reasoning split (the pin's value; was deepseek_r1 pre-2026-09-21, rejected at arg-parse at the pin)
 alias: qwen38-27b-subagent      # S1.3: all instances share the alias; harness routes by port
 api_key: bonsai2-local          # S1.3 --api-key (local-only, not a secret)
+tools:                          # S1.6 (the 2026-09-25 amendment, A8): engine-side tool mode
+  enabled: false            # S1.3 --tools flag on the instance's docker run (install.sh appends --tools {set} when true)
+  set: [read_file, write_file, edit_file, exec_shell_command,
+        file_glob_search, grep_search, get_info]   # the fork's built-in set at pin 9a9394a8
