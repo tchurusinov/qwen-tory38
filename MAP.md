@@ -772,6 +772,58 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-26 — MAP 3.13–3.15 implementation: subagent capability layer (host 4-tool module + taskworker tool loop + workdir/spawn flags + @gpu wire-protocol probe), PR #18 opened
+- agent/model: Hermes qwen3.8-27b
+- phase(s): P3 (3.13, 3.14, 3.15 implemented)
+- items checked: none yet — implementation complete on branch
+  `phase3-capability-layer-313-315`, G2 gate PASS, G3 review in flight
+  (PR #18 on Gitea). 3.13/3.14/3.15 remain unchecked in the Phase 3 list
+  until the review loop lands + G4 merge (this session opened the PR; do
+  NOT check the boxes here).
+- machine state: branch off main @ b6f0e99 (post PR #17). 4 commits:
+  c54aef6 (main implementation: bin/bonsai2_tools.py new 4-tool module;
+  bin/bonsai2-taskworker.py gains the step loop; bin/bonsai2_harness.py
+  config/spawn/dedup/collect/rotation; bin/bonsai2_render_config.py +
+  etc/harness.yaml + etc/subagent-engine.yaml validators; 3 new test
+  modules + fixtures/tool_engine.py mock), then 3 follow-ups: @gpu
+  wire-protocol probe test (tests/gpu/test_tools_probe.py), tests/run_gpu.sh
+  extra-args passthrough fix, and the probe argv-shape fix (the original
+  probe jammed `flag value` into one argv token → llama-server rejected
+  the args → rc 1 in 1s; now separate tokens + docker logs tail on early
+  death). Hermetic suite 366 → 413 tests (27 tool-module + 20
+  loop/flags), all OK. @gpu probe verdict: **native** tool_calls at pin
+  9a9394a8 (finish_reason=tool_calls, 4-tool schema, args as JSON string)
+  — the pin-reality delta the amendment asked to document; recorded in
+  test-logs/tools-probe-*.json (gitignored). No bonsai2 containers
+  running; main stack :30001 up. Gate baseline PASS (2026-09-20); this
+  session's gate PASS with ruff now hard (uvx ruff).
+- next: G3 review loop — the reviewer (pi on :30001, isolated, G3b)
+  output lands at /tmp/review-phase3-capability-layer-313-315.txt;
+  post raw output to PR #18 as the G3b-post comment, reconcile (G3c),
+  fix/waive per finding, re-run gate + review until clean; then G4 human
+  merge. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x] on
+  merge. The @gpu probe is re-runnable via
+  `tests/run_gpu.sh tests.gpu.test_tools_probe -v` (honest: it spins a
+  container on :30170 for ~3-5 min).
+- blockers/intricacies: (a) the @gpu probe originally failed for a
+  non-obvious argv-shape reason (flag+value as one token); captured in
+  the commit message + the probe now logs `docker logs` tail on early
+  death so a future regression is self-diagnosing. (b) One hermetic
+  test (test_two_concurrent_spawns_do_not_double_claim) had a
+  teardown-race failure; pinned to --tools off (the pre-loop path it was
+  written to assert) with a comment — the tool-loop path's claim race is
+  covered by test_harness_tools_loop's concurrent-spawn case. (c) The
+  taskworker step-loop originally squashed a mid-step steer because the
+  step-end persist wrote the stale local record; fixed with a lock-safe
+  re-read-merge under the task lock, proven by test_harness_tools_loop's
+  steer-drain case. (d) A parallel session left an untracked
+  docs/testing-strategy-report.md in the working tree; excluded from the
+  commit (belongs to that session).
+- spec deltas: none in this session (the spec amendment landed in the
+  prior PR #17); the @gpu probe verdict (native tool_calls at the pin)
+  is a pin-reality delta to record in SPEC S1.3 at merge time — noted in
+  the PR body under Spec amendments.
+
 ### 2026-09-25 — SPEC amendment: subagent capability layer (tool loop) back-integrated into SPEC.md + MAP 3.13–3.15 / 4.9 (docs-only PR, no code yet)
 - agent/model: Hermes qwen3.8-27b (session `spec-ammendments-expanding-subagent-capabilities` branch)
 - phase(s): P3 (3.13–3.15 NEW), P4 (4.9 NEW, 4.10/4.11 renumbered), P5/P6/P7 (annotations), S0/S1/S3/S4/S5/S6 (SPEC)

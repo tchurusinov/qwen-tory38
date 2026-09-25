@@ -110,6 +110,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -488,8 +489,6 @@ def rotate_workspaces(
         except OSError:
             continue
         if age > WORKSPACE_ROTATION_AGE_S:
-            import shutil
-
             try:
                 shutil.rmtree(child, ignore_errors=True)
                 removed += 1

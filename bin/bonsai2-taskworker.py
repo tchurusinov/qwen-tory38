@@ -76,6 +76,7 @@ ERR_ENGINE_DOWN with the detail (the record is still collectable).
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import signal
@@ -111,6 +112,13 @@ _ENGINE_TOOL_NAMES = {
 ENGINE_TOOLS_TIMEOUT_S = 20.0  # the /tools POST's socket cap (the per-tool
 # process-group timeout is the HOST-side half; engine-side steps are
 # bounded by this + the task --deadline, S3.4)
+
+# Defensive cap for the step-loop deadline when the record somehow lacks
+# deadline_s (the harness always sets it at spawn from
+# task_default_deadline_s / --deadline, S3.4). Match the harness default
+# (task_default_deadline_s: 600) rather than an ad-hoc 3600 so a missing
+# deadline cannot silently widen the window 6x.
+DEFAULT_DEADLINE_S = 600.0
 
 # The text-JSON tool-call convention (the A2 probe fallback): a fenced
 # ```json ...``` block, or a bare object at the start of the content,
@@ -517,7 +525,14 @@ def _execute_tool_engine(
     elif name == "python":
         code = str(ep.pop("code", ""))
         pybin = ctx.get("python_bin") or "/usr/bin/python3"
-        ep["command"] = f"{pybin} -c {json.dumps(code)}"
+        # base64-encode the code so multi-line source survives the shell
+        # round-trip: the base64 alphabet is shell-safe (no quotes, no
+        # newlines, no metachars), so it needs no shell-escaping and the
+        # -c body stays a single physical line. (The host-side python tool
+        # passes code via stdin, which handles newlines natively; the
+        # engine-side path must go through the shell, hence the encode.)
+        b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
+        ep["command"] = f"{pybin} -c \"import base64;exec(base64.b64decode('{b64}'))\""
     ep.setdefault("cwd", ctx.get("workdir"))
     t0 = time.monotonic()
     body = json.dumps({"tool": engine_name, "params": ep}).encode()
@@ -717,7 +732,7 @@ def _run_tool_loop(
     rec.setdefault("instances_tried", [])
     deadline_s = rec.get("deadline_s")
     deadline_at = time.monotonic() + (
-        float(deadline_s) if deadline_s is not None else 3600.0
+        float(deadline_s) if deadline_s is not None else DEFAULT_DEADLINE_S
     )
     attempt_detail: list[str] = []
 
@@ -1124,9 +1139,9 @@ def _main() -> int:
     deadline_s = rec.get("deadline_s")
     # P2 #8 (G3 PR#12 r1): `0.0` is falsy — an explicit zero deadline must
     # mean "already expired" (timeout immediately), not "fall back to the
-    # 3600 s default". Use `is not None`, not truthiness.
+    # default". Use `is not None`, not truthiness.
     deadline_at = time.monotonic() + (
-        float(deadline_s) if deadline_s is not None else float(3600)
+        float(deadline_s) if deadline_s is not None else DEFAULT_DEADLINE_S
     )
     try:
         ident = H.load_engine_identity()

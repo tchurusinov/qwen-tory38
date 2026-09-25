@@ -997,9 +997,9 @@ class TestRound1P1P2Fixes(SpawnBase):
         self.assertEqual(doc["port"], p0)
 
     def test_zero_deadline_is_immediate_timeout(self):
-        """P2 #8: deadline_s == 0.0 is NOT the 3600 s default — a
-        zero-deadline task times out immediately (pre-fix: `0.0` is
-        falsy, so the worker silently used the 3600 s default)."""
+        """P2 #8: deadline_s == 0.0 is NOT the DEFAULT_DEADLINE_S default —
+        a zero-deadline task times out immediately (pre-fix: `0.0` is
+        falsy, so the worker silently used the 600 s default)."""
         W = _load_taskworker(name="bonsai2_taskworker_zero")
 
         p0 = free_port()
@@ -1032,7 +1032,7 @@ class TestRound1P1P2Fixes(SpawnBase):
         self.assertEqual(
             rec["state"],
             "timeout",
-            "deadline 0.0 = already expired -> timeout (not the 3600 s default)",
+            "deadline 0.0 = already expired -> timeout (not the 600 s default)",
         )
         self.assertEqual(rec["error"], "ERR_DEADLINE")
 
