@@ -144,6 +144,14 @@ class MockEngine:
                 if req.get("stream"):
                     if v == "slow":
                         time.sleep(0.45)
+                    if v == "hold":
+                        # S3.7 slot-contention / priority-promotion: a
+                        # multi-second hold BEFORE the response, so the
+                        # worker's attempt stays in flight and its slot
+                        # stays charged for as long as the test needs
+                        # (deterministic — no reliance on response
+                        # timing).
+                        time.sleep(3.0)
                     chunks = [
                         {"choices": [{"delta": {"reasoning_content": "ok "}}]},
                         {"choices": [{"delta": {"content": "done"}}]},

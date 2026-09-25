@@ -980,6 +980,29 @@ def systemctl_state(i: int, base: list[str] | None = None) -> dict:
     return state
 
 
+def systemctl_status_text(i: int, base: list[str] | None = None) -> str | None:
+    """The unit's `StatusText=` (`systemctl show -p StatusText`) — the
+    short, human-facing line the unit sets at failure (S1.5: the
+    instance's entrypoint sets it to the S1.4 error name, e.g.
+    `ERR_VRAM_OOM` / `ERR_HASH_MISMATCH` / `ERR_DOWNLOAD`). None when
+    the unit carries no status text yet (a unit that has never set
+    STATUS= — the port-conflict family, which the manager's bfailed
+    default leaves un-caused). Read-only; a missing/failed show call is
+    None, never an error (S1.5: the cause is advisory, a missing one
+    must not break the probe loop)."""
+    r = subprocess.run(
+        (base or systemctl_base()) + ["show", "-p", "StatusText", f"bonsai2-server@{i}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for line in r.stdout.splitlines():
+        if line.startswith("StatusText="):
+            v = line.partition("=")[2].strip()
+            return v or None
+    return None
+
+
 def systemctl_restart_instance(i: int, base: list[str] | None = None) -> int:
     """`systemctl restart bonsai2-server@i` (S2.2 five-fail restart,
     MAP 2.6; S2.5 drift in-place restart, MAP 2.8). `restart` (unlike
@@ -1359,7 +1382,17 @@ class Runtime:
     (MAP 2.10) and the S2.5 drift watch (MAP 2.8) both need per-index
     bookkeeping for the FULL configured set (a `bunloaded` index is
     one that was granted at boot but stopped by the user; the drift
-    watch must see it and not re-spawn it)."""
+    watch must see it and not re-spawn it).
+
+    `bfailed_reasons` (MAP 3.9 / S1.5): per-index the S1.5 CAUSE of a
+    `bfailed` state, when known at the moment the state is set — the
+    S1.4 engine-level names (`ERR_VRAM_OOM` / `ERR_HASH_MISMATCH` /
+    `ERR_DOWNLOAD`) are the ones that surface in health.json as
+    `bfailed_reason` and flip the harness's spawn-time exit from 3
+    (the port-conflict family, the boot-time bfailed default) to 4
+    (the S3.2 engine-level failure at submission). Boot-time bfailed
+    (systemctl start rc != 0) carries no cause yet — it is the 3-family
+    until the reload path records one."""
 
     def __init__(self, cfg: dict, spawned: list[int], boot_states: list[str]):
         count = int(cfg["count"])
@@ -1372,12 +1405,24 @@ class Runtime:
         self.cfg = cfg
         self.entries: list[_InstanceState] = entries
         self.spawned: list[int] = list(spawned)
+        # S1.5/S3.2 (MAP 3.9): per-index bfailed causes; an absent/None
+        # value means "no cause recorded" (the port-conflict family).
+        self.bfailed_reasons: dict[int, str | None] = {}
         # main_only_reason is only PRESENT when instances: 0 (S2.4);
         # the value ("user_unloaded" vs "budget_zero") is caller-set.
         self.main_only_reason: str | None = None
 
     def entry(self, i: int) -> _InstanceState | None:
         return self.entries[i] if 0 <= i < len(self.entries) else None
+
+    def set_bfailed_reason(self, i: int, reason: str) -> None:
+        """Record WHY an index is bfailed (S1.5 / S3.2, MAP 3.9). The
+        value is an S1.4 engine-level error name (ERR_VRAM_OOM /
+        ERR_HASH_MISMATCH / ERR_DOWNLOAD) or a free-form manager cause;
+        build_runtime_health surfaces it in health.json as
+        `bfailed_reason`, and the harness's spawn-time exit-4 gate
+        reads exactly that field."""
+        self.bfailed_reasons[i] = reason
 
     @property
     def running(self) -> list[int]:
@@ -1428,6 +1473,94 @@ def _instance_unit_path(i: int, sysctl_base: list[str]) -> Path:
             Path.home() / ".config" / "systemd" / "user" / f"bonsai2-server@{i}.service"
         )
     return Path("/etc/systemd/system") / f"bonsai2-server@{i}.service"
+
+
+ENGINE_BFAILED_CAUSES = (
+    "ERR_VRAM_OOM",
+    "ERR_HASH_MISMATCH",
+    "ERR_DOWNLOAD",
+)
+
+
+def bfailed_cause_from_status_text(status_text: str | None) -> str | None:
+    """The S1.4 engine-level cause encoded in a unit's `StatusText=`,
+    when the unit sets one. S1.5 names the three engine-level bfailed
+    causes (OOM/download/hash); the instance entrypoint's failure path
+    is where a unit SHOULD carry its named cause as its status text
+    (the unit template documents the contract, S2.2). Matching is
+    prefix-based against the S1.4 names (`ERR_HASH_MISMATCH` also
+    covers a `ERR_HASH_MISMATCH: <detail>` suffix); anything else (or
+    no status text at all) is NOT an engine-level cause — the
+    bfailed remains the port-conflict family (the harness's 3-case,
+    S4.5: wait one health cycle, re-spawn)."""
+    if not status_text:
+        return None
+    for name in ENGINE_BFAILED_CAUSES:
+        if status_text == name or status_text.startswith(name + ":") or status_text.startswith(name + " "):
+            return name
+    return None
+
+
+def record_bfailed_causes(
+    runtime: Runtime,
+    running: list[int],
+    *,
+    base: list[str] | None = None,
+    state=systemctl_state,
+    status_text=systemctl_status_text,
+    log=_log,
+) -> None:
+    """S1.5 / S3.2 (MAP 3.9): record WHY a bfailed index is bfailed.
+
+    One pass over the RUNNING set: for every entry in `bfailed` state
+    without a recorded cause, read the unit's `StatusText=` +
+    SubState/Result and record the cause when it is one of the S1.4
+    engine-level names (a unit that hit its StartLimitBurst — the
+    S1.5 bfailed outcome — and whose status text names the S1.4 cause:
+    OOM/download/hash). The value is stored on the runtime
+    (`set_bfailed_reason`) and surfaced in health.json as
+    `bfailed_reason` (build_runtime_health); the harness's spawn-time
+    exit-4 gate reads exactly that field, so this is the ONLY
+    producer of the S3.2 4-case at submission. A bfailed index whose
+    unit carries no status text (the port-conflict family, or a unit
+    whose cause the entrypoint did not surface) keeps no cause — it
+    stays the S3.2 3-case. Read-only + idempotent: once recorded, a
+    cause is sticky for the bfailed period (a fresh healthy probe /
+    reload clears the state; the next bfailed transition records
+    fresh)."""
+    base = base if base is not None else systemctl_base()
+    # Self-heal: a cause is only meaningful WHILE the index is bfailed.
+    # Prune recorded causes for any index that has since recovered
+    # (healthy/degraded/bunloaded) or is no longer in the running set,
+    # so a later fresh bfailed transition records a fresh cause instead
+    # of inheriting a stale one.
+    still_bfailed = {i for i in running if (runtime.entry(i) or None) and runtime.entry(i).state == "bfailed"}
+    for i in list(runtime.bfailed_reasons):
+        if i not in still_bfailed:
+            del runtime.bfailed_reasons[i]
+    for i in running:
+        e = runtime.entry(i)
+        if e is None or e.state != "bfailed":
+            continue
+        if i in runtime.bfailed_reasons:
+            continue
+        st = state(i, base)
+        if st.get("SubState") != "failed":
+            # not at the start-limit terminal state yet (a start that
+            # is still retrying under Restart=on-failure) — no cause
+            # to record until systemd itself gives up
+            continue
+        text = status_text(i, base)
+        cause = bfailed_cause_from_status_text(text)
+        if cause:
+            runtime.set_bfailed_reason(i, cause)
+            log(
+                f"S1.5 bfailed cause: i={i} StatusText={text!r} -> {cause} "
+                f"(surfaced in health.json as bfailed_reason; the harness's "
+                f"spawn-time exit-4 gate reads it, S3.2)"
+            )
+        else:
+            log(f"S1.5 bfailed cause: i={i} SubState=failed, no S1.4 status text — stays the 3-case (port-conflict family)")
 
 
 def _refresh_states(
@@ -1908,10 +2041,15 @@ def _port(cfg: dict, i: int) -> int:
 
 
 def _instance_entry(
-    cfg: dict, i: int, state: str, ctx: int | None = None, ctx_reduced: bool = False
+    cfg: dict,
+    i: int,
+    state: str,
+    ctx: int | None = None,
+    ctx_reduced: bool = False,
+    bfailed_reason: str | None = None,
 ) -> dict:
     slots = int(cfg["slots"])
-    return {
+    entry = {
         "i": i,
         "port": _port(cfg, i),
         "state": state,
@@ -1924,6 +2062,18 @@ def _instance_entry(
         "slots_in_use": 0,  # the harness owns live task slots (MAP P3)
         "slots_total": slots,
     }
+    # S1.5 / S3.2 (MAP 3.9): `bfailed_reason` — the CAUSE of a bfailed
+    # state, present ONLY when the manager recorded one (the S1.4
+    # engine-level names: ERR_VRAM_OOM / ERR_HASH_MISMATCH /
+    # ERR_DOWNLOAD). The harness's spawn-time exit-4 gate (S3.2:
+    # "4 = engine-level failure (OOM/download/hash)") reads it: a
+    # bfailed instance with an engine-level reason is the 4-case, one
+    # without is the 3-case (ERR_PORT_IN_USE family). S3.1 keeps the
+    # instance schema open to new fields (the main_only_reason note
+    # is the same pattern).
+    if state == "bfailed" and bfailed_reason:
+        entry["bfailed_reason"] = bfailed_reason
+    return entry
 
 
 def stack_summary(instance_states: list[str]) -> str:
@@ -1990,6 +2140,7 @@ def build_runtime_health(cfg: dict, runtime: Runtime, main_ok: bool) -> dict:
                 runtime.entries[i].state,
                 ctx=runtime.entries[i].ctx,
                 ctx_reduced=runtime.entries[i].ctx_reduced,
+                bfailed_reason=runtime.bfailed_reasons.get(i),
             )
             for i in running
         ],
@@ -2388,6 +2539,15 @@ def run_probe_loop(
         running_snapshot = list(runtime.running)
         _refresh_states(runtime, running_snapshot, log, probe_timeout_s=probe_timeout_s)
         check_escalation(runtime, now, base=base, log=log)
+        # S1.5 / S3.2 (MAP 3.9): record WHY a bfailed index is bfailed,
+        # so health.json can carry `bfailed_reason` and the harness's
+        # spawn-time exit-4 gate has its S1.4 cause to read. Read-only
+        # (systemctl show) + idempotent; a failure here never kills the
+        # steady loop.
+        try:
+            record_bfailed_causes(runtime, running_snapshot, base=base, log=log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"bfailed-cause pass error (cycle {cycle}): {exc!r}")
         control_dir = health_dir / "control"
         try:
             process_control(control_dir, runtime, now, base=base, log=log)

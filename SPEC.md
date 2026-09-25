@@ -568,11 +568,22 @@ the MAP 2.7 PTQ1_0 implementation, which is where the retry actually
 runs, and the S3.1 schema is open to new reason values) or
 `"user_unloaded"` (all instances explicitly unloaded via
 `bonsai2-unload`, S3.2 — a mode the user asked for, not a budget
-outcome). harness scripts operate with all subagent commands
-returning exit 80 (S3.4) with a JSON `{"reason": ...}` echoing the
-health.json reason. Install still succeeds (`install.sh` exits
-0, prints the mode). Rationale: the box is usable; the install is not
-a failure just because the main stack is fat that day.
+outcome). harness scripts operate with the subagent OFFLOAD command
+(`spawn`) returning exit 80 (S3.4) with a JSON `{"reason": ...}`
+echoing the health.json reason. Install still succeeds (`install.sh`
+exits 0, prints the mode). Rationale: the box is usable; the install
+is not a failure just because the main stack is fat that day.
+
+> Delta (2026-09-25, MAP 3.12): was "all subagent commands returning
+> exit 80 (S3.4)". The LOCKED S3.2 per-command exit table (below,
+> S3.2) lists 80 only under `spawn` and pins the reads
+> (`status`/`list-instances`/`health`) at 0 with `main_only_reason`
+> echoed in the document, while `collect`/`steer`/`cancel`/`unload`/
+> `reload` run on their own code sets — they operate on a task id or
+> the pool, not on the pool being off. The precise S3.2-table reading
+> is what the harness implements (the green status suite asserts it,
+> MAP 3.12 `TestMainOnly.test_status_reports_main_only_not_80`), and
+> this passage now says so instead of implying every command 80s.
 
 **Fallback boot path (locked — S1.4 cross-ref):** the PTQ1_0 retry can
 yield a *granted* fallback instance whose allocation tier still fails
@@ -911,9 +922,14 @@ main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
    status) covers every code; `bonsai2-bench` exercises the 0/2 subset
    per S5.4; no code outside the closed set ever emitted (the suite
    asserts the closed set; a stray exit 1 or any other code fails it).
-4. N=0 mode: every subagent command → exit 80 with the S2.4 JSON.
-5. Unload/reload: `unload --all` → exit 80 pool with the S2.4
-   `user_unloaded` JSON; `reload --all` → all N healthy; the mock pool
+4. N=0 mode: the offload command (`spawn`) -> exit 80 with the S2.4
+   JSON (reads — `status`/`list-instances`/`health` — exit 0 with
+   `main_only_reason` per the S3.2 per-command table; see the S2.4
+   delta note, MAP 3.12).
+5. Unload/reload: `unload --all` (exit 0, S3.2 table) -> the main-only
+   pool with the S2.4 `user_unloaded` reason; the offload command
+   (`spawn`) -> exit 80 with that reason; `reload --all` -> all N
+   healthy; the mock pool
    cases from S3.7 (no-op, partial, bad-args, dead-manager) all assert
    the exact JSON + code.
 
