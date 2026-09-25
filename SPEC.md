@@ -2,7 +2,7 @@
 title: qwen-tory38 — SPEC
 status: proposed
 supersedes: null
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-25
 method: spec-driven vibe coding (docs/transcripts/spec-driven-vibe-coding-in-action_1Fl94dPn2mU.md)
 sources: idea.txt, docs/transcripts/*.md (3 videos), open-questions.md (locked 2026-09-19, deleted post-spec)
 ---
@@ -22,7 +22,7 @@ sources: idea.txt, docs/transcripts/*.md (3 videos), open-questions.md (locked 2
 - [Section 4 — Harness skill (the doctrine)](#section-4--harness-skill-the-doctrine)
   [4.1 Shape (locked)](#41-shape-locked) · [4.2 Work-allocation table (v1 doctrine — recalibrated by S5, locked as the starting point per C-02/C-04)](#42-work-allocation-table-v1-doctrine--recalibrated-by-s5-locked-as-the-starting-point-per-c-02c-04) · [4.3 Session economy (locked — C-04: "keep subagent instances and sessions in check, we have limited instances, one sglang engine")](#43-session-economy-locked--c-04-keep-subagent-instances-and-sessions-in-check-we-have-limited-instances-one-sglang-engine) · [4.4 Cost doctrine (v1 numbers — calibrated by S5; C-11: "t/s first, quality becomes apparent from task success")](#44-cost-doctrine-v1-numbers--calibrated-by-s5-c-11-ts-first-quality-becomes-apparent-from-task-success) · [4.5 Failure doctrine (locked, per S3.2 exit code)](#45-failure-doctrine-locked-per-s32-exit-code) · [4.6 Testing](#46-testing) · [4.7 Acceptance (runnable)](#47-acceptance-runnable)
 - [Section 5 — Bench framework](#section-5--bench-framework)
-  [5.1 Scope (locked — C-13: "t/s first, quality becomes apparent from task success")](#51-scope-locked--c-13-ts-first-quality-becomes-apparent-from-task-success) · [5.2 Scenario matrix (locked, from R-08; v1 = M1–M8)](#52-scenario-matrix-locked-from-r-08-v1--m1m8) · [5.3 Success rubrics (locked, named)](#53-success-rubrics-locked-named) · [5.4 Runner (locked)](#54-runner-locked) · [5.5 Re-bench policy (locked — feeds S6.5 upgrade procedure)](#55-re-bench-policy-locked--feeds-s65-upgrade-procedure) · [5.6 Standard workload set (used by S4.6's fresh-session test)](#56-standard-workload-set-used-by-s46s-fresh-session-test) · [5.7 Configuration — `bench.yaml`](#57-configuration--benchyaml) · [5.8 Testing](#58-testing) · [5.9 Acceptance (runnable)](#59-acceptance-runnable)
+  [5.1 Scope (locked — C-13: "t/s first, quality becomes apparent from task success")](#51-scope-locked--c-13-ts-first-quality-becomes-apparent-from-task-success) · [5.2 Scenario matrix (locked, from R-08; v1 = M1–M10)](#52-scenario-matrix-locked-from-r-08-v1--m1m10) · [5.3 Success rubrics (locked, named)](#53-success-rubrics-locked-named) · [5.4 Runner (locked)](#54-runner-locked) · [5.5 Re-bench policy (locked — feeds S6.5 upgrade procedure)](#55-re-bench-policy-locked--feeds-s65-upgrade-procedure) · [5.6 Standard workload set (used by S4.6's fresh-session test)](#56-standard-workload-set-used-by-s46s-fresh-session-test) · [5.7 Configuration — `bench.yaml`](#57-configuration--benchyaml) · [5.8 Testing](#58-testing) · [5.9 Acceptance (runnable)](#59-acceptance-runnable)
 - [Section 6 — GB10 packaging (one-command install)](#section-6--gb10-packaging-one-command-install)
   [6.1 Artifact form (locked — main-stack parity: pinned docker image under systemd)](#61-artifact-form-locked--main-stack-parity-pinned-docker-image-under-systemd) · [6.2 Prerequisites (verified on this box, R-09 — locked as the supported matrix)](#62-prerequisites-verified-on-this-box-r-09--locked-as-the-supported-matrix) · [6.3 The one command (locked, ordered)](#63-the-one-command-locked-ordered) · [6.4 Idempotency + main-stack contract (locked)](#64-idempotency--main-stack-contract-locked) · [6.5 Upgrade procedure (locked — C-06: "whenever a new version of the main agent or subagent model engine is released")](#65-upgrade-procedure-locked--c-06-whenever-a-new-version-of-the-main-agent-or-subagent-model-engine-is-released) · [6.6 aarch64 pin list (locked — ARM64-only rule, every dep has an aarch64 build)](#66-aarch64-pin-list-locked--arm64-only-rule-every-dep-has-an-aarch64-build) · [6.7 Testing](#67-testing) · [6.8 Acceptance (runnable)](#68-acceptance-runnable)
 - [Global testing discipline](#global-testing-discipline)
@@ -67,10 +67,31 @@ context, planning, review, verification, anything needing tool chains or
 cross-file coherence. Subagents = cheap parallel bulk work: code-gen
 chunks, per-file/section analysis, data transformation, draft writing,
 test execution, diff summarization — tasks whose output main verifies
-before use. Subagent output is a **self-report**: main never trusts it
-unverified. The intelligence gap is a design input: main's job grows as
+before use. The intelligence gap is a design input: main's job grows as
 verification overhead grows, and the doctrine (S4) is recalibrated from
 bench results (S5), not from vibes.
+
+**Subagent capability boundary (v1, locked).** A subagent task is a
+bounded AGENTIC LOOP: the main agent submits a prompt (plus an optional
+workdir), and the task runs up to `max_steps` steps where each step is
+one streaming chat completion; when the model emits a tool call the
+harness executes it and feeds the result back as the next message, when
+it emits a final answer the task is done. The v1 host-side toolset is
+exactly four tools (S3.4, locked): `bash(cmd, timeout)`,
+`read_file(path)`, `write_file(path, content)`, `python(code, timeout)`,
+all confined to the task's workdir. The subagent can read and write
+files, run Linux commands, and run Python inside its workdir; it cannot
+see outside the workdir, cannot spawn processes the loop cannot see,
+and cannot talk to other subagents (S0 non-goal 1). Browser access is
+via the host venv through `python`/`bash` (S3.6 `tool_python_bin`),
+not a dedicated tool (v2 candidate, S0 non-goal 7). Intra-task
+conversation state (the loop's message history) belongs to the task;
+cross-task state remains out of scope. Subagent output is a
+**self-report with evidence**: the result carries a `tool_log` ledger
+(every tool call, its exit code, its output, its duration) that main
+verifies per S4.2 — main still never trusts a subagent's claim of
+success without the named verification; the ledger makes that
+verification cheap.
 
 **VRAM budget (this box, 2026-09-19/20 measurements — recompute at install):**
 
@@ -145,7 +166,10 @@ modifies (S2.1, S6.4). (3) No vision serving (mmproj skipped; text-only
 agents). (4) No multi-box fan-out in v1 (1 GB10 box; multi-box is a
 bench scenario, not a feature). (5) No fine-tuning / training.
 (6) No replacement of the senior-git-1.0 or existing Hermes workflows —
-the skill sits alongside them.
+the skill sits alongside them. (7) No dedicated subagent browser tool
+(camoufox is driven through the `python` / `bash` tools against the
+host venv; a first-class `browser` tool is a v2 candidate, parked as a
+bench v2 item).
 
 **Existing-stack contract (locked; install-time rules in S6.4).** :30001
 (`qwen38-sglang` container, systemd-managed, image `qwen38-dflash2:v1.2.3`)
@@ -259,6 +283,20 @@ level (`--memory` + cgroup `MemoryHigh`).
   `think` tags in `message.content`).
 - `--alias`: the OpenAI model id. All instances share the alias
   `qwen38-27b-subagent`; harness routes by port (S3.3).
+- `--tools {toolset}` (engine-side tool mode, S3.4; only present in the
+  unit's docker run when `subagent-engine.yaml` `tools.enabled: true`):
+  enables the fork's built-in server toolset at the pin —
+  `read_file, write_file, edit_file, exec_shell_command,
+  file_glob_search, grep_search, get_info` — served at the instance's
+  `/tools` HTTP endpoint. The host-side default path (S3.4) does NOT
+  require this flag: the chat-template layer at the pin accepts the
+  OpenAI `tools` array on /v1/chat/completions regardless, so `--tools`
+  is only needed when `tool_execution: engine`. Note (pin-reality,
+  recorded at the engine-mode probe, MAP 3.14): the built-in toolset is
+  7 tools and differs from the 4-tool host-side MVP set (bash ≈
+  exec_shell_command, read_file/write_file 1:1, no python tool);
+  engine-side mode runs the 7-tool set, and the tool_log's `tool`
+  field names the engine-side names.
 - Ports: `30101 + i` for instance i (0-indexed), overridable per instance
   in `subagent-engine.yaml`. Collision at boot (port in use) =
   `ERR_PORT_IN_USE`, exit 3.
@@ -329,6 +367,9 @@ must never deadlock the manager.
 | engine crash mid-request | systemd `Restart=on-failure` (5 s delay); harness sees connection error → task `engine_retried` (one retry, next instance); second failure → task `failed` | `ERR_ENGINE_DOWN` |
 | request > ctx-size | engine HTTP 400; harness surfaces `ERR_CTX_TOO_LONG` to main | exit 5 |
 | instance unhealthy > 30 s (S2.2 probe: `instance_healthy_timeout_s`) | harness reports `degraded`, the instance is marked `bdown` for routing; the emitted status field is the named condition `ERR_INSTANCE_UNHEALTHY` (no exit code — this is a routing/health state, not a command result) | `ERR_INSTANCE_UNHEALTHY` (status, `bdown`) |
+| task emits a malformed tool call (not JSON, unknown tool, bad params) > `tool_invalid_max` consecutive times | model is fed the error back each time; after the limit the task fails | `ERR_TOOL_INVALID_CALL` (task-level, collect exit 21) |
+| a tool step exceeds `tool_timeout_s` | the step's subprocess is killed, task fails | `ERR_TOOL_TIMEOUT` (task-level, collect exit 21) |
+| tool loop hits `--max-steps` without a final answer | task times out, slot freed | `ERR_DEADLINE` (existing; collect exit 22) |
 
 ### 1.6 Configuration — `subagent-engine.yaml`
 
@@ -379,7 +420,16 @@ sampling:                          # locked from model card
 reasoning_format: deepseek
 alias: qwen38-27b-subagent
 api_key: bonsai2-local
+tools:
+  enabled: false            # S1.3 --tools flag on the instance's docker run
+  set: [read_file, write_file, edit_file, exec_shell_command,
+        file_glob_search, grep_search, get_info]   # the fork's built-in set at pin 9a9394a8
 ```
+
+> Manager validation (S1.6 convention): `tools.enabled: true` with an
+> unknown tool name = `ERR_CONFIG` exit 2 at config load (the
+> footprint must never silently gate on a set the config didn't ask
+> for — same discipline as `kv_cache`, S1.6 delta 2026-09-23).
 
 ### 1.7 Testing
 
@@ -485,6 +535,15 @@ that a main-stack fix might need.
   unified-memory driver charges the instance's GPU allocations to its
   cgroup, so this bounds the instance's total footprint; `--memory-swap`
   = same value, no swap escape, matching the main stack's pattern).
+
+  > When `tools.enabled: true` (S1.6), install.sh appends `--tools
+  > {set}` to the rendered unit's docker run command (and the runtime
+  > image's CMD remains the no-tools default; the unit's full command
+  > is authoritative, S2.2 pin-reality 2026-09-22). Engine-side tool
+  > execution (S3.4) runs inside the instance's cgroup and counts
+  > against its `--memory` cap; a long `exec_shell_command` step is
+  > bounded by `tool_timeout_s` on the taskworker side regardless of
+  > mode.
 
   > Pin reality (delta 2026-09-22, S2.5 live spawn test, spec follows
   > code): docker parses the `g` suffix as **GiB (2^30)**, not decimal
@@ -724,6 +783,16 @@ Note: `bunloaded` = the user explicitly unloaded that instance
 (`bonsai2-unload`); it is not a failure state, routing skips it, and the
 drift watch does not re-spawn it (S2.5).
 
+**Result-file shape (locked).** The taskworker writes
+`{answer, reasoning, usage, tool_log, steps, workdir}` to the result
+file. `tool_log` is an ordered array, one entry per tool call: `{step,
+tool, params (redacted: no secrets beyond what the model sent),
+exit_code, output (truncated to tool_output_max_kb), duration_ms}`.
+`steps` = total completions issued (1 for a text-only task). `workdir`
+= the resolved workdir the task ran in (main's verification entry
+point). A failed task's result file still carries `tool_log` up to the
+failure (the ledger is diagnostic data, not a verdict).
+
 ### 3.2 Command surface (locked — the full API; every flag specced)
 
 All under `/opt/bonsai2/bin/`, config from
@@ -732,13 +801,26 @@ All under `/opt/bonsai2/bin/`, config from
 
 ```
 bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
-               [--ctx N] [--deadline SECS] [--out FILE] [--priority low|normal|high]
-               -> JSON (3.1). Submits to the least-loaded healthy instance.
+               [--ctx N] [--deadline SECS] [--max-steps N] [--workdir DIR]
+               [--out FILE] [--priority low|normal|high]
+               -> JSON (3.1). Submits to the least-loaded healthy
+               instance. --tools defaults ON (the agentic loop, S3.4);
+               --tools off = single completion, byte-identical to the
+               pre-loop behavior. --max-steps bounds the tool loop
+               (default task_max_steps, range 1-128); --workdir DIR
+               confines the toolset to that directory (must exist,
+               writable; when omitted the harness creates
+               <workspace_dir>/<task_id> — the directory is S3.6's
+               `workspace_dir` key, default `/run/bonsai2/workspaces/` —
+               rotated with the 7-day results window, S3.1).
 bonsai2-steer  <TASK_ID> -m MESSAGE [--wait SECS]  # steer-and-wait: block up to SECS for state change
 bonsai2-cancel <TASK_ID> [--graceful]              # SIGTERM then SIGKILL after 5 s
 bonsai2-status                                   # JSON (3.1)
 bonsai2-list-instances                           # human table; exit 0
-bonsai2-collect  <TASK_ID>                       # -> JSON; reads result file, returns task JSON + {"answer": ..., "reasoning": ..., "usage": {...}}
+bonsai2-collect  <TASK_ID>                       # -> JSON; reads result file,
+                                                  # returns task JSON + {"answer": ..., "reasoning": ...,
+                                                  # "usage": {...}, "tool_log": [...], "steps": N, "workdir": "..."}
+                                                  # — tool_log is [] for --tools off tasks
 bonsai2-bench    [--scenario NAME] [--quick]      # invokes S5 runner (S3.5)
 bonsai2-unload   [--all | --instances i[,i,...]]  # manager SIGTERMs the
                                                   # targeted instance units (instant VRAM release);
@@ -800,6 +882,12 @@ Per-command exit mapping (the table above + these; closed set unchanged):
   conditions at submission time; **8 = the task is still in the queue
   when `queue_wait_max_s` expires** (S3.3: the task never got a slot, so
   it is not the task's own deadline).
+- `spawn` with `--tools on` against an instance whose live ctx cannot
+  fit the tool definitions + prompt + expected loop growth still
+  submits normally: the `--ctx` filter is a pre-submission gate on the
+  REQUESTED ctx only; the loop's own growth is bounded by the engine's
+  live ctx (a step that exceeds it is the S1.5 HTTP 400 →
+  `ERR_CTX_TOO_LONG` task failure, exit 21 on collect).
 - `steer` / `cancel`: 0 = operation accepted (`steer` on a non-terminal
   task; `cancel` on a running/queued task, signal sent, or an
   already-terminal no-op); 2 = TASK_ID unknown. `steer --wait SECS`:
@@ -844,11 +932,56 @@ state" locked).
 - Idempotency: `spawn` whose **dedup key** matches a live task within 24 h
   is a no-op returning the existing task_id. The dedup key is the prompt
   hash (of the `-p` file content or the `-i` inline text) plus the
-  `--tools`, `--ctx`, and `--priority` flags — everything that determines
-  what the task will do. `--out FILE` is **not** part of the key (it only
+  `--tools`, `--ctx`, `--priority`, and `--workdir` flags — everything
+  that determines what the task will do. `--out FILE` is **not** part of the key (it only
   selects where the result file is written), so dedup is well-defined with
   or without `--out`. Keys live in `/run/bonsai2/dedup/` with a 24 h TTL
   (`dedup_ttl_h`). No double slot charge, no re-download (S3.5).
+
+**Tool loop (S3.4, locked).** A `--tools on` task runs a loop inside its
+taskworker: send the current message history (prompt + prior tool
+results) to the routed instance → if the response carries a tool call,
+validate it against the four-tool schema (a bad call is fed back to the
+model as an error result, up to `tool_invalid_max` = 3 consecutive bad
+calls, then the task fails `ERR_TOOL_INVALID_CALL`), execute it
+(host-side: the `bin/bonsai2_tools.py` module; engine-side: the
+instance's `/tools` endpoint, S1.3), append the result, and continue;
+if the response is a final answer, the task is `done`. The loop holds
+its single slot for the task's whole lifetime (the existing S3.4 slot
+model, unchanged). The task's `--deadline` bounds the whole loop; a
+step that overruns is killed at its per-tool timeout (`tool_timeout_s`,
+default 60 s) and the task fails `ERR_TOOL_TIMEOUT`. `--max-steps`
+(default `task_max_steps` = 32) bounds the number of completions;
+hitting it without a final answer → task `timeout` / `ERR_DEADLINE`
+(the loop exhausted its step budget — collect exit 22). The task record
+gains `tool_log` (mirrored into the result file, S3.1) and `steps`;
+`steer_messages` on a `--tools on` task are injected as the next user
+message at the loop's next step boundary (the steer becomes effective
+mid-loop for tool tasks — S4.3). Cancel (S3.2) kills the current
+step's subprocess (SIGTERM the tool execution's process group), then
+the worker, same 5 s SIGKILL backstop. The reaper (deadline backstop,
+S3.4) is unchanged: it reaps the WORKER pid; a mid-step tool
+subprocess is a child of the worker and dies with it.
+
+**Host-side execution (default):** tools run in the taskworker process
+on the host, same trust domain as the main agent's own bash. The
+toolset is the `bin/bonsai2_tools.py` module — the ONLY toolset a
+subagent sees; capability growth happens there and nowhere else
+(prompt templates and doctrine live in the skill, S4.1).
+
+**Engine-side execution (alternative, config flag):** the taskworker
+executes tool calls by POSTing to the routed instance's `/tools`
+endpoint (the fork's built-in toolset at the pin, S1.3). Selected by
+`harness.yaml` `tool_execution: host|engine` (default `host`). Both
+modes are implemented and tested; the bench (M9/M10, S5.2) carries the
+comparison.
+
+> Delta (2026-09-25, subagent capability layer; source
+> docs/spec-amendments-subagent-capabilities.md, amendments A1–A15):
+> the S3.2 API was previously a fire-and-collect single completion;
+> this adds the bounded tool loop + the 4-tool host-side set. `--tools
+> off` stays byte-identical to the pre-loop path so the Phases 0–3
+> hermetic suite remains green.
 
 ### 3.5 Bench runner wiring (S3.5)
 
@@ -875,6 +1008,14 @@ queue_wait_max_s: 60
 instance_healthy_timeout_s: 30
 task_default_deadline_s: 600
 main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
+# --- subagent capability layer (S3.4 tool loop) ---
+tool_execution: host           # host | engine (dual-mode, both tested; S3.4)
+tool_python_bin: /usr/bin/python3   # interpreter for the python tool (host venv for camoufox: ~/prod/.venv/bin/python)
+tool_timeout_s: 60             # per-tool subprocess timeout
+tool_output_max_kb: 32         # tool output truncation in tool_log
+task_max_steps: 32             # default --max-steps (range 1-128)
+tool_invalid_max: 3            # consecutive malformed tool calls -> ERR_TOOL_INVALID_CALL
+workspace_dir: /run/bonsai2/workspaces   # per-task scratch workdirs (7-day rotation)
 # boot_target_s lives in serving.yaml (S2.6), not here: it is a
 # boot-lifecycle measurement owned by install/manager
 ```
@@ -948,6 +1089,17 @@ that loads text skills and can run bash; loaded on demand):
 - **Doctrine:** S4.2–S4.5 below; every claim cites a S5.2 scenario row id
   (e.g. `[M7]`) — a doctrine number without a bench citation is a
   review defect.
+- **Prompt templates:** the skill carries one proven prompt
+  template per S4.2 tool-loop row (spec-chunk implementation; test
+  batch + report; browser task via the python tool) — the
+  subagent's quality is bounded by the prompt (it is a text model
+  with a toolset, not a second main agent); the main agent
+  substitutes task specifics and does not improvise the structure.
+  A template: state the workdir contract ("all paths are relative
+  to the workdir; do not look outside it"), the definition of done
+  (the test command to run, the expected exit code), and the final
+  answer contract (one paragraph: what was done, what was
+  verified, what failed, the exact commands run).
 
 ### 4.2 Work-allocation table (v1 doctrine — recalibrated by S5, locked
 as the starting point per C-02/C-04)
@@ -963,12 +1115,19 @@ as the starting point per C-02/C-04)
 | Draft writing (docs, summaries, commit messages at scale) | **subagent** | quality bar is lower-verification; main edits the draft |
 | Anything requiring live tool feedback loops (iterative debugging, interactive exploration) | **main** | feedback latency; subagent is fire-and-collect, no mid-task steering value here |
 | Verification of a subagent's claimed success (file exists? test passed? diff applies?) | **main, always** | self-report rule (4.2); never trust on the word |
+| Spec-chunk implementation (bounded, self-contained, with a test suite to run) | **subagent, --tools on** | the loop runs its own compile/tests; the tool_log is the evidence; main verifies the ledger + re-runs the suite on its own copy [M9] |
+| Test execution batch with a report (run N tests, structure the results) | **subagent, --tools on** | mechanical, parallelizable, self-reported with exit codes in the ledger; main spot-checks 1/3 [M10] |
+| Anything that must see a rendered page / browser state (camoufox) | **main, or subagent --tools on via the python tool** | the venv is host-side; a subagent drives it through python/bash; a multi-step interactive session with state the main agent must keep = main (the v2 browser tool, parked) |
 
-**The self-report rule (locked):** every subagent result is treated as an
-unverified claim. Before use, main runs the named verification (build,
-diff-apply, file-read, re-run test). Verification cost is part of the
-task's true cost in S4.4 — a task that costs main 60 s to verify but
-saves 90 s on main is not a win; it goes to main.
+**The self-report rule (locked):** every subagent result is treated as
+an unverified claim, WITH EVIDENCE: a `--tools on` result carries the
+tool_log ledger (S3.1), and main's named verification is ledger-first:
+check the claimed suite ran (tool_log entry, exit 0), check the
+claimed files exist (read_file the workdir path on main), then re-run
+the named check on main's own side. The ledger lowers the verification
+cost term in S4.4 — it does not remove it. Verification cost is part of
+the task's true cost in S4.4 — a task that costs main 60 s to verify
+but saves 90 s on main is not a win; it goes to main.
 
 ### 4.3 Session economy (locked — C-04: "keep subagent instances and
 sessions in check, we have limited instances, one sglang engine")
@@ -988,8 +1147,13 @@ sessions in check, we have limited instances, one sglang engine")
   nothing — separate engine — but short turns keep the session cache hot
   and the loop tight).
 - **Instance hygiene:** prefer reusing a running task over re-spawning
-  when the task is >50% done (steer instead of cancel+spawn); cancel is
-  for wrong-shape tasks, not impatience.
+  when the task is >50% done. Steer a `--tools on` task: the message is
+  injected at the loop's next step boundary (effective mid-loop).
+  Steer a `--tools off` task: advisory only — consumed at the next
+  attempt (a retry), not the in-flight single completion; for a
+  single-attempt task mid-stream, cancel + spawn with the corrected
+  prompt is the effective path. Cancel is for wrong-shape tasks, not
+  impatience.
 
 ### 4.4 Cost doctrine (v1 numbers — calibrated by S5; C-11: "t/s first,
 quality becomes apparent from task success")
@@ -999,8 +1163,13 @@ quality becomes apparent from task success")
   t/s_decode + verification_cost_main_s` (verification is inside
   dispatch_cost, not added twice), with v1 constants from the
   community GB10 bench: `t/s_decode ≈ 29`, `t/s_prefill ≈ 4800`
-  (rebenched at S5 on this exact box; numbers here are the a-priori
-  floor, not the final values).
+  (a-priori floor, UNCALIBRATED until the S5 run replaces them with
+  measured values; until then the win rule is applied with a 20%
+  margin on the dispatch side). For `--tools on` tasks,
+  `dispatch_cost` additionally carries `steps_est × (tool_mean_duration_s
+  + prefill_of_tool_results)` — the v1 estimate is 6 steps × (10 s +
+  0.3 s), replaced by the M9/M10 measured per-step cost at the first
+  full bench.
 - **Win rule:** dispatch iff `dispatch_cost < est_main_time_s(task)`
   (est_main_time_s = the time the same task would take on main,
   including main's own verification of the outcome) AND the task
@@ -1056,6 +1225,10 @@ quality becomes apparent from task success")
    4.2, command set ⊆ S3.2.
 3. Two synthetic "loss" scenarios (a task shape bench-confirmed as
    main-wins) → the audit flags the stale row.
+4. Tool-loop doctrine: the S4.2 tool-loop rows (M9/M10-cited) complete
+   the standard workload set with `--tools on` in a fresh session,
+   every result ledger-verified per the amended S4.2 self-report rule;
+   the command set is still S3.2-only.
 
 ---
 
@@ -1071,7 +1244,7 @@ per C-02 ("i need to make sure that i can make the subagent more
 efficient than the main agent") the whole project's value claim hangs on
 the success-rate gap at equal or better cost.
 
-### 5.2 Scenario matrix (locked, from R-08; v1 = M1–M8)
+### 5.2 Scenario matrix (locked, from R-08; v1 = M1–M10)
 
 | id | shape | instances | concurrency | ctx | success rubric |
 |---|---|---|---|---|---|
@@ -1083,6 +1256,15 @@ the success-rate gap at equal or better cost.
 | M6 | main-only control of M1–M5 | — | 1 | — | same rubrics; the control (idea.txt capability comparison) |
 | M7 | saturation: all instances, all slots | N | 8×N | 8k | t/s at the ceiling + zero 5xx (auto) |
 | M8 | contention: main at working load + subagents at working load | N | 4×N | 8k | main t/s guardrail: within `main_tps_guardrail_pct` of M6 (auto). The runner records the verdict per scenario row as `pass`/`fail` (e.g. `{"M8": "pass"}`); a guardrail breach flips the row to `fail` while the run still exits 0 (S5.4) |
+| M9 | tool-loop spec-chunk: implement a bounded spec chunk (fixture: a small library spec with 3 functions + a 3-case suite) | 1 | 1 | 32k, --tools on | the suite the subagent claims to have passed actually passes when MAIN re-runs it (auto: main-side re-run, exit 0) + tool_log shows the test run with exit 0 + the spec's 3 functions exist in the workdir (file check) |
+| M10 | tool-loop test batch: run a 10-file test batch, produce a structured report (per-file pass/fail, durations) | 1 | 8 | 8k, --tools on | report JSON parseable + 10/10 files covered + main re-runs 2/10 files to confirm the pass/fail verdicts agree (auto, 2/10 spot) |
+
+M1-M8 are TEXT-ONLY baselines (`--tools off`): they measure the raw
+inference stack and stay comparable across engine-pin bumps and
+re-anchors. M9/M10 measure the capability layer (S3.4) and run in both
+`tool_execution` modes (host and engine, S1.3/S3.4); the run records
+the mode in the row. M9/M10 use the same box-state-snapshot + rotation
+rules as M1-M8 (S5.2).
 
 Reproducible: `bench.yaml` pins model revision + engine commit + box
 state snapshot (driver, nvidia-smi, docker stats, /proc/meminfo,
@@ -1109,7 +1291,9 @@ source).
 
 - **Auto-rubrics (M1, M2, M4, M5, M7, M8):** machine-scored, golden
   files in `bench/goldens/` (the M4 seeded 10-bug diff is versioned in
-  the repo — a fixture, not a live diff).
+  the repo — a fixture, not a live diff). M9/M10 goldens (the M9
+  spec-chunk fixture; the M10 10-file test batch) are versioned in
+  `bench/goldens/` the same way (repo fixtures).
 - **Semi-auto (M3):** auto-scored shape (token budget, claim count) +
   main spot-checks 1/3 of sections (claim accuracy); a run's M3 score
   is `auto_score * 0.7 + spotcheck * 0.3`.
@@ -1142,28 +1326,38 @@ same exit-code contract.
   every model re-download with changed SHA, and weekly (cron, optional).
   Regression > 10% t/s or any auto-rubric regression → the PR that
   bumped the pin is blocked until re-resolved.
-- **Full bench (M1–M8):** on model revision changes, quant fallback
+- **Full bench (M1–M10):** on model revision changes, quant fallback
   switches, or when a S4.2 row flips. Output feeds the doctrine audit
   (S4.6) in the same PR.
 
 ### 5.6 Standard workload set (used by S4.6's fresh-session test)
 
 M1 (code-gen), M2 (test batch), M3 (fan-out), plus one M4-style diff
-review — the four shapes a real session actually does. A fresh session
-completing these with S3.2-only commands + 4.2-verified results = the
-skill works.
+review — the four text-only shapes a real session actually does
+(`--tools off`, the S5.2 baseline note) — plus the S4.2 tool-loop
+rows M9 (spec-chunk implementation + self-verify) and M10 (test batch
++ structured report), run with `--tools on` (the capability-layer
+half of the same workload set). A fresh session completing these with
+S3.2-only commands + 4.2-verified results = the skill works (the
+M9/M10 half is ledger-verified per the amended S4.2 self-report rule;
+S4.7 #4).
 
 ### 5.7 Configuration — `bench.yaml`
 
 ```yaml
-scenarios: [M1, M2, M3, M4, M5, M6, M7, M8]
-quick: [M1, M2, M7]
+scenarios: [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10]
+quick: [M1, M2, M7]          # unchanged: the quick bench is the text-only regression gate (M1-M8 stay --tools off; M9/M10 are full-bench-only in v1 — their rubrics need main-side re-runs the quick bench's time budget does not carry)
 repetitions: 3
 regression_tps_pct: 10
 results_dir: /run/bonsai2/bench
 goldens_dir: bench/goldens
 main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
 ```
+
+> S5.5 unchanged in policy: quick = M1+M2+M7 (the engine-regression
+> gate); full = M1-M10 (capability + doctrine input). M9/M10 are
+> full-bench-only in v1 (their rubrics need main-side re-runs, which
+> the quick bench's time budget does not carry).
 
 ### 5.8 Testing
 
@@ -1179,7 +1373,7 @@ main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
 
 ### 5.9 Acceptance (runnable)
 
-1. One full M1–M8 run on this box, `bench-results/` committed, every row
+1. One full M1–M10 run on this box, `bench-results/` committed, every row
    carries the box-state snapshot.
 2. Every S4.2 doctrine row cites an M-row from that run (audit clean).
 3. M8 main-guardrail passes (≤ 5% main-t/s regression at full subagent
@@ -1187,6 +1381,10 @@ main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
    committed bench JSON, S5.2) — or the S0 table's N is reduced and
    re-asserted.
 4. Dogfood M7 row parses; mock-run M1+M2 passes hermetic.
+5. M9 and M10 pass (main-side re-run verdicts agree with the
+   subagents' claims in ≥ 8/10 files for M10; M9's suite passes on
+   main's re-run); the host-vs-engine tool_execution comparison is
+   recorded in the run JSON and the doctrine cites it.
 
 ---
 
@@ -1260,8 +1458,14 @@ per S6.4's main-only fallback. Record the detected value in
 S6.4). `--instances N` overrides `instances.count` for this install
 (the S0 phased-rollout flag: `--instances 1` to build/verify, then
 re-run without it, or `--instances 3`, to load to default N). Compute
-N via S1.4 → write the four
-YAMLs. (5) install units (S2.2), start manager. (6) health checks
+N via S1.4 → write the four YAMLs (the YAMLs carry the S3.6
+tool-loop keys — `tool_execution`, `tool_python_bin`,
+`tool_timeout_s`, `tool_output_max_kb`, `task_max_steps`,
+`tool_invalid_max`, `workspace_dir` — and the S1.6 `tools:` block;
+install also deploys `bin/bonsai2_tools.py` to `/opt/bonsai2/bin/`
+and creates `/run/bonsai2/workspaces/` — per-task subdirs are created
+by the harness at task time, S3.4). `--workdir`/`--max-steps` are
+task-time flags, not install-time state. (5) install units (S2.2), start manager. (6) health checks
 (S2.7 probes, 180 s budget) — in main-only mode (S2.4) these cover the
 main endpoint only; in a partial load (S1.4 `WARN_VRAM_SHORTFALL` at
 i > 0) they cover the loaded instances. (7) print the stack-ready
@@ -1306,7 +1510,7 @@ the main agent or subagent model engine is released")
   when the quant or revision changes; the doctrine audit (S4.6) re-runs
   in the same PR.
 - **Raising N (pool expansion, S0 default N = 2 is a safe start):**
-  after a full M1–M8 bench pass with M8 guardrail green (S5.9 #3) and
+  after a full M1–M10 bench pass with M8 guardrail green (S5.9 #3) and
   headroom to spare, re-run `install.sh --instances N'` (S6.3 step 4)
   with N' recomputed from the live S1.4 budget; the new instances boot
   through the S1.4 allocation tier as usual. A PR that raises N must
@@ -1325,7 +1529,10 @@ aarch64 build)
   CUDA 13.0 toolkit (image build stage, aarch64 ✓ — same toolchain the
   community GB10 bench used).
 - No golang/JS at runtime (scripts are bash + the Python bench runner
-  only). The four YAMLs are the only runtime state.
+  only). The four YAMLs are the only runtime state. No new dependencies
+  for host-side tool execution (stdlib-only `bin/bonsai2_tools.py`; the
+  python tool invokes `tool_python_bin` as a subprocess). Camoufox is
+  the host's venv package, not a project dependency.
 
 ### 6.7 Testing
 
@@ -1375,7 +1582,7 @@ aarch64 build)
 2. A fresh main-agent session completes the standard workload set
    (S5.6) using only S3.2 commands, every result verified per S4.2
    (S4.7).
-3. Full M1–M8 bench run committed; every S4.2 row cites a bench row;
+3. Full M1–M10 bench run committed; every S4.2 row cites a bench row;
    M8 main-guardrail ≤ 5% (S5.9).
 4. One-command install on a fresh GB10 box: S6.8 all four.
 5. 72 h soak: all N instances up (restart count per instance ≤ 2), no
@@ -1390,4 +1597,6 @@ S3.2 bash + the S4 skill — that is the design; LLMs calling LLMs to
 coordinate is what's out), main-stack changes, vision (mmproj),
 multi-box v1,
 fine-tuning, LLM-judge bench mode, instance kill-for-drift, stateful
-subagents.
+subagents, dedicated subagent browser tool (driven via the python/bash
+tools against the host venv; first-class `browser` tool is a v2
+candidate, S0 non-goal 7).

@@ -16,6 +16,7 @@ E = external (pre-existing, consumed read-only).
 | llama.cpp fork source (prism branch) | `third_party/llama.cpp` (submodule, added 2026-09-20) | fork commit `9a9394a8` (prism tip at MAP 1.1; 2026-09-18), recorded in `etc/subagent-engine.yaml` `engine_pin` (rendered to `/opt/bonsai2/etc/` by install.sh) | MAP 1.1 (vendoring decided: submodule — in-repo, project-wide, never system-wide) |
 | systemd unit templates | `units/bonsai2-sglang.service` (manager, Type=notify) + `units/bonsai2-server@.service` (per-instance template; install.sh renders ExecStart per granted instance) | S2.1/S2.2 shape hermetic-asserted in `tests/test_manager.py::TestUnitFiles` | MAP 2.4 (templates only — the concrete units are rendered/installed by install.sh, MAP 6.2) |
 | bench goldens | `bench/goldens/` | versioned in repo | MAP 4.4 |
+| subagent capability layer — host-side 4-tool module | `bin/bonsai2_tools.py` (deployed to `/opt/bonsai2/bin/` by install.sh; imported by the taskworker's tool loop, S3.4) | stdlib-only; tools: bash(cmd, timeout) / read_file(path) / write_file(path, content) / python(code, timeout); workdir containment (escape above the workdir root rejected — `/`-rooted and `..`-crossing paths; symlinks in allowed, symlinks out rejected at open); process-group kill at `tool_timeout_s`; output truncation at `tool_output_max_kb` | MAP 3.13 (S3.4 tool loop; spec amendment 2026-09-25) |
 
 ## This box (pre-existing, external — consumed read-only)
 
@@ -62,6 +63,12 @@ delta):
   kept — MAP 6.5
 - `/run/bonsai2/{health.json,results/,dedup/,bench/}` — runtime state
   (tmpfs; bench + results rotate 7 days, bench dir capped 1 GB) — MAP P2/P3
+- `/run/bonsai2/workspaces/` — per-task scratch workdirs for the S3.4
+  tool loop (parent created by install.sh; per-task subdirs
+  `workspaces/<task_id>` created by the harness at task time, 7-day
+  rotation) — MAP 3.15
+- `/opt/bonsai2/bin/bonsai2_tools.py` — host-side 4-tool module (the
+  ONLY toolset a subagent sees, S3.4) — MAP 3.13
 - systemd units `bonsai2-sglang.service` + `bonsai2-server@i.service` —
   MAP 2.4
 - docker image `bonsai2-server:<tag>` — digest recorded in
