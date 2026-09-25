@@ -1338,6 +1338,10 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         if dup is not None:
             dup_winner = dup
         else:
+            # dup is None — create the record + entry under the lock.
+            # (A terminal entry under the key cannot reach the else side:
+            # dedup_lookup filters terminal records out, so the re-read
+            # below is the race detector — see G3 PR#15 r1 P1-3.)
             dup_winner = None
             task_id = new_task_id(d)
             if out_path is None:
@@ -1389,12 +1393,57 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         )
     dup2 = dedup_lookup(cfg, dedup_key)
     if dup2 is not None and dup2.get("task_id") != task_id:
+        # G3 PR#15 r1 P1-3: our entry was replaced by a concurrent
+        # same-key spawn's (dedup_record's os.replace is not
+        # compare-and-swap — a writer that lost the stale-lock race can
+        # overwrite the entry in the gap after release). The entry now
+        # points at the winner; OUR record is an orphan duplicate (both
+        # would be charged = a double slot, S3.4). Two outcomes:
+        #   * winner LIVE    -> the prompt is executing under the winner;
+        #     ours is the loser: mark it failed/ERR_DUPLICATE (slot freed)
+        #     and return the winner. The entry already points at the
+        #     winner — leave it.
+        #   * winner TERMINAL -> the entry is stale (its task just ended);
+        #     OURS is the live task for this prompt: re-point the entry
+        #     at us so the key tracks the live one (otherwise the next
+        #     same-key spawn would create a third record) and return
+        #     ours.
         winner = read_task(d, dup2["task_id"])
+        if winner.get("state") not in TERMINAL_STATES:
+            with lock_wait(d["base"], f"task-{task_id}"):
+                ours = read_task(d, task_id)
+                if ours.get("state") not in TERMINAL_STATES:
+                    ours["state"] = "failed"
+                    ours["error"] = "ERR_DUPLICATE"
+                    ours["detail"] = (
+                        f"dedup race: key now owned by live task "
+                        f"{winner['task_id']!r}; this record is the loser"
+                    )
+                    ours["updated_ts"] = time.time()
+                    write_task(d, ours)
+            return emit(
+                spawn_json(winner),
+                EXIT_OK,
+                f"dedup: duplicate of live task {winner['task_id']!r} "
+                f"(raced a concurrent same-key spawn) — no new slot",
+            )
+        with lock_wait(d["base"], f"task-{task_id}"):
+            ours = read_task(d, task_id)
+            if ours.get("state") not in TERMINAL_STATES:
+                ours["detail"] = (
+                    f"dedup race: entry pointed at terminal task "
+                    f"{winner['task_id']!r}; this task {task_id!r} "
+                    "owns the key"
+                )
+                ours["updated_ts"] = time.time()
+                write_task(d, ours)
+        dedup_record(cfg, dedup_key, task_id)
+        fresh = read_task(d, task_id)
         return emit(
-            spawn_json(winner),
+            spawn_json(fresh),
             EXIT_OK,
-            f"dedup: duplicate of live task {winner['task_id']} "
-            f"(raced a concurrent same-key spawn) — no new slot",
+            f"dedup: raced a concurrent same-key spawn; winner {winner['task_id']!r} "
+            f"terminal — task {task_id} owns the key",
         )
     assert task_id is not None  # created under the lock (both return paths above exit)
     # P0 #1 (G3 PR#12 r1): the fast path is a CLAIM, so it runs under
