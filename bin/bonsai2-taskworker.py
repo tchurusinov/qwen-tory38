@@ -37,6 +37,7 @@ ERR_ENGINE_DOWN with the detail (the record is still collectable).
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import time
 import urllib.error
@@ -52,6 +53,63 @@ POLL_S = 0.1
 
 def _log(msg: str) -> None:
     print(f"[bonsai2-taskworker] {msg}", file=sys.stderr, flush=True)
+
+
+class _Cancelled(Exception):
+    """The SIGTERM sentinel: the main loop turns it into a clean exit 0
+    (the record is already terminal — the always-exits-0 contract)."""
+
+
+# module-level handler state (signal handlers cannot rely on locals from
+# the interrupted frame; the handler is installed with the record path
+# set before the run starts)
+_CANCEL_REC_PATH: Path | None = None
+_CANCELLED_SEEN = False
+
+
+def _on_cancel_signal(signum, frame):
+    """bonsai2-cancel's SIGTERM (S3.2: 'cancel SIGTERM -> SIGKILL after
+    5 s'). The handler marks the record terminal NOW (the cancel command's
+    belt-and-braces also writes it — the lock makes the second write a
+    no-op) so the slot frees at signal time, not after the process dies.
+    A second signal re-raises the default: the worker exits, and whatever
+    state the record is in is what the reaper/cancel sees."""
+    global _CANCELLED_SEEN
+    if _CANCELLED_SEEN:
+        signal.default_int_handler(signum)(signum, frame)
+        return
+    _CANCELLED_SEEN = True
+    rec_path = _CANCEL_REC_PATH
+    if isinstance(rec_path, Path) and rec_path.is_file():
+        try:
+            rec = json.loads(rec_path.read_text())
+            if isinstance(rec, dict) and rec.get("task_id"):
+                d = {
+                    "base": rec_path.parent.parent,
+                    "tasks": rec_path.parent,
+                    "locks": rec_path.parent.parent / ".locks",
+                }
+                if rec.get("state") not in H.TERMINAL_STATES:
+                    rec["state"] = "failed"
+                    rec["error"] = "ERR_CANCELLED"
+                    rec["detail"] = (
+                        "cancelled: SIGTERM from bonsai2-cancel — slot freed (S3.4)"
+                    )
+                    rec["updated_ts"] = time.time()
+                    with H.lock_wait(d["base"], f"task-{rec['task_id']}"):
+                        fresh = H.read_task(d, rec["task_id"])
+                        if fresh.get("state") not in H.TERMINAL_STATES:
+                            fresh["state"] = rec["state"]
+                            fresh["error"] = rec["error"]
+                            fresh["detail"] = rec["detail"]
+                            fresh["updated_ts"] = time.time()
+                            H.write_task(d, fresh)
+                    _log(
+                        f"{rec['task_id']}: SIGTERM -> failed ERR_CANCELLED (slot freed)"
+                    )
+        except Exception as exc:  # noqa: BLE001 — a handler must never crash the run
+            _log(f"cancel handler record write failed: {exc!r}")
+    raise _Cancelled()
 
 
 def _set_state(
@@ -209,9 +267,13 @@ def main() -> int:
     turns a stale running record into failed/ERR_ENGINE_DOWN. Any
     uncaught exception (a KeyError in _run_attempt, a bad record port,
     ...) would otherwise escape as Python's exit 1; log + return 0 so
-    the record is the single source of truth either way."""
+    the record is the single source of truth either way. `_Cancelled`
+    (the SIGTERM sentinel, MAP 3.7 cancel) is a CLEAN exit: the handler
+    already marked the record terminal, so 0 is the contract."""
     try:
         return _main()
+    except _Cancelled:
+        return 0
     except Exception as exc:  # noqa: BLE001 — the always-exits-0 contract
         _log(
             f"uncaught worker error: {exc.__class__.__name__}: {exc} (record stays as-is; the reaper owns it)"
@@ -234,6 +296,13 @@ def _main() -> int:
     if not isinstance(rec, dict) or not rec.get("task_id"):
         _log(f"task record malformed: {rec_path}")
         return 0
+    # MAP 3.7: the cancel path (SIGTERM) — the handler marks the record
+    # failed ERR_CANCELLED and raises the sentinel; main() turns it into
+    # the contract's clean 0. Installed BEFORE the first state check so
+    # even an immediate cancel lands.
+    global _CANCEL_REC_PATH
+    _CANCEL_REC_PATH = rec_path
+    signal.signal(signal.SIGTERM, _on_cancel_signal)
     # The record's own location IS the results layout (the spawner wrote
     # it there): <results>/tasks/<task_id>.json. Deriving d from the
     # record path (not from a config re-load) keeps the worker correct

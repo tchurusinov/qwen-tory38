@@ -1208,6 +1208,78 @@ def wait_instance_healthy(
     return last
 
 # --------------------------------------------------------------------------
+# S3.4 reaper pass (manager-side deadline enforcement, MAP 3.4)
+# --------------------------------------------------------------------------
+_harness_mod = None
+
+
+def _load_harness_module():
+    """Load the shared harness core (same bin/ dir, the MAP 0.1 1:1
+    deploy layout) for the reaper pass. Loaded lazily once (the manager
+    is a long-lived daemon; the harness module's imports are stdlib +
+    PyYAML, the same edge the manager already takes)."""
+    global _harness_mod
+    if _harness_mod is None:
+        import importlib.machinery
+        import importlib.util
+
+        bin_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        loader = importlib.machinery.SourceFileLoader(
+            "bonsai2_harness_reaper", str(bin_dir / "bonsai2_harness.py")
+        )
+        spec = importlib.util.spec_from_loader("bonsai2_harness_reaper", loader)
+        if spec is None or spec.loader is None:
+            raise ImportError("harness core spec unavailable")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _harness_mod = mod
+    return _harness_mod
+
+
+def _results_dirs_from_harness_cfg() -> Path | None:
+    """The S3.4 reaper's task-record dir, by the harness command's own
+    convention: `BONSAI2_RESULTS_DIR` overrides, else `results_dir`
+    from the harness.yaml (`BONSAI2_CONFIG` overrides its path, default
+    /opt/bonsai2/etc/harness.yaml). A missing/unreadable config is the
+    DEFAULT results dir — the reaper must not die on config drift (the
+    commands' exit-2 rule does not apply to a daemon pass)."""
+    results_dir = os.environ.get("BONSAI2_RESULTS_DIR", "").strip()
+    if not results_dir:
+        try:
+            cfg_path = Path(
+                os.environ.get("BONSAI2_CONFIG", "/opt/bonsai2/etc/harness.yaml")
+            )
+            data = _load_yaml_map(cfg_path)
+            val = data.get("results_dir")
+            if isinstance(val, str) and val:
+                results_dir = val
+        except (OSError, ValueError):
+            pass
+    if not results_dir:
+        results_dir = "/run/bonsai2/results"
+    base = Path(results_dir)
+    return base if (base / "tasks").is_dir() else None
+
+
+def reap_tasks_once(health_dir: Path, log=_log) -> list[str]:
+    """One manager-side S3.4 reaper pass (runs every health cycle,
+    after the control pass): reaps stale `running`/`engine_retried`
+    task records (dead worker pid -> failed/ERR_ENGINE_DOWN; the
+    deadline backstop past the grace -> timeout/ERR_DEADLINE), freeing
+    the slot so the claim queue forward-progresses. The task records
+    live in the harness results dir (this function's convention); a
+    missing dir = nothing to reap (hermetic boots with no tasks).
+    Returns the reaped task_ids. The pass is fault-tolerant at the
+    caller (a reaper error must never kill the steady loop)."""
+    base = _results_dirs_from_harness_cfg()
+    if base is None:
+        return []
+    d = {"base": base, "tasks": base / "tasks", "locks": base / ".locks"}
+    h = _load_harness_module()
+    return h.reap_stale(d, log=log)
+
+
+# --------------------------------------------------------------------------
 # S2.2 escalation + S2.5 drift + S3.2 control (steady-loop state machine)
 # --------------------------------------------------------------------------
 class _InstanceState:
@@ -2298,6 +2370,15 @@ def run_probe_loop(
             # command's fault, not the manager's; it stays in place,
             # the ack is the command's error signal).
             log(f"control pass error (cycle {cycle}): {exc!r}")
+        # S3.4 (MAP 3.4): the manager-side deadline enforcement — one
+        # reaper pass per cycle (stale running records -> terminal +
+        # slot freed). A reaper error never kills the steady loop.
+        try:
+            reaped = reap_tasks_once(health_dir, log=log)
+            if reaped:
+                log(f"S3.4 reaper: {len(reaped)} task(s) reaped: {reaped}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"S3.4 reaper pass error (cycle {cycle}): {exc!r}")
         if now - last_drift_at >= drift_interval_s:
             last_drift_at = now
             check_drift(

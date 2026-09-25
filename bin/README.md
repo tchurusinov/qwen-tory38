@@ -23,7 +23,9 @@ Landed so far:
   scripts: one-JSON-on-stdout/one-stderr contract, closed-set exit
   codes, S3.6 config loader, health.json read, main-endpoint probe,
   slot accounting + least-loaded routing, queue + task records,
-  `reap_stale` (MAP 3.1).
+  `reap_stale` (the S3.4 reaper: stale running records + the deadline
+  backstop, MAP 3.4), the S3.4 dedup entry API (MAP 3.5), and the
+  task/pool commands: collect / steer / cancel / unload / reload.
 - `bonsai2-status`, `bonsai2-list-instances`, `bonsai2-health` — the
   S3.2 read family (MAP 3.2): status (S3.1 status schema, live
   main-probe, recomputed slots), list-instances (human table), health
@@ -33,6 +35,21 @@ Landed so far:
   queue wait (exit 8), S3.7 result file, S1.5 one-retry engine-down
   path. The worker is not itself an S3.2 command; it is the child the
   spawn command detaches.
+- `bonsai2-collect` (MAP 3.6) — read one task's result: task JSON +
+  `answer`/`reasoning`/`usage` from the result file. Exit 20/21/22 =
+  the task's terminal state (done/failed/timeout); 0 = non-terminal
+  (poll); 2 = unknown task.
+- `bonsai2-steer` + `bonsai2-cancel` (MAP 3.7) — steer-and-wait
+  (`--wait SECS` -> exit 8 on no state change; the steer is advisory in
+  v1, recorded on the task) and cancel (SIGTERM the worker's process
+  group, SIGKILL after 5 s; the worker's own handler marks the record
+  failed/ERR_CANCELLED so the slot frees at signal time, S3.4).
+- `bonsai2-unload` + `bonsai2-reload` (MAP 3.8) — pool control,
+  manager-mediated through the S3.2 control/ queue: unload stops the
+  targeted instance units (instant VRAM release, `bunloaded`,
+  zero-running -> main-only `user_unloaded`), reload re-spawns through
+  the S1.4 tier + S2.2 start + health re-probe (partial ->
+  `"state": "partial"`, exit 0). Dead manager -> exit 84.
 
 Lands here (later MAP items on this phase / later phases):
 

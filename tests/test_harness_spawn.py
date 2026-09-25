@@ -158,6 +158,7 @@ class SpawnBase(unittest.TestCase):
         data = {
             "main_endpoint": f"http://127.0.0.1:{self.main_engine.port}",
             "results_dir": str(self.results),
+            "dedup_dir": str(self.health_dir / "dedup"),
             "queue_wait_max_s": 2,
         }
         data.update(overrides)
@@ -778,8 +779,13 @@ class TestSpawnQueuePromotion(SpawnBase):
 
         def runner():
             barrier.wait()
+            # a DISTINCT prompt per thread: the S3.4 dedup key is the
+            # prompt hash, and two SAME-key spawns correctly no-op the
+            # second (that is S3.5, tested separately) — this test is the
+            # claim-lock race, so each spawn must be its own task.
+            ident = threading.get_ident()
             with redirect_stdout(routed_out), redirect_stderr(routed_err):
-                code = H.cmd_spawn(["-i", "race task"], self.env, poll_s=0.05)
+                code = H.cmd_spawn(["-i", f"race task {ident}"], self.env, poll_s=0.05)
             raw = getattr(tls, "out", io.StringIO()).getvalue()
             tls.out = None
             try:
