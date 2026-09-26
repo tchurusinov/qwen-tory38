@@ -1,0 +1,19 @@
+{
+  "scenario": "M2",
+  "rubric": "M2",
+  "description": "Golden test-execution batch report: the S5.2 'report JSON parseable + 10/10 files covered' shape. The M2 scorer (bench.score.m2) scores a subagent's test-batch report against THIS shape: it must (a) parse as JSON, and (b) cover all 10 files with a per-file pass/fail verdict. The 10 files are named files-000..files-009; 8 pass, 2 fail (files-003 and files-007) — the 10/10 coverage is what is scored, not the pass rate.",
+  "n_files": 10,
+  "files": [
+    {"file": "files-000.py", "status": "pass", "exit_code": 0, "duration_ms": 120},
+    {"file": "files-001.py", "status": "pass", "exit_code": 0, "duration_ms": 135},
+    {"file": "files-002.py", "status": "pass", "exit_code": 0, "duration_ms": 98},
+    {"file": "files-003.py", "status": "fail", "exit_code": 1, "duration_ms": 210},
+    {"file": "files-004.py", "status": "pass", "exit_code": 0, "duration_ms": 144},
+    {"file": "files-005.py", "status": "pass", "exit_code": 0, "duration_ms": 131},
+    {"file": "files-006.py", "status": "pass", "exit_code": 0, "duration_ms": 127},
+    {"file": "files-007.py", "status": "fail", "exit_code": 1, "duration_ms": 256},
+    {"file": "files-008.py", "status": "pass", "exit_code": 0, "duration_ms": 119},
+    {"file": "files-009.py", "status": "pass", "exit_code": 0, "duration_ms": 122}
+  ],
+  "summary": {"n_files": 10, "n_pass": 8, "n_fail": 2, "covered": 10}
+}

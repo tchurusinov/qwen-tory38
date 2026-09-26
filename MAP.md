@@ -772,6 +772,64 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-26 — Phase 4.1–4.8: bench framework (runner, scorers, goldens, S5.8 tests)
+- agent/model: Hermes qwen3.8-27b (session: branch `phase4-bench-framework`, off `main` @ `2edde2c`)
+- phase(s): P4 (4.1–4.8 — the Phase-4 bench framework; 4.9+ NOT in this PR)
+- items implemented: 4.1 `bench/config.py` (bench.yaml loader + S5.7 schema,
+  invalid scenario id -> exit 2; the S5.8 config test); 4.2 `bench/run.py`
+  runner core (scenario loader, endpoint resolver `bench/endpoints.py`
+  [subagent ports from subagent-engine.yaml, main from harness.yaml],
+  streaming task executor `bench/exec.py` [token timing from stream
+  timestamps], box-state snapshot `bench/boxstate.py` [S5.2, stdlib
+  subprocess + /proc], S5.2 scenario matrix `bench/scenarios.py`
+  [M1-M10, data-driven]); 4.3 `bench/report.py` (JSON row per scenario +
+  `bench-results/<date>_<commit>.md` summary) + `bench/rotate.py` (7-day
+  prune + 1 GB cap keep-newest + the S3.5 `BONSAI2_BENCH_LOCK` flock);
+  4.4 auto scorers `bench/score/` (m1 compile+3-case suite, m2 report
+  JSON + 10/10 coverage, m4 seeded 10-bug >= 80%, m5 5-QA golden binary,
+  m7 t/s ceiling + zero 5xx, m8 main t/s guardrail vs M6) + goldens in
+  `bench/goldens/` (m1 module+suite, m2 expected report, m4 bugs.json +
+  diff.patch, m5 qa.json); 4.5 `bench/score/m3.py` semi-auto (auto shape
+  * 0.7 + spot-check * 0.3); 4.6 `bench/score/m6.py` + the runner's M6
+  main-only control of M1-M5 (same rubrics; measured main_tps is the M8
+  guardrail baseline; M6 ordered before M8); 4.7 `bin/bonsai2-bench`
+  thin wrapper (exit code = the runner's: 0 even on scenario-level
+  failure, 2 bad config / bench-already-running); 4.8 S5.8 tests
+  (`tests/test_bench_{config,scenarios,rotate,endpoints,exec,boxstate,
+  rubrics,report,runner}.py` = 116 tests + `tests/fixtures/bench_mock.py`
+  the S5.8 mock-endpoint executor: canned streaming responses through
+  `bench.exec.score_stream`, zero network/GPU, timings sane).
+- machine state: branch `phase4-bench-framework`; nothing installed
+  (the install area is Phase 6). Hermetic suite: 543 tests OK (427
+  baseline + 116 new) under python3.12; `./scripts/gate.sh` PASS (exit 0);
+  ruff 0.11.11 format+check clean on all new files. `bench/run.py` +
+  `bin/bonsai2-bench` verified: `--help` exit 0; `--mock
+  tests.fixtures.bench_mock:mock_exec` full M1+M2 run exit 0, both rows
+  pass their rubrics, timings sane, box-state snapshot on every row,
+  `bench-results/*.md` summary written. No GPU load in this session
+  (the S5.8 mock run is hermetic by construction).
+- next: G3 — open the Gitea PR for `phase4-bench-framework`, run
+  `./scripts/review.sh`, loop the review to clean (raw-output +
+  disposition comments), then the G4 human merge gate (AGENTS.md PR-body
+  contract: DOD + checks + residual risk + spec-amendments/uncertainties
+  sections). After G4: flip MAP 4.1–4.8 to [x] at merge; the Phase-4
+  frontier becomes 4.9 (M9/M10 capability-layer goldens + scorers, both
+  tool_execution modes).
+- blockers/intricacies: M9/M10 rows run with a named PENDING verdict
+  (row fail, detail "scorer lands in MAP 4.9") until 4.9 — the S5.4
+  "failure is data" rule; the S5.7 note (M9/M10 full-bench-only in v1,
+  their rubrics need main-side re-runs). `tests/test_smoke.py` gained a
+  documented top-level+local `bench` allowlist entry (the S5.8 mock
+  fixture + the bench test modules import the runner package — the same
+  local-edge convention as the documented `yaml` dep). No live @gpu test
+  here (S5.8 is hermetic by spec; the @gpu live full M1-M10 run is MAP
+  4.10).
+- spec deltas: none (the S5.2 matrix + S5.3 rubric shapes are used
+  verbatim; the S5.2 M3 "min(6,avail)" column is read as a PARALLEL
+  fan-out cap, not a task-count reduction — the 6 sections are the fixed
+  shape; recorded in `bench/scenarios.py` + the runner's "parallel"
+  branch).
+
 ### 2026-09-26 — G4 merge: PR #18 merged as `e44762a`, MAP 3.13/3.14/3.15 done
 - agent/model: Hermes qwen3.8-27b (session: G4 merge gate, branch `main` @ `e44762a`)
 - phase(s): P3 (3.13/3.14/3.15 — the PR #18 scope; G3 closed, G4 merged)

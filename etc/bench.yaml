@@ -5,8 +5,8 @@
 # wrapper. Results: /run/bonsai2/bench/<ts>_<scenario>.json (7-day
 # rotation + 1 GB cap, S5.2); committed summary: bench-results/.
 
-scenarios: [M1, M2, M3, M4, M5, M6, M7, M8]   # S5.2 matrix
-quick: [M1, M2, M7]                           # S5.5 quick bench
+scenarios: [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10]   # S5.2 matrix (v1 = M1-M10)
+quick: [M1, M2, M7]                           # S5.5 quick bench (the text-only regression gate; M9/M10 are full-bench-only in v1 — their rubrics need main-side re-runs the quick bench's time budget does not carry)
 repetitions: 3
 regression_tps_pct: 10                        # S5.5: > 10% t/s regression blocks a pin-bump PR
 results_dir: /run/bonsai2/bench

@@ -50,6 +50,13 @@ Landed so far:
   zero-running -> main-only `user_unloaded`), reload re-spawns through
   the S1.4 tier + S2.2 start + health re-probe (partial ->
   `"state": "partial"`, exit 0). Dead manager -> exit 84.
+- `bonsai2-bench` (MAP 4.7) — run the bench: a thin wrapper over
+  `bench/run.py` (the S5.4 runner — scenario loader, endpoint resolver,
+  streaming task executor, box-state snapshot, per-rubric scorers,
+  reporter). `--scenario`/`--quick`/`--mock`/`--config`/`--max-tokens`/
+  `--spotcheck` go to the runner verbatim. Exit 0 even on scenario-level
+  failures (a failure is data); 2 = bad config / bench already running
+  (the S3.5 flock, MAP 4.3) (S5.4, S3.5).
 
 Lands here (later MAP items on this phase / later phases):
 
@@ -57,8 +64,7 @@ Lands here (later MAP items on this phase / later phases):
   (MAP 3.6) — S3.2 commands; the slot model + deadline enforcement
   (MAP 3.4) and spawn dedup (MAP 3.5) land in the core library, not as
   new commands.
-- `bonsai2-bench`, `bonsai2-unload`, `bonsai2-reload` — S3.2 commands
-  (MAP 3.8/4.7).
+- `bonsai2-unload`, `bonsai2-reload` — S3.2 commands (MAP 3.8).
 - `llama-server` — NOT in the repo: it is baked into the
   `bonsai2-server:<tag>` image (S1.4/S6.1); a host copy lives at
   /opt/bonsai2/bin/llama-server for ops (S1.2, MAP 1.2).

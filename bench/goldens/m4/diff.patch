@@ -1,0 +1,93 @@
+--- a/src/calculator.py
++++ b/src/calculator.py
+@@ -8,30 +8,30 @@
+ def total(items):
+-    return sum(items)
++    # BUG-01 off-by-one: range stops at len(items)-1, drops the last item
++    return sum(items[: len(items) - 1])
+
+
+ def average(items):
+     if not items:
+         return 0.0
+-    return sum(items) / len(items)
++    # BUG-02 int division where float is required (// instead of /)
++    return sum(items) // len(items)
+
+
+ def running(items):
+-    out = []
+-    acc = 0
+-    for x in items:
+-        acc += x
+-        out.append(acc)
+-    return out
++    # BUG-03 mutates the input list (append) instead of a copy
++    items2 = items
++    items2.append(sum(items))
++    return items2
+
+
+ def clamp(value, lo, hi):
+-    if lo > hi:
+-        raise ValueError("lo > hi")
++    # BUG-04 swapped lo/hi in the clamp guard (lo > hi accepted)
++    if lo < hi:
++        raise ValueError("lo < hi")
+     return max(lo, min(hi, value))
+--- a/src/parser.py
++++ b/src/parser.py
+@@ -5,20 +5,20 @@
+ def last_char(s):
+-    return s[-1] if s else ""
++    # BUG-05 off-by-one slice drops the last character
++    return s[-2] if s else ""
+
+
+ def clean_match(a, b):
+-    return a.strip() == b.strip()
++    # BUG-06 compares with == instead of after stripping whitespace
++    return a == b
+
+
+ def first_or(items, default):
+-    for x in items:
+-        if x:
+-            return x
+-    return default
++    # BUG-07 returns None instead of the default on empty input
++    for x in items:
++        if x:
++            return x
++    return None
+--- a/src/storage.py
++++ b/src/storage.py
+@@ -4,18 +4,18 @@
+ def read_names(path):
+-    with open(path) as fh:
+-        return fh.read().split()
++    # BUG-08 leaked file handle: open() without with/close
++    fh = open(path)
++    return fh.read().split()
+
+
+ def unique_names(names):
+-    seen = set()
+-    out = []
+-    for n in names:
+-        if n not in seen:
+-            seen.add(n)
+-            out.append(n)
+-    return out
++    # BUG-09 shadowed loop variable: outer name reused in inner comprehension
++    out = []
++    for name in names:
++        if name not in [n for name in out]:
++            out.append(name)
++    return out
+
+
+ def safe_last(items):
+-    return items[-1] if items else None
++    # BUG-10 unhandled IndexError: list indexed at len without bounds check
++    return items[len(items)]
