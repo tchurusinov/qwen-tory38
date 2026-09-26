@@ -427,13 +427,26 @@ def validate_engine_config(data) -> tuple[list[str], list[str]]:
                 else:
                     unknown = [t for t in tool_set if t not in FORK_TOOL_NAMES]
                     if unknown:
+                        # G3 PR#18 r8 P2 (fix): the S1.6 gate is "enabled:
+                        # true with an unknown tool name" — a DISABLED
+                        # set (enabled: false) is inert (the instance
+                        # doesn't start with --tools), so an unknown name
+                        # there can't affect the footprint: demote to a
+                        # warning. An ENABLED or ABSENT set (the default
+                        # is host-side on) still hard-rejects, matching
+                        # the kv_cache discipline.
                         enabled_true = enabled in (True, None)
-                        where = "tools.set (enabled)" if enabled_true else "tools.set"
-                        errors.append(
-                            f"{ERR_CONFIG}: {where}: unknown tool name(s) "
+                        msg = (
+                            f"{ERR_CONFIG}: tools.set (enabled): unknown tool name(s) "
                             f"{unknown} at pin 9a9394a8 "
                             f"(allowed: {', '.join(sorted(FORK_TOOL_NAMES))})"
                         )
+                        if enabled_true:
+                            errors.append(msg)
+                        else:
+                            warnings.append(
+                                f"{msg} (enabled: false — inert, warning only)"
+                            )
     return errors, warnings
 
 

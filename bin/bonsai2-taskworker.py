@@ -400,6 +400,14 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
         # payload too — a stream carrying ONLY a tool call (answer +
         # reasoning empty, the common native tool-call shape) would
         # otherwise estimate ~1 completion token.
+        # G3 PR#18 r8 P2 (noted): this is a COMPLETION-side estimate only
+        # (len/4 heuristic over the model's output). The PROMPT side —
+        # which grows every step as the tool_log/history accumulates — is
+        # not estimated (prompt_tokens: None); the S4.4 cost model sees a
+        # completion-only figure. For a tool-heavy multi-step task the
+        # real prompt_tokens dominate, so the estimate UNDER-states cost.
+        # It is flagged estimated=True, so a cost model that respects the
+        # flag treats it as a lower bound. No behavior change.
         tc_text = json.dumps(tool_calls) if tool_calls is not None else ""
         usage = {
             "prompt_tokens": None,
@@ -861,9 +869,31 @@ def _run_tool_loop(
             fresh["tool_log"] = tool_log
             fresh["updated_ts"] = time.time()
             H.write_task(d, fresh)
+        # G3 PR#18 r8 P0: re-sync the loop-local `port` from the on-disk
+        # record at the step boundary. The local `port` is a loop variable
+        # (the engine-retry branch updates it: rec["port"]=nport AND
+        # port=int(nport), line ~931), so it tracks the record in the
+        # common case; but the DISK record is the source of truth for the
+        # gate fields (r6 P1 re-adoption), and the next step's
+        # _stream_chat(port, ...) reads the LOCAL — so re-sync here to
+        # keep them equal if any other process (a steer/cancel write, or a
+        # future port-migration path) changed the record's port mid-loop.
+        # In the current design nothing external mutates port mid-loop, so
+        # this is a no-op; it makes the invariant structural.
+        if isinstance(fresh.get("port"), int):
+            port = int(fresh["port"])
         if steps >= max_steps:
             # S3.4: "hitting it without a final answer -> task timeout /
             # ERR_DEADLINE (the loop exhausted its step budget)".
+            # G3 PR#18 r8 P1 (documented, contract): the check fires when
+            # steps == max_steps, i.e. AFTER max_steps tool steps have
+            # run without a final answer — so `--max-steps N` allows N
+            # tool steps and then times out (codified by
+            # test_max_steps_exhausted_is_timeout: `--max-steps 3` ->
+            # exactly 3 completions). This is NOT an off-by-one: a task
+            # with `--max-steps 1` that emits a tool call on step 1 has
+            # exhausted its single allowed step and correctly times out;
+            # the "1 step" was the tool step, not a final answer.
             _set_state(
                 rec,
                 "timeout",

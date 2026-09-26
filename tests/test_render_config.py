@@ -505,5 +505,55 @@ class TestRenderConfig(_Base):
         self.assertEqual(out["instances"], self.cfg["instances"])
 
 
+class TestToolsBlock(_Base):
+    """S1.6 (the 2026-09-25 amendment, A8): the tools: block gate —
+    `enabled: true` with an unknown tool name is ERR_CONFIG; a disabled
+    set with an unknown name is a WARNING (inert, G3 PR#18 r8 P2)."""
+
+    def test_unknown_tool_enabled_is_error(self):
+        cfg = _template_dict()
+        cfg["tools"] = {"enabled": True, "set": ["read_file", "not_a_real_tool"]}
+        self.assert_invalid(cfg, needle="unknown tool name(s)")
+
+    def test_unknown_tool_enabled_false_is_warning_not_error(self):
+        # G3 PR#18 r8 P2: the S1.6 gate is "enabled: true with an unknown
+        # tool name" — a disabled set is inert, so the unknown name must
+        # NOT be a config error.
+        cfg = _template_dict()
+        cfg["tools"] = {"enabled": False, "set": ["not_a_real_tool"]}
+        errors, warnings = self.validate(cfg)
+        self.assertEqual(
+            errors,
+            [],
+            f"enabled:false + unknown name must be a warning, not an error: {errors}",
+        )
+        self.assertTrue(
+            any("unknown tool name(s)" in w for w in warnings),
+            f"the unknown name should surface as a warning: {warnings}",
+        )
+
+    def test_unknown_tool_absent_enabled_is_error(self):
+        # enabled absent = the default (host-side on) — the gate applies.
+        cfg = _template_dict()
+        cfg["tools"] = {"set": ["bogus_tool"]}
+        self.assert_invalid(cfg, needle="unknown tool name(s)")
+
+    def test_known_tools_enabled_is_valid(self):
+        cfg = _template_dict()
+        cfg["tools"] = {
+            "enabled": True,
+            "set": [
+                "read_file",
+                "write_file",
+                "edit_file",
+                "exec_shell_command",
+                "file_glob_search",
+                "grep_search",
+                "get_info",
+            ],
+        }
+        self.assert_valid(cfg)
+
+
 if __name__ == "__main__":
     unittest.main()

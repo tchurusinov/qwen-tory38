@@ -221,6 +221,17 @@ def resolve_path(root: Path, p) -> Path:
     # FileNotFoundError — the containment check is purely textual +
     # symlink-aware on the physical prefix, and the write itself creates
     # the leaf. No strict=True here on purpose.
+    # G3 PR#18 r8 P1 (verified false-positive): the candidate is anchored
+    # at the UNRESOLVED `root` (line 203-204) and only norm-resolved at
+    # the comparison (line 224), while `root_real` is root's physical
+    # target. Both sides are therefore PHYSICAL at the point of
+    # comparison, so a symlinked workdir (root -> /real) does NOT cause a
+    # relative path through the symlinked parent to fail containment that
+    # should pass: candidate /workdir/sub/file resolves to /real/sub/file,
+    # which IS under root_real /real. The textual test (line 211) catches
+    # the face-level `..`-crossing; the physical test catches the
+    # symlink-out; together they are complete for the workdir-is-a-symlink
+    # case. No behavior change.
     if not _under(norm.resolve()):
         raise ValueError(
             f"ERR_TOOL_PATH: {p!r} escapes the workdir {root_real} "
@@ -291,14 +302,25 @@ def _kill_group(proc: subprocess.Popen) -> None:
     descendant, e.g. sh -> sleep). The proc.kill() fallback (SIGKILL to
     the leader only) fires only when killpg raises — i.e. the group has
     already exited or been reaped — so in that narrow case the leader is
-    gone anyway and there is no orphan left behind. No behavior change."""
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    gone anyway and there is no orphan left behind. No behavior change.
+    G3 PR#18 r8 P1 (fix): killpg is retried on EINTR (an in-flight
+    signal interrupted the syscall) BEFORE falling back to the
+    leader-only proc.kill() — an EINTR means the group is NOT gone, so
+    the leader-only fallback would be the orphan-leaking path the
+    reviewer flagged. Bounded retry (3) to avoid an infinite loop on a
+    pathological signal storm."""
+    for _ in range(3):
         try:
-            proc.kill()
-        except OSError:
-            pass
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except InterruptedError:
+            continue
+        except (ProcessLookupError, PermissionError, OSError):
+            break
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 def _tool_bash(params: dict, ctx: dict) -> dict:
@@ -438,6 +460,14 @@ def execute(tool: str, params: dict, ctx: dict, *, step: int | None = None) -> d
                 res = _err(f"ERR_TOOL_EXEC: {_err_str(exc)}", 1, "ERR_TOOL_EXEC")
     max_bytes = int(ctx.get("output_max_kb", 32)) * 1024
     out = res.get("output")
+    # G3 PR#18 r8 P2 (noted): the non-str branch (json.dumps) is a latent
+    # path — every host tool returns `output` as a STR (bash/read/write/
+    # python all return strings), and the engine-side path also coerces
+    # to str before returning (taskworker _execute_tool_engine: plain
+    # text fields or json.dumps(data)[:4096]). So the dict branch is
+    # effectively unreachable today; it exists as a guard so a future
+    # tool that returns a structured output is still truncated (not
+    # silently passed through unbounded). Documented, no behavior change.
     res["output"] = _truncate(
         out if isinstance(out, str) else json.dumps(out), max_bytes
     )

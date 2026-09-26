@@ -1461,6 +1461,23 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
     # only prunes subdirs older than 7 days, so it is safe to run once
     # here, before any lock is taken — never holds the dedup lock during I/O.
     # Best-effort (a failed prune never blocks the spawn).
+    # G3 PR#18 r8 P1: a workspace_dir that EXISTS but is not a directory
+    # (e.g. a file at /run/bonsai2/workspaces) would otherwise be hidden
+    # by rotate_workspaces' is_dir() guard and only surface later as a
+    # cryptic mkdir failure at claim time — surface it here as the
+    # spawn-time config error (exit 2), consistent with the --workdir
+    # validation. A MISSING workspace_dir is still fine (created lazily
+    # by the auto-workdir mkdir, parents=True).
+    _wsd = Path(cfg["workspace_dir"])
+    if _wsd.exists() and not _wsd.is_dir():
+        return emit(
+            {
+                "error": "ERR_ARGS",
+                "detail": f"workspace_dir {_wsd} exists but is not a directory (S3.6)",
+            },
+            EXIT_ARGS,
+            f"workspace_dir {_wsd} is not a directory",
+        )
     try:
         rotate_workspaces(cfg["workspace_dir"])
     except Exception:  # noqa: BLE001, S110 — rotation is best-effort
@@ -1528,6 +1545,19 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             # S3.4 (the 2026-09-25 spec amendment, A4): --workdir is part of
             # "everything that determines what the task will do" — same
             # prompt in two workdirs is two different tasks.
+            # G3 PR#18 r8 P1 (documented, known limitation): an AUTO workdir
+            # (no --workdir) is keyed as None, not the resolved path — the
+            # auto path (<workspace_dir>/<task_id>) isn't known until the
+            # task_id is minted, which happens AFTER the key is computed,
+            # under the lock. Keying two concurrent same-prompt spawns by
+            # their (distinct) auto paths would defeat dedup (double slot);
+            # keying both by None is what makes them no-op onto each other.
+            # The consequence: a LATER spawn with an explicit --workdir set
+            # to a PRIOR task's auto path won't dedup onto that prior task
+            # (key: the path, vs the prior task's key: None). That's the
+            # intended direction — an auto path is unique per task and
+            # almost never reused as an explicit --workdir — so this is a
+            # documented edge, not a defect. No behavior change.
             "workdir": str(parsed["workdir"])
             if parsed["workdir"] is not None
             else None,

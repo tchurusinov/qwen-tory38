@@ -79,7 +79,14 @@ class ToolEngine:
     # ------------------------------------------------------------------
     def _next_spec(self) -> dict:
         """The next canned completion; the last entry REPEATS once the
-        queue is exhausted (the overrun cases are single-entry queues)."""
+        queue is exhausted (the overrun cases are single-entry queues).
+        G3 PR#18 r8 P2 (noted): a spec carrying a `sleep` key repeats it
+        on EVERY replay once the queue is exhausted (the repeat re-uses
+        the same spec dict, so the sleep fires again). No current test
+        uses a `sleep` key, so the overrun cases (single-entry, no
+        sleep) never hit the repeat path — the documented hazard is
+        latent. If a future test adds `sleep` to a single-entry spec that
+        must overrun, expect the suite to stall for N*sleep seconds."""
         if not self.responses:
             return {"kind": "final", "content": "done"}
         self._idx = min(self._idx, len(self.responses) - 1)

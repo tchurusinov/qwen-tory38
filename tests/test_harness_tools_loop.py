@@ -419,6 +419,16 @@ class TestToolLoopHostExecution(LoopBase):
         # implementation detail). To pin the window, assert on a tool
         # subprocess that is definitely alive (e.g. pgrep the sleep pid);
         # deferred to the test-overhaul phase the user announced.
+        # G3 PR#18 r8 P2 (verified false-positive): the reviewer claimed
+        # the record's `steps` stays 0 during the sleep 20 (so the poll
+        # could only fire cancel AFTER the tool completed). It does NOT:
+        # the step-completion returns first, then `steps += 1` +
+        # _persist_rec_preserving run (taskworker line ~965-968), and only
+        # THEN the tool is parsed + executed (line ~1094, the sleep 20).
+        # So by the time the record shows steps>=1 the tool is ALREADY
+        # running, and cancel lands mid-sleep exactly as intended. The
+        # poll condition (worker_pid AND steps>=1) is the correct
+        # "worker is in a tool step" signal. No behavior change.
         p0 = 0
         eng = self._instance(
             p0, [{"kind": "tool", "tool": "bash", "params": {"cmd": "sleep 20"}}]
@@ -596,6 +606,37 @@ class TestSpawnFlagsAndWorkdir(LoopBase):
         H.ensure_results_dirs(d)
         rec = H.read_task(d, doc["task_id"])
         self.assertEqual(rec["workdir"], str(custom.resolve()))
+
+    def test_workspace_dir_not_a_dir_is_exit_2(self):
+        # G3 PR#18 r8 P1: a workspace_dir that EXISTS but is not a
+        # directory must surface as the spawn-time config error (exit 2),
+        # not a cryptic mkdir failure at claim time (rotate_workspaces'
+        # is_dir() guard used to hide it).
+        p0 = 0
+        eng = self._instance(p0, [{"kind": "final", "content": "done"}])
+        not_a_dir = self.tmp / "ws-is-a-file"
+        not_a_dir.write_text("i am a file\n")
+        self._write_cfg(workspace_dir=str(not_a_dir))
+        self._write_health([self._inst(0, eng.port)])
+        code, doc, _ = _run_cmd(
+            H.cmd_spawn, ["-i", "ws file", "--deadline", "30"], self.env
+        )
+        self.assertEqual(code, 2, f"expected exit 2, got {code}")
+        self.assertEqual(doc.get("error"), "ERR_ARGS")
+        self.assertIn("workspace_dir", doc.get("detail") or "")
+
+    def test_workspace_dir_missing_is_fine(self):
+        # a MISSING workspace_dir is lazily created by the auto-workdir
+        # mkdir (parents=True) — not a spawn-time error.
+        p0 = 0
+        eng = self._instance(p0, [{"kind": "final", "content": "done"}])
+        self._write_cfg(workspace_dir=str(self.tmp / "ws-not-yet-created"))
+        self._write_health([self._inst(0, eng.port)])
+        code, doc = self._spawn(["-i", "ws missing", "--deadline", "30"])
+        self.assertEqual(code, 0, f"missing workspace_dir must not block spawn: {doc}")
+        d = self._results()
+        H.ensure_results_dirs(d)
+        self.assertTrue(Path(H.read_task(d, doc["task_id"])["workdir"]).is_dir())
 
     def test_workdir_missing_is_exit_2(self) -> None:
         p0 = 0
