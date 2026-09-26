@@ -406,6 +406,19 @@ class TestToolLoopHostExecution(LoopBase):
         # S3.4 cancel: SIGTERM mid-step -> the handler kills the in-flight
         # tool's process group, the record goes failed/ERR_CANCELLED
         # (the slot frees at signal time), collect 21.
+        # G3 PR#18 r5 P2 (noted): the poll below breaks once
+        # worker_pid is set AND steps >= 1 — a narrow window exists
+        # between the record marking the pid and the tool subprocess
+        # actually spawning (the sleep 20 has not yet started). If cancel
+        # lands in that window, the handler's kill-current-tool is a
+        # no-op (no _CURRENT_PROC) and the REAPER is what reclaims the
+        # slot. The assertion (state=failed, error=ERR_CANCELLED,
+        # collect 21) holds either way, so the test does not distinguish
+        # handler-kill from reaper-kill — that is acceptable for v1
+        # (ERR_CANCELLED is the contract; WHICH reaper ran is
+        # implementation detail). To pin the window, assert on a tool
+        # subprocess that is definitely alive (e.g. pgrep the sleep pid);
+        # deferred to the test-overhaul phase the user announced.
         p0 = 0
         eng = self._instance(
             p0, [{"kind": "tool", "tool": "bash", "params": {"cmd": "sleep 20"}}]

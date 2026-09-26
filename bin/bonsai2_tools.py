@@ -276,7 +276,14 @@ def _run_capped(
 
 def _kill_group(proc: subprocess.Popen) -> None:
     """SIGKILL the whole process group (the subprocess + any children it
-    spawned — S3.4 "process-group kill at tool_timeout_s")."""
+    spawned — S3.4 "process-group kill at tool_timeout_s").
+    G3 PR#18 r5 P2 (noted): the subprocess is launched with
+    start_new_session=True (setsid -> its own session + process group),
+    so killpg(getpgid(proc.pid)) reaches the ENTIRE tree (leader + every
+    descendant, e.g. sh -> sleep). The proc.kill() fallback (SIGKILL to
+    the leader only) fires only when killpg raises — i.e. the group has
+    already exited or been reaped — so in that narrow case the leader is
+    gone anyway and there is no orphan left behind. No behavior change."""
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):

@@ -516,6 +516,14 @@ def rotate_workspaces(
         children = list(root.iterdir())
     except OSError:
         return 0
+    # G3 PR#18 r5 P2 (noted): _newest_mtime_under runs rglob("*") per
+    # candidate workdir, which is O(total files in the workspace tree) per
+    # spawn. It runs ONCE per cmd_spawn invocation (at the top, outside any
+    # lock — see G3 PR#18 r4 P1), so the cost is a one-shot full-tree stat
+    # scan per spawn, not per tool step. On a busy workspace_dir this is a
+    # per-spawn I/O cost; if it ever shows up in a load test, the next
+    # optimization is to throttle to once-per-process (cache the last
+    # rotation ts) rather than once-per-spawn. No behavior change.
     for child in children:
         if not child.is_dir():
             continue

@@ -123,6 +123,13 @@ DEFAULT_DEADLINE_S = 600.0
 # The text-JSON tool-call convention (the A2 probe fallback): a fenced
 # ```json ...``` block, or a bare object at the start of the content,
 # whose "tool" (or "name") field names one of the four tools.
+# G3 PR#18 r5 P2 (noted): non-greedy `\{.*?\}` stops at the FIRST `}` it
+# can close the object at — fine for the flat tool-call shape the spec
+# expects ({tool, path/content/cmd/code}), but a nested object
+# ({"a":{"b":1}}) would truncate at the inner `}` and fail json.loads,
+# falling through to the next step (not a hard error). If the pin ever
+# emits a nested params object in the text-JSON convention, switch to a
+# JSON-aware scanner (e.g. json.JSONDecoder().raw_decode at each `{`).
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _TOOL_CALL_KEYS = ("tool", "name")
 
@@ -328,6 +335,18 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
                     reasoning_parts.append(str(delta["reasoning_content"]))
                 tcs = delta.get("tool_calls")
                 if isinstance(tcs, list) and tcs:
+                    # G3 PR#18 r5 P1 (documented, design): capture ONLY the
+                    # first function in the tool_calls array. The spec's
+                    # step contract is "when the model emits A tool call the
+                    # harness executes it and feeds the result back" (S3.4,
+                    # singular) and the @gpu probe verdict at pin 9a9394a89
+                    # recorded "the pin emits one" (finish_reason=tool_calls,
+                    # one tool_call delta per completion). Parallel tool
+                    # calls (multiple in one array) are out of scope for the
+                    # host-side single-step contract: execute tcs[0], feed
+                    # the result back, and let the model re-emit the rest on
+                    # the NEXT step. (If the pin ever grows to emit N, this
+                    # line is the site to extend.)
                     tc = tcs[0]
                     if isinstance(tc, dict) and tc.get("function"):
                         fn = tc["function"]
@@ -947,6 +966,16 @@ def _run_tool_loop(
                 # local value is always == the on-disk record's workdir — no
                 # lock-safe re-read needed, unlike steps / tool_log which are
                 # accumulated across steps.
+                # G3 PR#18 r5 P1 (documented, design): the write is
+                # tmp + atomic rename (tmp.write_text -> tmp.replace), so a
+                # mid-write failure leaves the PREVIOUS result file intact
+                # (never a half-written file the collector would read as
+                # truncated JSON). The tmp file is a SIBLING of the target
+                # (.json -> .json.tmp) on the same filesystem, so
+                # Path.replace is an atomic rename(2). The loop path writes
+                # the full result dict directly (answer + reasoning + usage
+                # + tool_log + steps + workdir); the pre-loop path writes
+                # only {answer, reasoning, usage} — both land atomically.
                 tmp.write_text(
                     json.dumps(
                         {
