@@ -873,10 +873,36 @@ SPEC.md `status` → `active`.
   testing-strategy-report.md scope creep (DEFERRED to the pre-Phase-4
   test-framework overhaul — moved out there as its own change, not
   history-rewritten in this branch), pybin metachars (documented r3).
-  27655fd, posted 945/946. Suite 422/422 OK. Round 10 (final
-  confirmation, 27655fd) running; a P2-only or CLEAN round-10 closes the
-  loop for G4. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x]
-  on merge.
+  27655fd, posted 945/946. Suite 422/422 OK. Round 10 (confirmation,
+  27655fd): 0 P0, 1 P1, 5 P2. P1 (write_file through a symlinked
+  parent): PROBED — on this box (Py3.14) the pre-mkdir resolve_path
+  already catches it (non-strict resolve() follows the existing symlink
+  ancestor even for a missing leaf -> out/f.txt resolves outside
+  root_real -> ERR_TOOL_PATH, no bytes written; full 10-shape probe
+  matrix all correct); added the reviewer's post-mkdir containment
+  re-check on the fully-physical target anyway so the "symlinks OUT
+  are rejected" rule holds independent of the interpreter's resolve
+  semantics; 3 new hermetic regression tests (out-rejected,
+  out-missing-dir-rejected, in-allowed positive control). P2s all
+  documented/disposed: #1 off-task collect-returns-workdir vs
+  spawn-omits-it (noted at the collect site; r7 P2 at spawn_json is
+  the other half), #2 rglob per-spawn cost (already noted r5), #3
+  rotation unconditional for off-tasks (premise verified: off tasks DO
+  get an auto-workdir via the dedup key; harmless; noted at rotate
+  site), #4 engine-side python bin must exist in the container
+  (v1 limitation; noted at the base64 site), #5 dedup workdir test
+  live-winner-dependent (correct; the test explicitly waits for
+  state=running; noted at the test). 7709c86, posted 958/959. Suite
+  425/425 OK. G3 loop state: P0-per-round r1-r10 = 0,1,1,1,0,0,1,1,0,0
+  (1-P0 rounds were 2,3,4,7,8; zero-P0 were 1,5,6,9,10), P1s for
+  r7-r10 = 1,5,2,1 (round-8's 5 included the deepest pass; the last
+  four rounds' substantive P1s: r8 port re-sync, r9 streamed
+  tool-call accumulation, r10 write-symlink containment — each probed
+  and answered). Round-10's P1 was the first "real-or-not" containment
+  question probed and answered both ways (pre-check correct + post-check
+  defense-in-depth); the loop is converging to documentation-only
+  rounds. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x] on
+  merge (G4).
 - blockers/intricacies: (a) the @gpu probe originally failed for a
   non-obvious argv-shape reason (flag+value as one token); captured in
   the commit message + the probe now logs `docker logs` tail on early
