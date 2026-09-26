@@ -541,6 +541,16 @@ def rotate_workspaces(
     # per-spawn I/O cost; if it ever shows up in a load test, the next
     # optimization is to throttle to once-per-process (cache the last
     # rotation ts) rather than once-per-spawn. No behavior change.
+    # G3 PR#18 r10 P2 (noted): rotation runs unconditionally for every
+    # spawn, including --tools off tasks. Off tasks ALSO get an
+    # auto-created workdir (the workspace_dir/<task_id> mkdir is not
+    # gated on the tools flag — the workdir is part of the S3.4 dedup
+    # key regardless of the loop flag), and it is genuinely unused
+    # scratch (the worker passes workdir=None to the tools-off path).
+    # Rotating it is harmless (an empty 7-day-old dir, pruned the same
+    # as any other) — gating rotation on tools==on would save one
+    # iterdir pass only and complicate the "one rotation owner"
+    # invariant; deferred, no behavior change.
     for child in children:
         if not child.is_dir():
             continue
@@ -1139,16 +1149,26 @@ def dedup_record(cfg: dict, dedup_key: str, task_id: str) -> None:
 # --------------------------------------------------------------------------
 def read_result(rec: dict) -> dict:
     """The S3.2 collect payload fields `answer` / `reasoning` / `usage` +
-    the S3.1 capability-layer fields `tool_log` / `steps` / `workdir`
-    (the 2026-09-25 amendment's result-file shape: the taskworker writes
-    {answer, reasoning, usage, tool_log, steps, workdir}). Absent/invalid
-    file -> the answer/reasoning/usage are null AND tool_log/steps are
-    the S3.2 no-file defaults (`tool_log is [] for --tools off tasks`,
-    `steps` null when the file is absent) — a failed/timeout task may not
-    have written it; collect still returns the task's terminal state +
-    code. `workdir` comes from the RECORD (the S3.1 'main's verification
+       the S3.1 capability-layer fields `tool_log` / `steps` / `workdir`
+       (the 2026-09-25 amendment's result-file shape: the taskworker writes
+       {answer, reasoning, usage, tool_log, steps, workdir}). Absent/invalid
+       file -> the answer/reasoning/usage are null AND tool_log/steps are
+       the S3.2 no-file defaults (`tool_log is [] for --tools off tasks`,
+       `steps` null when the file is absent) — a failed/timeout task may not
+       have written it; collect still returns the task's terminal state +
+       code. `workdir` comes from the RECORD (the S3.1 'main's verification
     entry point') when the record carries it; the result file echoes it
-    for post-capability-layer records."""
+    for post-capability-layer records.
+
+    G3 PR#18 r10 P2 (noted at the collect site): a `--tools off` task's
+    collect payload RETURNS workdir (from the record — set for off
+    tasks too, it is part of the S3.4 dedup key) while the off-task
+    SPAWN JSON OMITS it (the r6 P1 byte-identical constraint). Both
+    sides match their own spec clause (spawn = pre-loop wire surface;
+    collect = the S3.1 amendment's {answer, reasoning, usage,
+    tool_log, steps, workdir}); the asymmetry is intentional, see the
+    r7 P2 note at spawn_json. No fix.
+    """
     out = {
         "answer": None,
         "reasoning": None,

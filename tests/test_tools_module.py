@@ -189,6 +189,55 @@ class TestWorkdirContainment(ToolsModuleBase):
         self.assertFalse(res["ok"])
         self.assertFalse(self.outside.joinpath("x.txt").exists())
 
+    def test_write_through_symlinked_parent_out_rejected(self) -> None:
+        """G3 PR#18 r10 P1 regression (the reviewer's write-file
+        containment-gap probe): a symlinked PARENT that points OUT of the
+        workdir. The containment check runs BEFORE mkdir, so the check
+        must be strong enough to catch the escape even though the leaf
+        does not exist yet. Probed shape: wd/out -> <outside> (an
+        existing outside dir), path out/f.txt — resolve() follows the
+        existing symlink ancestor, so out/f.txt physically lands at
+        <outside>/f.txt, outside root_real, and the containment check
+        rejects it (ERR_TOOL_PATH, no bytes written).
+
+        This is the write half of the "symlinks OUT are rejected"
+        guarantee that read_file enforces at open."""
+        os.symlink(self.outside, self.wd / "out")
+        res = T.execute("write_file", {"path": "out/f.txt", "content": "X"}, self.ctx)
+        self.assertFalse(res["ok"])
+        self.assertIn("ERR_TOOL_PATH", res["output"])
+        # nothing landed outside, nothing in the workdir:
+        self.assertFalse(self.outside.joinpath("f.txt").exists())
+        self.assertFalse(self.wd.joinpath("out", "f.txt").exists())
+
+    def test_write_through_symlinked_parent_out_with_missing_dir_rejected(self) -> None:
+        """G3 PR#18 r10 P1 (variant): the same symlink-OUT parent, but
+        with an intermediate dir that does not exist yet (out/sub/f.txt).
+        The containment check still resolves through the existing
+        symlink, so the escape is caught before mkdir materializes
+        anything."""
+        os.symlink(self.outside, self.wd / "out")
+        res = T.execute(
+            "write_file", {"path": "out/sub/f.txt", "content": "X"}, self.ctx
+        )
+        self.assertFalse(res["ok"])
+        self.assertIn("ERR_TOOL_PATH", res["output"])
+        self.assertFalse(self.outside.joinpath("sub", "f.txt").exists())
+
+    def test_write_through_symlinked_parent_in_allowed(self) -> None:
+        """G3 PR#18 r10 P1 (positive control): a symlinked parent that
+        points INTO the workdir — the intended in-workdir write must
+        still succeed. The physical inode is inside the workdir, so
+        containment holds and the write lands on the in-workdir real
+        dir."""
+        real = self.wd / "real"
+        real.mkdir()
+        os.symlink(real, self.wd / "inn")
+        res = T.execute("write_file", {"path": "inn/f.txt", "content": "in"}, self.ctx)
+        self.assertTrue(res["ok"], f"expected in-workdir write to pass, got {res}")
+        self.assertTrue(real.joinpath("f.txt").is_file())
+        self.assertEqual(real.joinpath("f.txt").read_text(), "in")
+
     def test_make_ctx_requires_an_existing_workdir(self) -> None:
         with self.assertRaises(ValueError):
             T.make_ctx(self.wd / "does-not-exist")

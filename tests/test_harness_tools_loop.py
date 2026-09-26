@@ -713,6 +713,15 @@ class TestSpawnFlagsAndWorkdir(LoopBase):
         # same prompt, two DIFFERENT workdirs = two tasks (A4: the workdir
         # is "everything that determines what the task will do");
         # same prompt + same workdir = a dedup no-op.
+        # G3 PR#18 r10 P2 (noted): the "same workdir = dedup no-op"
+        # half only holds against a LIVE winner — a terminal record's key
+        # is released (the dedup race-resolution path re-mints). Task A
+        # holds its slot for the ~3 s `sleep 3` tool step, and the test
+        # explicitly waits for state=running before spawning B, so the
+        # assertion is deterministic on that window; if the tool step ever
+        # finishes faster than the poll catches running, B would re-mint
+        # instead of deduping. Kept as-is (the wait makes it a non-issue
+        # in practice).
         p0, p1 = 0, 0
         eng0 = self._instance(
             p0, [{"kind": "tool", "tool": "bash", "params": {"cmd": "sleep 3"}}]

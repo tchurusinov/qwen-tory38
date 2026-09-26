@@ -647,6 +647,13 @@ def _execute_tool_engine(
         # default /usr/bin/python3) AND the b64 payload is wrapped in single
         # quotes with a shell-safe charset; if a future config ever allows a
         # pybin with shell metachars, re-check this line.
+        # G3 PR#18 r10 P2 (noted, v1 limitation): the instance container
+        # has no shared volume (units/bonsai2-server@.service: no -v), so a
+        # HOST-venv python bin (e.g. ~/prod/.venv/bin/python, an S3.6
+        # override) does NOT exist inside the container — only a path that
+        # exists in the image (the default /usr/bin/python3) works in
+        # engine mode. The key implies a host path that is only valid in
+        # host mode; documented, no v1 fix.
         b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
         ep["command"] = f"{pybin} -c \"import base64;exec(base64.b64decode('{b64}'))\""
     # G3 PR#18 r2 P2: the instance container has no shared volume

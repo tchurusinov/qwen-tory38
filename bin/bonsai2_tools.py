@@ -399,8 +399,27 @@ def _tool_write_file(params: dict, ctx: dict) -> dict:
         target = resolve_path(Path(ctx["workdir"]), p)
     except ValueError as exc:
         return _err(str(exc), 1, "ERR_TOOL_PATH")
+    root_real = Path(ctx["workdir"]).resolve()
+
+    def _under(path: Path) -> bool:
+        return path == root_real or str(path).startswith(str(root_real) + os.sep)
+
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        # G3 PR#18 r10 P1 (defense-in-depth): re-check containment AFTER
+        # mkdir, on the fully-physical target (all parent components now
+        # exist, so resolve() follows every symlink including any
+        # out-of-workdir parent the pre-mkdir check could not see on an
+        # older interpreter whose non-strict resolve stops at the first
+        # missing component). This is the write half of the "symlinks OUT
+        # are rejected" rule that read_file enforces at open.
+        if not _under(target.resolve()):
+            return _err(
+                f"ERR_TOOL_PATH: {p!r} resolves to {target.resolve()} "
+                f"after mkdir — outside the workdir {root_real}",
+                1,
+                "ERR_TOOL_PATH",
+            )
         target.write_text(content)
     except OSError as exc:
         return _err(f"{p!r}: {_err_str(exc)}", 1, "ERR_TOOL_WRITE")
