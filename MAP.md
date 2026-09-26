@@ -797,14 +797,25 @@ SPEC.md `status` → `active`.
   test-logs/tools-probe-*.json (gitignored). No bonsai2 containers
   running; main stack :30001 up. Gate baseline PASS (2026-09-20); this
   session's gate PASS with ruff now hard (uvx ruff).
-- next: G3 review loop — the reviewer (pi on :30001, isolated, G3b)
-  output lands at /tmp/review-phase3-capability-layer-313-315.txt;
-  post raw output to PR #18 as the G3b-post comment, reconcile (G3c),
-  fix/waive per finding, re-run gate + review until clean; then G4 human
-  merge. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x] on
-  merge. The @gpu probe is re-runnable via
-  `tests/run_gpu.sh tests.gpu.test_tools_probe -v` (honest: it spins a
-  container on :30170 for ~3-5 min).
+- next: G3 review loop — round 1 (pi on :30001, isolated) found 0 P0, 1 P1
+  (engine-side python multi-line source via `sh -c` + `json.dumps` —
+  SyntaxError, verified real via probe; fixed with base64-encode), 2 P2
+  (inline `import shutil`, ad-hoc 3600 s deadline fallback — fixed with
+  module-level import + `DEFAULT_DEADLINE_S = 600.0`). Committed eee2cca,
+  posted raw (comment 849) + disposition to PR #18. Round 2 on eee2cca
+  found 1 P0 (tautological test assertion in
+  test_text_json_tool_call_fallback: `cdoc["workdir"] and "x"` always the
+  literal "x" — never checked the file content; fixed), 2 P1 (redundant
+  auto-workdir parent.mkdir — removed; probe prompt absolute /tmp/probe.txt
+  — made relative for containment-validity if reused host-side), 4 P2
+  (engine-side cwd = host workdir but the instance container has no shared
+  volume per units/bonsai2-server@.service — no longer forced; usage
+  estimate ignored the tool-call payload — now includes it; probe --memory
+  16g documented as allocation-tier headroom, not the pool's 14.78).
+  Committed 7b3e275, posted raw (860) + disposition (861). Round-3 review
+  on 7b3e275 running — expect REVIEW CLEAN or a fresh low-severity set;
+  post raw + disposition, then G4 human merge. The 3.13/3.14/3.15 boxes in
+  the Phase 3 list flip to [x] on merge.
 - blockers/intricacies: (a) the @gpu probe originally failed for a
   non-obvious argv-shape reason (flag+value as one token); captured in
   the commit message + the probe now logs `docker logs` tail on early

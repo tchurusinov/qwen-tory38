@@ -536,6 +536,11 @@ def _execute_tool_engine(
         # -c body stays a single physical line. (The host-side python tool
         # passes code via stdin, which handles newlines natively; the
         # engine-side path must go through the shell, hence the encode.)
+        # G3 PR#18 r3 P2: the quoting is safe BECAUSE pybin comes from the
+        # config (tool_python_bin, an absolute path — no spaces/globs in the
+        # default /usr/bin/python3) AND the b64 payload is wrapped in single
+        # quotes with a shell-safe charset; if a future config ever allows a
+        # pybin with shell metachars, re-check this line.
         b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
         ep["command"] = f"{pybin} -c \"import base64;exec(base64.b64decode('{b64}'))\""
     # G3 PR#18 r2 P2: the instance container has no shared volume
@@ -917,6 +922,13 @@ def _run_tool_loop(
             try:
                 Path(rec["result_file"]).parent.mkdir(parents=True, exist_ok=True)
                 tmp = Path(rec["result_file"]).with_suffix(".tmp")
+                # G3 PR#18 r3 P1 (waived false-positive): `workdir` here is
+                # the worker-start snapshot (rec.get("workdir"), line 710).
+                # It is set ONCE at spawn and never mutated mid-loop (only
+                # steps / tool_log / steer_messages / state change), so the
+                # local value is always == the on-disk record's workdir — no
+                # lock-safe re-read needed, unlike steps / tool_log which are
+                # accumulated across steps.
                 tmp.write_text(
                     json.dumps(
                         {

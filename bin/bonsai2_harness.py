@@ -109,6 +109,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -1340,9 +1341,15 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
             i += 2
             continue
         if a == "--max-steps":
-            if i + 1 >= len(argv) or not argv[i + 1].isdigit() or int(argv[i + 1]) <= 0:
+            # G3 PR#18 r3 P0: `isdigit()` accepts leading zeros ("007" ->
+            # 7) and "000" -> 0 (range check rejects it) — inconsistent
+            # with the sibling --ctx/numeric handling. Use a strict
+            # `^[1-9][0-9]*$` so "007" is rejected outright, not silently
+            # coerced to 7.
+            tok = argv[i + 1] if i + 1 < len(argv) else ""
+            if not re.fullmatch(r"[1-9][0-9]*", tok):
                 return "ERR_ARGS: --max-steps must be a positive integer"
-            v = int(argv[i + 1])
+            v = int(tok)
             if not (1 <= v <= 128):
                 return "ERR_ARGS: --max-steps must be in 1-128 (S3.4)"
             args["max_steps"] = v
@@ -1544,6 +1551,12 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 EXIT_ARGS,
                 f"--workdir {wd}: not a directory",
             )
+        # G3 PR#18 r3 P2 (noted, no behavior change): this validates the
+        # explicit --workdir under the CURRENT uid at spawn, and the
+        # taskworker runs as that same uid — so the check is exactly right
+        # for the writer. (Asymmetry vs the auto-workdir, which the harness
+        # creates 0o700 owner-only: an explicit --workdir may be owned by
+        # another user but is writable by us, which is all the tools need.)
         if not os.access(wd, os.W_OK):
             return emit(
                 {"error": "ERR_ARGS", "detail": f"--workdir {wd}: not writable"},
@@ -1592,8 +1605,13 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                     # parents=True creates the workspace_dir root too; no
                     # separate parent mkdir (G3 PR#18 r2 P1: the explicit
                     # parent.mkdir was dead code — the child mkdir's
-                    # parents=True already creates it).
+                    # parents=True already creates it). G3 PR#18 r3 P1:
+                    # chmod the leaf 0o700 so a task's workdir is
+                    # owner-only (defense-in-depth — every task here
+                    # shares the runner uid, so this is belt-and-suspenders
+                    # for the shared workspace_dir).
                     auto_wd.mkdir(parents=True, exist_ok=True)
+                    os.chmod(auto_wd, 0o700)
                 except OSError as exc:
                     # emit inside the lock is fine (the with-block releases
                     # it on return): no record exists yet, so the key is

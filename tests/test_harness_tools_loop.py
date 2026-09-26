@@ -546,6 +546,13 @@ class TestSpawnFlagsAndWorkdir(LoopBase):
         self.assertTrue(
             Path(rec["workdir"]).is_dir(), "the harness created the workdir"
         )
+        # G3 PR#18 r3 P1: the auto-created workdir is 0o700 owner-only
+        # (defense-in-depth for the shared workspace_dir).
+        self.assertEqual(
+            Path(rec["workdir"]).stat().st_mode & 0o777,
+            0o700,
+            "auto-workdir is 0o700 owner-only",
+        )
         # the accepted JSON carries the workdir field:
         self.assertEqual(doc["workdir"], rec["workdir"])
 
@@ -591,8 +598,11 @@ class TestSpawnFlagsAndWorkdir(LoopBase):
         self.assertEqual(H.read_task(d, doc["task_id"])["max_steps"], 5)
 
     def test_max_steps_out_of_range_is_exit_2(self) -> None:
+        # "007" is the G3 PR#18 r3 P0: isdigit() accepted leading-zero
+        # tokens and silently stored int("007")=7; the strict
+        # ^[1-9][0-9]*$ regex now rejects it as a positive-integer violation.
         self._write_cfg()
-        for bad in ("0", "-1", "129"):
+        for bad in ("0", "-1", "129", "007", "000"):
             code, doc, _ = _run_cmd(
                 H.cmd_spawn, ["-i", "bad ms", "--max-steps", bad], self.env
             )
