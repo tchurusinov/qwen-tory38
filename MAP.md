@@ -797,25 +797,50 @@ SPEC.md `status` → `active`.
   test-logs/tools-probe-*.json (gitignored). No bonsai2 containers
   running; main stack :30001 up. Gate baseline PASS (2026-09-20); this
   session's gate PASS with ruff now hard (uvx ruff).
-- next: G3 review loop — round 1 (pi on :30001, isolated) found 0 P0, 1 P1
-  (engine-side python multi-line source via `sh -c` + `json.dumps` —
-  SyntaxError, verified real via probe; fixed with base64-encode), 2 P2
-  (inline `import shutil`, ad-hoc 3600 s deadline fallback — fixed with
-  module-level import + `DEFAULT_DEADLINE_S = 600.0`). Committed eee2cca,
-  posted raw (comment 849) + disposition to PR #18. Round 2 on eee2cca
-  found 1 P0 (tautological test assertion in
-  test_text_json_tool_call_fallback: `cdoc["workdir"] and "x"` always the
-  literal "x" — never checked the file content; fixed), 2 P1 (redundant
-  auto-workdir parent.mkdir — removed; probe prompt absolute /tmp/probe.txt
-  — made relative for containment-validity if reused host-side), 4 P2
-  (engine-side cwd = host workdir but the instance container has no shared
-  volume per units/bonsai2-server@.service — no longer forced; usage
-  estimate ignored the tool-call payload — now includes it; probe --memory
-  16g documented as allocation-tier headroom, not the pool's 14.78).
-  Committed 7b3e275, posted raw (860) + disposition (861). Round-3 review
-  on 7b3e275 running — expect REVIEW CLEAN or a fresh low-severity set;
-  post raw + disposition, then G4 human merge. The 3.13/3.14/3.15 boxes in
-  the Phase 3 list flip to [x] on merge.
+- next: G3 review loop (PR #18, comments 849–900). Round 1 (head c54aef6):
+  0 P0, 1 P1 (engine-side python multi-line source via `sh -c` —
+  SyntaxError, verified via probe; fixed with base64-encode), 2 P2
+  (inline `import shutil` -> module-level; ad-hoc 3600 s deadline
+  fallback -> `DEFAULT_DEADLINE_S = 600.0`) — eee2cca, posted 849.
+  Round 2 (eee2cca): 1 P0 (tautological test assertion `cdoc["workdir"]
+  and "x"` in test_text_json_tool_call_fallback -> real file-content
+  assertion), 2 P1 (redundant auto-workdir parent.mkdir removed; probe
+  prompt /tmp/probe.txt -> relative for host-side containment), 4 P2
+  (engine-side cwd no longer forced — the instance container has no
+  shared volume; usage estimate now includes the tool-call payload;
+  probe --memory 16g documented as allocation-tier headroom) — 7b3e275,
+  posted 860/861. Round 3 first attempt hit the 600 s pi timeout (shared
+  :30001 contention), re-launched: 1 P0 (`--max-steps 007` leading zeros
+  via isdigit() -> `re.fullmatch(r"[1-9][0-9]*")` + range; regression
+  tests for "007"/"000"), 2 P1 (workdir merge at the final write —
+  verified false positive, the workdir is the worker-start snapshot
+  never mutated, documented; auto-workdir default mode 0755 -> 0o700
+  + assertion), 3 P2 documented — 12fcf86, posted 867/868. Round 4
+  (12fcf86): 1 P0 (rotate_workspaces used the DIR's mtime; in-place
+  file writes don't bump it -> `_newest_mtime_under` walks descendants
+  for the max mtime + dir-vs-file regression test), 2 P1 (rotation ran
+  inside the hot dedup lock -> moved to the top of cmd_spawn; the
+  engine-retried write used the stale local rec ->
+  `_persist_rec_preserving` at both loop write sites), 3 P2 documented
+  — dcd7b7c, posted 876/877. Round 5 (dcd7b7c): 0 P0, 2 P1 + 4 P2 all
+  design-contract documents (single tool_call per step = the spec's
+  "a tool call" singular + the probe verdict; result-file write already
+  tmp+rename atomic; the rglob scan is once-per-spawn outside the lock;
+  the fence regex is right for the flat tool-call shape; start_new_session
+  makes killpg cover the whole tree; the cancel-test window is an
+  implementation detail) — 301a452, posted 887/888. Round 6
+  confirmation (301a452): 0 P0, 2 P1 + 3 P2 — P1 #1 (loop-gate fields
+  in _persist_rec_preserving: verified no-op today, applied the
+  reviewer's propagation as defense-in-depth), P1 #2 (a `--tools off`
+  spawn JSON carried workdir -> now emitted only for tools==on; the
+  record still stores it for the dedup key; new assertions), P2 #1
+  (timeout handler dropped exc.output partial stdout -> coalesced;
+  regression test), P2 #3 (MAP spec-deltas line now lists the
+  pin-reality delta) — 81c96eb, posted 899/900. Round 7 (confirmation)
+  running on 81c96eb; loop closes on REVIEW CLEAN or a fresh
+  low-severity-only set, then G4 human merge. Suite 415/415 OK at
+  81c96eb. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x]
+  on merge.
 - blockers/intricacies: (a) the @gpu probe originally failed for a
   non-obvious argv-shape reason (flag+value as one token); captured in
   the commit message + the probe now logs `docker logs` tail on early
