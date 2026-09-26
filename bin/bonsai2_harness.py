@@ -304,6 +304,15 @@ def spawn_json(rec: dict, detail: str | None = None) -> dict:
     # prompt in two workdirs is two different tasks" holds regardless of
     # the loop flag), and collect on an off task reports workdir=null
     # (the S3.1 amendment: "tool_log is [] for --tools off tasks").
+    # G3 PR#18 r7 P2 (noted): this creates an asymmetric surface on purpose
+    # — the off-task SPAWN JSON omits workdir (pre-loop schema), while the
+    # off-task COLLECT payload returns it (read_result defaults to
+    # rec.get("workdir"), which is set for off tasks; collect is the
+    # S3.1 "verification entry point" and the amendment's collect payload
+    # is {answer, reasoning, usage, tool_log, steps, workdir} — the
+    # off-task workdir is the harness-created scratch dir, useful info,
+    # not part of the pre-loop wire surface). No fix: both sides are
+    # consistent with their own spec clauses.
     if rec.get("tools") == "on" and rec.get("workdir") is not None:
         out["workdir"] = rec["workdir"]
     return out

@@ -833,6 +833,25 @@ def _run_tool_loop(
             # next user message. (The pre-loop path kept them advisory —
             # consumed at the next ATTEMPT; the loop consumes at the next
             # STEP boundary, which is the amendment's steer semantics.)
+            # G3 PR#18 r7 P1 (invariant check, no behavior change): the
+            # loop-local tool_ctx (the execution root the tools actually
+            # run in) was built at loop entry from the initial workdir.
+            # NOTE: `rec` here is usually `fresh` itself (the step-end
+            # site does `rec = fresh`), so the check compares the
+            # LOOP-ENTRY `workdir` local — not `rec["workdir"]` — against
+            # the on-disk record: workdir is invariant across the loop
+            # (set once at spawn, never mutated), and the r6 P1
+            # re-adoption in _persist_rec_preserving means a hypothetical
+            # mid-loop record change would be visible at the boundary.
+            # Log loudly instead of letting the tools silently run in a
+            # stale root.
+            if workdir is not None and fresh.get("workdir") != workdir:
+                _log(
+                    f"{rec['task_id']}: workdir invariant broken mid-loop "
+                    f"(loop entry {workdir!r} vs record "
+                    f"{fresh.get('workdir')!r}); tools keep the loop-entry "
+                    f"root, record now reports the new value"
+                )
             for sm in steer_msgs:
                 msg = sm.get("message") if isinstance(sm, dict) else None
                 if isinstance(msg, str) and msg:
@@ -1163,6 +1182,20 @@ def _run_tool_loop(
                 fresh["tool_log"] = tool_log
                 fresh["updated_ts"] = time.time()
                 H.write_task(d, fresh)
+            # G3 PR#18 r7 P0 (verified, no behavior change): adopting the
+            # DISK record as the loop-local `rec` is safe — every field
+            # the next iteration reads from `rec` is persistable on the
+            # record: result_file/instances_tried/deadline_s/instance/
+            # port/tools/max_steps/workdir are set at SPAWN (harness
+            # record creation) and persisted by every write path here;
+            # the only loop-local state is messages/steps/tool_log/
+            # consecutive_bad/deadline_at (loop variables, not record
+            # fields). So `rec = fresh` cannot lose a field the engine-
+            # retry branch or the final write needs — the reviewer's
+            # KeyError scenario required a spawn-time field to be absent
+            # from the record, but the spawn record is the single
+            # writer of those fields and it persists them atomically
+            # (write_task = tmp + rename).
             rec = fresh
 
 
