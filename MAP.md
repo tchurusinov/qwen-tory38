@@ -858,10 +858,25 @@ SPEC.md `status` → `active`.
   intended direction), P2 #7 usage estimate is completion-side only
   (estimated=True lower bound), P2 #8/#10/#11 latent-guard / false-
   positive / false-positive. 3ab9c70, posted 930/931. Suite 421/421 OK
-  at 3ab9c70 (415 baseline + 6 new regression). Round 9 (final
-  confirmation) running on 3ab9c70; a P2-only or CLEAN round-9 closes
-  the loop for G4. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to
-  [x] on merge.
+  at 3ab9c70 (415 baseline + 6 new regression). Round 9 (confirmation,
+  d5c21f0): 0 P0, 2 P1, 3 P2. P1 #1 REAL: the streamed tool-call capture
+  overwrote per delta instead of accumulating — the OpenAI/llama.cpp
+  streaming contract delivers one tool call in fragments (id+name chunk
+  1, arguments pieces after), so a fragmented call would have executed
+  with partial arguments; fixed with per-index tc_acc accumulation +
+  first-named-index finalization (the r5 single-call contract preserved),
+  fixture fragmented=True spec + new end-to-end regression
+  (test_fragmented_tool_call_arguments_accumulated). P1 #2 verified
+  false-positive by probe (symlink-into-workdir reads the in-workdir
+  inode = intended outcome; the escape shape fails both containment
+  tests); documented at the site. P2s: fence regex (documented r6),
+  testing-strategy-report.md scope creep (DEFERRED to the pre-Phase-4
+  test-framework overhaul — moved out there as its own change, not
+  history-rewritten in this branch), pybin metachars (documented r3).
+  27655fd, posted 945/946. Suite 422/422 OK. Round 10 (final
+  confirmation, 27655fd) running; a P2-only or CLEAN round-10 closes the
+  loop for G4. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x]
+  on merge.
 - blockers/intricacies: (a) the @gpu probe originally failed for a
   non-obvious argv-shape reason (flag+value as one token); captured in
   the commit message + the probe now logs `docker logs` tail on early
