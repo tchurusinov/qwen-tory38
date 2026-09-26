@@ -912,9 +912,23 @@ SPEC.md `status` → `active`.
   workspace_dir 0o755) FIXED; #11 (ERR_TOOL_PATH) now names the
   out-pointing symlink; #3 trailing-slash dedup verified FALSE-POSITIVE
   (Path normalization); #8/#10/#12 documented. 20df870, posted 974/975.
-  Suite 427/427 OK. The loop is deep-scrutinizing the newest
-  round-added code; round-12 confirmation running. The 3.13/3.14/3.15
-  boxes in the Phase 3 list flip to [x] on merge (G4).
+  Suite 427/427 OK. Round 12 (confirmation, 20df870): 0 P0, 1 P1, 2 P2 —
+  docs-only round. P1 (--tools on default couples the pre-existing
+  hermetic suite to the tool-loop path): VERIFIED with the reviewer's
+  own suggested check — the hermetic S3.7 suite (test_harness_spawn /
+  _34_38 / _closed_set) passes UNCHANGED (98 tests OK; full 427/427 OK);
+  documented at the spawn arg-parse docstring. P2 #1 (orphaned empty
+  outside dir on the post-mkdir re-check path): documented at the site
+  (empty + inert, pruned by rotation; rmtree-ing is riskier than
+  leaving it). P2 #2 (testing-strategy-report.md scope creep): re-raised
+  3rd time, disposition stands (deferred to the pre-Phase-4 test
+  overhaul). 62168c5, posted 987/988. Suite 427/427 OK. G3 loop state:
+  P0-per-round r1-r12 = 0,1,1,1,0,0,1,1,0,0,1,0; round-12 is docs-only
+  (no behavioral change since r11's fixes). The loop has been
+  deep-scrutinizing the newest round-added code each round; round-13
+  confirmation running on 62168c5 (a P2-only or CLEAN round-13 closes
+  the loop for G4). The 3.13/3.14/3.15 boxes in the Phase 3 list flip
+  to [x] on merge (G4).
 - blockers/intricacies: (a) the @gpu probe originally failed for a
   non-obvious argv-shape reason (flag+value as one token); captured in
   the commit message + the probe now logs `docker logs` tail on early
