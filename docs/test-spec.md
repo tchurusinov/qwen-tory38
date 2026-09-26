@@ -241,16 +241,21 @@ at `e44762a`.)
   canary. Re-admit: the spec delta lands + the test green under busy main.
 - **OD-3 S3.8 precondition on the installed subset (report §2 red #3,
   `test_s38_fanout_kill_n0_unload`)** — the precondition currently gates
-  on `stack == "healthy"`; the merged tree also carries a
-  `len(instances) == 1` assertion (explicit subset), but if the manager honors the
-  template `instances.count: 2` while only the instance-0 user unit is
-  installed, `stack` still degrades and the precondition can still fail
-  (09-25 failure mode: escalation → `systemctl restart
-  bonsai2-server@1` → "Unit not found" ×5). Fix direction: gate on
-  instance-0 healthy + the count assertion, not on the stack (or verify
-  the live manager's current N behavior first — the test snapshots/restores
-  the live YAML it runs against). Re-admit: green 2/3 audited runs with
-  the fan-out / kill / N=0 / unload halves actually executing.
+  on `stack == "healthy"`; the merged tree also carries an installed-count
+  assertion (today `len(instances) == 1` — correct for the MVP N=1
+  load-time condition, but it should read `len(instances) == N` where N is
+  the count the test INSTALLED, 1 at the MVP load / 2 at full N, per the
+  "N=1 is a load-time condition, not a code limit" rule). If the manager
+  honors the template `instances.count: 2` while only the instance-0 user
+  unit is installed, `stack` still degrades and the precondition can still
+  fail (09-25 failure mode: escalation → `systemctl restart
+  bonsai2-server@1` → "Unit not found" ×5). Fix direction: gate the
+  precondition on instance-0 healthy + the INSTALLED-count assertion
+  (`len(instances) == N`, N = the count the test installed), not on the
+  stack (or verify the live manager's current N behavior first — the test
+  snapshots/restores the live YAML it runs against). Re-admit: green 2/3
+  audited runs with the fan-out / kill / N=0 / unload halves actually
+  executing.
 - **OD-4 interpreter pin (T1)** — pybox landed + `run_gpu.sh` /
   `gate.sh` / `.githooks/*` pinned + gate baseline re-recorded. Re-admit:
   T1.1–T1.3 all true (grep-able acceptance in T1.2).
