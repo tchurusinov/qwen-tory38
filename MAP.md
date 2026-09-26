@@ -836,11 +836,19 @@ SPEC.md `status` → `active`.
   record still stores it for the dedup key; new assertions), P2 #1
   (timeout handler dropped exc.output partial stdout -> coalesced;
   regression test), P2 #3 (MAP spec-deltas line now lists the
-  pin-reality delta) — 81c96eb, posted 899/900. Round 7 (confirmation)
-  running on 81c96eb; loop closes on REVIEW CLEAN or a fresh
-  low-severity-only set, then G4 human merge. Suite 415/415 OK at
-  81c96eb. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x]
-  on merge.
+  pin-reality delta) — 81c96eb, posted 899/900. Round 7 (confirmation, 81c96eb): 1 P0, 1 P1,
+ 3 P2 — the P0 and P1 are the same latent site two ways: the step-end
+ `rec = fresh` (disk record as loop-local) was verified safe (every
+ field the next iteration reads is spawn-persisted; the reviewer's own
+ re-analysis downgraded it), and the tool_ctx staleness invariant got a
+ loud log check at the step boundary; P2s all already documented at
+ r4/r5 (spawn/collect workdir asymmetry for off tasks = intentional,
+ both sides match their own spec clause) — f1ac4fd, posted 912/913.
+ Round 8 (final confirmation) running on f1ac4fd; the loop has
+ converged (P0/P1 sets shrinking to the same documented sites), so a
+ P2-only or CLEAN round-8 closes it for G4. Suite 415/415 OK at
+ f1ac4fd. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x]
+ on merge.
 - blockers/intricacies: (a) the @gpu probe originally failed for a
   non-obvious argv-shape reason (flag+value as one token); captured in
   the commit message + the probe now logs `docker logs` tail on early
