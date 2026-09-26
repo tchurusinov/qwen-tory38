@@ -232,6 +232,17 @@ def resolve_path(root: Path, p) -> Path:
     # the face-level `..`-crossing; the physical test catches the
     # symlink-out; together they are complete for the workdir-is-a-symlink
     # case. No behavior change.
+    # G3 PR#18 r9 P1 (verified false-positive, re-verified with a probe):
+    # "a symlink pointing INTO the workdir passes containment, e.g.
+    # workdir/alias -> /data and path /data/f.txt is read" — only when /data
+    # ITSELF is inside the workdir (in which case reading the real file is
+    # the intended outcome: alias/f.txt physically lands on the real
+    # in-workdir inode, so no bytes leak OUT). The escape shape the
+    # reviewer feared (/data OUTSIDE the workdir) fails BOTH tests:
+    # textual — /data/f.txt is /-rooted and not under the workdir;
+    # physical — resolve() lands at /data/f.txt, outside root_real.
+    # Probe (r9 disposition): alias->real-in-workdir passes, out->/etc
+    # rejected. No behavior change.
     if not _under(norm.resolve()):
         raise ValueError(
             f"ERR_TOOL_PATH: {p!r} escapes the workdir {root_real} "

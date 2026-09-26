@@ -98,7 +98,62 @@ class ToolEngine:
     @staticmethod
     def _chunks(spec: dict) -> list[dict]:
         if spec.get("kind") == "tool":
-            if spec.get("native", True):
+            if spec.get("fragmented", False):
+                # G3 PR#18 r9: emulate the OpenAI/llama.cpp streaming
+                # contract where ONE tool call arrives as FRAGMENTS:
+                # chunk 1 = id + name, later chunks = arguments
+                # fragments. Exercises the worker's per-index
+                # accumulation (the r9 P1 fix) end to end.
+                fn_name = spec.get("tool", "bash")
+                args = json.dumps(spec.get("params", {}))
+                mid = len(args) // 2
+                chunks = [
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": spec.get("id", "call_1"),
+                                            "type": "function",
+                                            "function": {"name": fn_name},
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {"arguments": args[:mid]},
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {"arguments": args[mid:]},
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                ]
+            elif spec.get("native", True):
                 fn = {
                     "name": spec.get("tool", "bash"),
                     "arguments": json.dumps(spec.get("params", {})),

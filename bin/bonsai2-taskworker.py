@@ -310,7 +310,18 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
     )
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
-    tool_calls: dict | None = None  # the first tool-call delta (the pin emits one)
+    # G3 PR#18 r9 P1 (fix): accumulate the native tool_calls deltas per
+    # index. The OpenAI streaming contract delivers a tool call in
+    # fragments: the first chunk carries id + function.name, LATER
+    # chunks carry only function.arguments fragments that must be
+    # APPENDED (OpenAI/llama.cpp both do this for multi-token arguments).
+    # The pre-r9 code OVERWROTE `tool_calls` on every delta, so a
+    # chunked call would end up with only the LAST fragment's
+    # arguments — a partial, unparseable tool call. Accumulate by index;
+    # finalize the FIRST call that is complete (has a function name) at
+    # stream end. Multi-call streams still pick tcs[0] (the r5 P1
+    # design: the single-step contract executes the first call).
+    tc_acc: dict[int, dict] = {}
     usage: dict | None = None
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
@@ -360,14 +371,31 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
                     # the result back, and let the model re-emit the rest on
                     # the NEXT step. (If the pin ever grows to emit N, this
                     # line is the site to extend.)
-                    tc = tcs[0]
-                    if isinstance(tc, dict) and tc.get("function"):
-                        fn = tc["function"]
-                        tool_calls = {
-                            "id": str(tc.get("id") or "call_0"),
-                            "name": str(fn.get("name") or ""),
-                            "arguments_raw": str(fn.get("arguments") or "{}"),
-                        }
+                    # G3 PR#18 r9 P1 (fix): the same tool call can arrive
+                    # across MULTIPLE deltas (the OpenAI/llama.cpp
+                    # streaming contract: chunk 1 = id + name, later
+                    # chunks = arguments fragments). Per index, APPEND
+                    # the arguments fragment instead of overwriting; the
+                    # call is finalized from the accumulated record at
+                    # stream end.
+                    for tc_delta in tcs:
+                        if not isinstance(tc_delta, dict):
+                            continue
+                        try:
+                            idx = int(tc_delta.get("index", 0))
+                        except (TypeError, ValueError):
+                            idx = 0
+                        acc = tc_acc.setdefault(
+                            idx, {"id": None, "name": None, "arguments": ""}
+                        )
+                        if tc_delta.get("id"):
+                            acc["id"] = str(tc_delta["id"])
+                        fn = tc_delta.get("function")
+                        if isinstance(fn, dict):
+                            if fn.get("name"):
+                                acc["name"] = str(fn["name"])
+                            if fn.get("arguments") is not None:
+                                acc["arguments"] += str(fn["arguments"])
     except urllib.error.HTTPError as e:
         if e.code == 400:
             return {
@@ -389,6 +417,26 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
         }
     answer = "".join(content_parts)
     reasoning = "".join(reasoning_parts)
+    # G3 PR#18 r9 P1: finalize the first complete tool call from the
+    # per-index accumulator (the r5 P1 single-call contract: pick index
+    # 0; the model's re-emit loop handles any additional calls on the
+    # NEXT step). A stream that carried tool-call deltas but only
+    # fragments with no name is still surfaced (arguments only) — the
+    # _validate_tool_call path rejects it cleanly rather than the loop
+    # silently treating a tool call as a final answer.
+    tool_calls: dict | None = None
+    if tc_acc:
+        first_idx = (
+            min(k for k in tc_acc if tc_acc[k].get("name"))
+            if any(tc_acc[k].get("name") for k in tc_acc)
+            else min(tc_acc)
+        )
+        acc = tc_acc[first_idx]
+        tool_calls = {
+            "id": str(acc["id"] or "call_0"),
+            "name": str(acc["name"] or ""),
+            "arguments_raw": str(acc["arguments"] or "{}"),
+        }
     if not answer and not reasoning and tool_calls is None:
         return {
             "ok": False,

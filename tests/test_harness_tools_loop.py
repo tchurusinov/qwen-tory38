@@ -244,6 +244,40 @@ class TestToolLoopHostExecution(LoopBase):
         self.assertEqual(rf["steps"], 2)
         self.assertEqual(rf["workdir"], cdoc["workdir"])
 
+    def test_fragmented_tool_call_arguments_accumulated(self) -> None:
+        """G3 PR#18 r9 P1 regression: the OpenAI/llama.cpp streaming
+        contract delivers ONE tool call in FRAGMENTS — the first chunk
+        carries id + name, later chunks carry arguments pieces. The
+        worker must ACCUMULATE the arguments fragments into the full
+        JSON object. The pre-fix code overwrote with the last fragment
+        and then failed to parse it as JSON, reporting the call invalid
+        instead of executing it."""
+        _x, doc, _port, _eng = self._rig(
+            [
+                {
+                    "kind": "tool",
+                    "fragmented": True,
+                    "tool": "write_file",
+                    "params": {"path": "frag.txt", "content": "fragmented args"},
+                },
+                {"kind": "final", "content": "acc-ok"},
+            ]
+        )
+        d = self._results()
+        H.ensure_results_dirs(d)
+        rec = self._wait_terminal(d, doc["task_id"])
+        self.assertEqual(rec["state"], "done", f"got {rec}")
+        code, cdoc = self._collect(doc["task_id"])
+        self.assertEqual(code, 20, "collect: done = 20")
+        self.assertEqual(cdoc["answer"], "acc-ok")
+        # the fragmented arguments were assembled into the full JSON and
+        # the tool actually executed:
+        self.assertEqual(len(cdoc["tool_log"]), 1)
+        entry = cdoc["tool_log"][0]
+        self.assertEqual(entry["tool"], "write_file")
+        self.assertEqual(entry["exit_code"], 0)
+        self.assertTrue(Path(cdoc["workdir"], "frag.txt").is_file())
+
     def test_native_tools_array_is_sent_on_loop_requests(self) -> None:
         _x, doc, _port, eng = self._rig(
             [
