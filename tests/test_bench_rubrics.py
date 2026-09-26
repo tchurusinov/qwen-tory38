@@ -154,6 +154,26 @@ class M5RubricTest(unittest.TestCase):
         v = m5.score({"answers": answers})
         self.assertTrue(v["pass"], v)
 
+    def test_mis_sized_golden_fails_named(self):
+        # the S5.2 "5 QA questions" rubric contract: a golden with a
+        # different question count fails NAMED instead of the rubric
+        # silently adapting (G3 round-2 P2: the 5-way contract must be
+        # asserted, not inferred from the golden).
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "m5").mkdir()
+            qa = dict(goldens.m5_qa())
+            qa["questions"] = qa["questions"][:3]
+            qa["answers"] = qa["answers"][:3]
+            (root / "m5" / "qa.json").write_text(json.dumps(qa))
+            v = m5.score({"answers": list(qa["answers"])}, root=str(root))
+            self.assertFalse(v["pass"])
+            self.assertIn("expects 5", v["detail"])
+
 
 class M7RubricTest(unittest.TestCase):
     def _agg(self, tps: float, n: int = 8) -> dict:

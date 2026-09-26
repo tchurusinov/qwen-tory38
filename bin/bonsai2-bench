@@ -20,7 +20,9 @@ Usage (the S5.4 runner surface):
 Exit codes (the runner's, S5.4 / S3.5):
   0 = completed — even on scenario-level failures (a failure is data:
       each scenario row carries a pass/fail verdict, S5.2; the one JSON
-      object on stdout carries the per-scenario verdicts)
+      object on stdout carries the per-scenario verdicts; an unexpected
+      runner crash also exits 0 but writes status="crash" + the named
+      error to stdout instead of a "done" object)
   2 = bench config invalid (the S5.8 "invalid scenario id -> exit 2"
       case, the S3.2 code 2 in the closed set) OR bench already running
       (the S3.5 flock, MAP 4.3 BONSAI2_BENCH_LOCK)

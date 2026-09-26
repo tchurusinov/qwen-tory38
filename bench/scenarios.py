@@ -150,10 +150,12 @@ def resolve_tasks(sid: str, pool_size: int) -> int:
     """The task fan-out for `sid` at a pool size of `pool_size` instances.
 
     Resolves the "N"-style columns against the live pool: "8*N" -> 8*N,
-    "4*N" -> 4*N, "N" -> N. A pool of 0 (M6 main-only) resolves N-style to
-    1 (the control runs one task on the main endpoint). A literal int is
-    returned as-is. Minimum 1 (a scenario always produces at least one
-    task — a 0-task row has nothing to score).
+    "4*N" -> 4*N, "N" -> N. A pool of 0 (a main-only control, or a
+    0-instance pool) floors to ONE virtual instance: the multiplier still
+    applies, so "8*N" -> 8, "4*N" -> 4, "N" -> 1 (a 0-pool still runs one
+    instance's worth of tasks on the fallback/main endpoint). A literal
+    int is returned as-is. Minimum 1 (a scenario always produces at least
+    one task — a 0-task row has nothing to score).
     """
     t = get(sid)["tasks"]
     if isinstance(t, int):

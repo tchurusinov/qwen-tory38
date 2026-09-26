@@ -35,6 +35,10 @@ import re
 from bench.score import goldens
 from bench.score._common import verdict
 
+# The S5.2 M5 rubric: "5 QA questions, each binary-scored" — the count is
+# part of the rubric contract, not an emergent property of the golden.
+EXPECTED_QUESTIONS = 5
+
 _NORM_RE = re.compile(r"[^a-z0-9_,\s]+")
 _WS_RE = re.compile(r"\s+")
 
@@ -70,6 +74,17 @@ def score(payload: dict, root=None) -> dict:
     n = len(golden_answers)
     if n == 0:
         return verdict(False, 0.0, "M5: no golden questions", {"correct": 0})
+    if n != EXPECTED_QUESTIONS:
+        # the S5.2 "5 QA questions" rubric contract: the golden carries a
+        # different question count -> a named fail (the rubric does not
+        # silently adapt to a mis-specified golden).
+        return verdict(
+            False,
+            0.0,
+            f"M5: golden carries {n} questions, rubric expects "
+            f"{EXPECTED_QUESTIONS} (S5.2 '5 QA questions')",
+            {"correct": 0, "n_questions": n},
+        )
     correct = 0
     per_q = []
     questions = qa.get("questions") or []

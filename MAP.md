@@ -808,18 +808,26 @@ SPEC.md `status` → `active`.
   pass their rubrics, timings sane, box-state snapshot on every row,
   `bench-results/*.md` summary written. No GPU load in this session
   (the S5.8 mock run is hermetic by construction).
-- next: G3c — reconcile PR #20 round-2 findings (raw posted as PR
-  comment 1016; round 1 was on a stale .git/plan.md and is superseded
-  by round 2): 0 P0, 2 P1 (bench/exec.py:113 decode window must gate on
-  content chunks, not reasoning; bench/exec.py:251 main-only M6/M8
-  control hits a hardcoded localhost port + empty Bearer instead of
-  the configured main endpoint), 6 P2 (run.py:262 dead spotcheck
-  fallback; scenarios.py:174 M7 pool_size=0 -> 8 vs docstring;
-  m5.py:66 5-QA count not asserted; run.py:652 non-ConfigError crash
-  swallowed to exit 0; test_smoke.py:135 requests-doc nit; exec.py:233
-  4xx mapped to "engine"). Loop G3b -> clean, then G4. After G4: flip
-  MAP 4.1–4.8 to [x] at merge; the Phase-4 frontier becomes 4.9 (M9/M10
-  capability-layer goldens + scorers, both tool_execution modes).
+- next: G3c — PR #20 round-2 disposition (this session): all 8 findings
+  fixed on the branch (P1 decode window gates on content chunks only,
+  reasoning-only -> decode_tps None; P1 stream_chat takes the resolved
+  endpoint dict + uses its url, Bearer only when api_key set; P2 M3
+  spotcheck shadowing removed (cfg['_spotcheck'] single source of
+  truth); P2 resolve_tasks docstring corrected to the observed
+  0-pool floors-to-1-virtual-instance behavior (8*N -> 8); P2 M5
+  rubric enforces the 5-question contract, named fail otherwise; P2
+  runner crash -> exit 0 (0/2 subset per S5.9 #3) + status="crash" in
+  the S3.1 stdout JSON; P2 hermetic-import doc corrected: bench.exec
+  imports requests LAZILY, so the top-level 'bench' allowlist is
+  justified by a stdlib-only module-load chain; P2 4xx mapping
+  documented as engine-class in m7's docstring — no live defect).
+  Verified: 546 tests OK, gate PASS, ruff clean, mock --quick run
+  exit 0 with M1/M2/M7 pass + crash-path smoke (missing engine yaml
+  -> status:"crash", exit 0). Posted the round-2 disposition comment
+  on the PR; round-3 review pending. After G3 clean: G4. After G4:
+  flip MAP 4.1–4.8 to [x] at merge; the Phase-4 frontier becomes 4.9
+  (M9/M10 capability-layer goldens + scorers, both tool_execution
+  modes).
 - blockers/intricacies: M9/M10 rows run with a named PENDING verdict
   (row fail, detail "scorer lands in MAP 4.9") until 4.9 — the S5.4
   "failure is data" rule; the S5.7 note (M9/M10 full-bench-only in v1,

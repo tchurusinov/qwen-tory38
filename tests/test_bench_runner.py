@@ -325,6 +325,26 @@ class RunnerExitCodeTest(MockRunTestBase):
         self.assertEqual(rows[0]["row_verdict"], "fail")
         self.assertEqual(rows[0]["per_shape"]["M3"], False)
 
+    def test_runner_crash_surfaces_in_stdout_json(self):
+        """The S5.4 closed set keeps bonsai2-bench in 0/2 (S5.9 #3), so an
+        unexpected runner crash still exits 0 — but the S3.1 'one JSON
+        object on stdout' must then carry status='crash' + the named
+        error (G3 round-2 P2: a crash is not a successful bench run, and
+        must not be silently reported as 'done')."""
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M1"], self.results)
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(bench_run, "run", side_effect=RuntimeError("boom")),
+            mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out,
+            mock.patch("sys.stderr", new_callable=__import__("io").StringIO),
+        ):
+            rc = bench_run.main(["--config", cfg, "--mock", MOCK_SPEC])
+        self.assertEqual(rc, 0)
+        obj = json.loads(out.getvalue())
+        self.assertEqual(obj["status"], "crash")
+        self.assertIn("boom", obj["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

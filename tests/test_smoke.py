@@ -53,12 +53,15 @@ class TestSuiteSmoke(unittest.TestCase):
         # LOCAL-import edge convention: the S5.8 mock-endpoint fixture
         # (tests/fixtures/bench_mock.py) builds its canned TaskResults
         # through `bench.exec.score_stream` (the S5.8 "timings sane"
-        # property: the real timing core runs, no network/GPU), and the
-        # test modules drive the runner the same way they drive the bin/
-        # tools — importing bench at the top level (bench.config pulls
-        # in only stdlib + a local yaml edge; the requests edge dep
-        # lives in bench.exec, imported lazily by the test modules' own
-        # top-level `from bench import ...`). `bench` is never
+        # property: the real timing core runs, no network/GPU). `bench` is
+        # allowed at TOP LEVEL in test modules because the package's
+        # module-load import chain is stdlib-only: `bench.exec` imports
+        # `requests` LAZILY inside `stream_chat` (the S5.4 named
+        # non-stdlib dep, the S6.6 pin; the hermetic timing core
+        # score_stream/run_concurrent/TaskResult needs no third-party
+        # dep, so the S5.8 mock-endpoint run stays zero-network/GPU/
+        # requests), and PyYAML appears only at the file-read edge
+        # (bench/config.py's local `import yaml`). `bench` is never
         # TOP-LEVEL-imported in a fixture (that would make the fixture's
         # import chain depend on the runner package at module load);
         # only test modules themselves may import it.

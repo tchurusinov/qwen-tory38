@@ -7,7 +7,9 @@ drives it with canned streams and asserts the S5.1 timing math:
   * answer/reasoning accumulation (the S1.3 deepseek split).
   * time-to-first-token, total elapsed, the content-chunk count.
   * the DECODE t/s = completion_tokens / (last - first content chunk),
-    the single-chunk fallback, and the 0.0 when completion_tokens is 0.
+    over the CONTENT window only (reasoning chunks are not in the
+    window), the single-content-chunk fallback, and the None when the
+    stream carried no content chunk (reasoning-only / usage-only).
   * the usage-estimate fallback (no usage chunk -> estimated: true).
 
 Plus ``run_concurrent``: the bounded pool, task-order results, and the
@@ -50,7 +52,9 @@ class ScoreStreamTest(unittest.TestCase):
         self.assertEqual(res.reasoning, "thinking ")
         self.assertEqual(res.completion_tokens, 5)
         self.assertEqual(res.prompt_tokens, 10)
-        self.assertEqual(res.n_content_chunks, 3)  # 2 content + 1 reasoning
+        self.assertEqual(
+            res.n_content_chunks, 2
+        )  # 2 content chunks (reasoning excluded)
 
     def test_time_to_first_token_and_elapsed(self):
         chunks = [
@@ -84,7 +88,7 @@ class ScoreStreamTest(unittest.TestCase):
         self.assertIsNotNone(res.decode_tps)
         self.assertAlmostEqual(res.decode_tps, 3.0 / 1.2, places=5)
 
-    def test_no_content_chunks_yields_zero_tps_and_no_ttft(self):
+    def test_no_content_chunks_yields_no_decode_tps_and_no_ttft(self):
         chunks = [
             (0.0, {}),
             (0.5, _usage_chunk(1, 2)),
@@ -92,7 +96,27 @@ class ScoreStreamTest(unittest.TestCase):
         res = score_stream(chunks)
         self.assertIsNone(res.time_to_first_token_ms)
         self.assertEqual(res.n_content_chunks, 0)
-        self.assertEqual(res.decode_tps, 0.0)
+        self.assertIsNone(res.decode_tps)  # no content decoded -> no decode window
+
+    def test_reasoning_only_stream_yields_no_decode_tps(self):
+        # a reasoning-only stream decodes ZERO content tokens: the
+        # decode window must gate on content chunks only (not reasoning),
+        # so decode_tps is None even though usage reports completion
+        # tokens (the G3 round-2 P1: the 0-chunk window must not count
+        # reasoning).
+        chunks = [
+            (0.0, _reasoning_chunk("thinking a ")),
+            (0.1, _reasoning_chunk("thinking b ")),
+            (0.2, _reasoning_chunk("thinking c ")),
+            (0.3, _usage_chunk(10, 3)),
+        ]
+        res = score_stream(chunks)
+        self.assertTrue(res.ok)
+        self.assertEqual(res.n_content_chunks, 0)
+        self.assertEqual(res.completion_tokens, 3)
+        self.assertIsNone(res.decode_tps)
+        # TTFT still marks the first chunk that carried anything
+        self.assertEqual(res.time_to_first_token_ms, 0.0)
 
     def test_usage_estimate_fallback_when_no_usage_chunk(self):
         # no usage chunk -> estimated completion = len(answer) // 4
@@ -109,7 +133,7 @@ class ScoreStreamTest(unittest.TestCase):
         self.assertTrue(res.ok)
         self.assertEqual(res.elapsed_ms, 0.0)
         self.assertIsNone(res.time_to_first_token_ms)
-        self.assertEqual(res.decode_tps, 0.0)
+        self.assertIsNone(res.decode_tps)  # no stream, no content, no window
 
     def test_usage_with_non_positive_completion_is_recomputed(self):
         chunks = [

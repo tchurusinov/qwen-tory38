@@ -193,8 +193,7 @@ def _make_exec(mock, ctx_cap, deadline_s):
         if mock is not None:
             return mock(prompt, endpoint)
         return bexec.stream_chat(
-            endpoint["port"],
-            {"alias": endpoint["alias"], "api_key": endpoint["api_key"]},
+            endpoint,
             prompt,
             max_tokens=ctx_cap,
             deadline_s=deadline_s,
@@ -343,12 +342,14 @@ def _score_shape(
     sid: str,
     tasks: list,
     cfg: dict,
-    spotcheck: float | None = None,
 ) -> dict:
     """Score ONE scenario's task fan-out with its S5.3 rubric. A shape
     failure is a verdict (pass/score/detail), not an exception (the S5.4
     "the failure is data" rule). M7's zero-5xx half reads the per-task
-    error names (the exec's ctx/parse/engine mapping)."""
+    error names (the exec's ctx/parse/engine mapping). The M3 spot-check
+    value is the single source of truth in ``cfg["_spotcheck"]`` (stashed
+    by ``run`` when the ``--spotcheck`` flag is set; None -> the scorer's
+    0.0 default)."""
     root = _goldens_root(cfg)
     if sid == "M1":
         per_task = []
@@ -372,12 +373,12 @@ def _score_shape(
         report = _build_m2_report(tasks)
         return bscore.m2.score({"report": json.dumps(report)})
     if sid == "M3":
-        spot = (
-            cfg.get("_spotcheck")
-            if cfg.get("_spotcheck") is not None
-            else (spotcheck or 0.0)
+        # the spot-check value (the S5.3 main/human-judgment seam) is the
+        # single source of truth in cfg["_spotcheck"] (None -> m3.score's
+        # 0.0 default) — no shadowing param.
+        return bscore.m3.score(
+            {"sections": _m3_sections(tasks), "spotcheck": cfg.get("_spotcheck")}
         )
-        return bscore.m3.score({"sections": _m3_sections(tasks), "spotcheck": spot})
     if sid == "M4":
         return bscore.m4.score({"draft": _first_answer(tasks)}, root=root)
     if sid == "M5":
@@ -766,10 +767,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[bench] {exc}", file=sys.stderr)
         return EXIT_CONFIG
     except Exception as exc:  # noqa: BLE001 — an unexpected runner crash
-        # is still exit 0 (the S5.4 closed set: 0 or 2; a crash is not a
-        # scenario-level failure but the S3.2 closed set has no generic
-        # error code, so 0 + the named detail is the documented behavior).
+        # An unexpected crash is still exit 0 (the S5.4 closed set: 0 or 2;
+        # S5.9 #3 asserts bonsai2-bench stays in the 0/2 subset, so no
+        # exit 1). But it is NOT a successful bench run: the "one JSON
+        # object on stdout" (S3.1) is written with status="crash" + the
+        # named error, so a consumer sees the run did not complete instead
+        # of a bare "done".
         print(f"[bench] runner error: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "status": "crash",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+            + "\n"
+        )
         return EXIT_OK
     verdicts = {
         row["scenario"]: row.get("row_verdict", "fail") for row in run_report["rows"]

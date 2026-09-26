@@ -53,8 +53,10 @@ class ResolveTasksTest(unittest.TestCase):
         self.assertEqual(scenarios.resolve_tasks("M7", 1), 8)
         # M8 "4*N": pool 1 -> 4
         self.assertEqual(scenarios.resolve_tasks("M8", 1), 4)
-        # a 0-pool (M6 main-only) still resolves N-style to at least 1
+        # a 0-pool (a main-only control, or a 0-instance pool) floors to
+        # ONE virtual instance: the multiplier still applies -> "8*N" -> 8
         self.assertEqual(scenarios.resolve_tasks("M7", 0), 8)
+        self.assertEqual(scenarios.resolve_tasks("M8", 0), 4)
 
     def test_m3_fixed_six_sections(self):
         # M3 "fan-out doc analysis (N=6 sections)": the document has 6
