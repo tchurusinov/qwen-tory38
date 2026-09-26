@@ -48,15 +48,18 @@ spec value, amended per the rule — not a hotfix).
 | layer | what | command (target) | budget | blocks what |
 |---|---|---|---|---|
 | **L0** | lint + syntax + secrets | `gate.sh` steps 1–4 (bash -n, shellcheck, ruff, secret scan) | ~10 s | commit (pre-commit), G2 |
-| **L1** | hermetic-fast subset: closed-set + manager + harness_core + tools_module + tools_loop (all five — closed-set is the highest-blast-radius invariant; **decision 2026-09-26: all 5 in, ~95 s at commit**). L1 = an explicit unittest module list — `discover -p` takes ONE glob, so the v0.1 pipe form was never a working command (verified 2026-09-26: it ran 0 tests). | `/usr/bin/python3.12 -m unittest tests.test_harness_closed_set tests.test_manager tests.test_harness_core tests.test_tools_module tests.test_harness_tools_loop` | ~95 s (measured 2026-09-26: 201 cases in 79.8 s; closed-set 44 s is the floor — 25 cases each round-trip-serialize JSON docs; manager 6 s; core 2 s; tools_module 4 s; tools_loop 23 s) | commit (pre-commit), G2 |
+| **L1** | hermetic-fast subset: closed-set + manager + harness_core + tools_module + tools_loop (all five — closed-set is the highest-blast-radius invariant; **decision 2026-09-26: all 5 in**). L1 = an explicit unittest module list — `discover -p` takes ONE glob, so the v0.1 pipe form was never a working command (verified 2026-09-26: it ran 0 tests). | `/usr/bin/python3.12 -m unittest tests.test_harness_closed_set tests.test_manager tests.test_harness_core tests.test_tools_module tests.test_harness_tools_loop` | ~80 s (measured 2026-09-26: 201 cases in 79.8 s; closed-set 44 s is the floor — 25 cases each round-trip-serialize JSON docs; manager 6 s; core 2 s; tools_module 4 s; tools_loop 23 s) | commit (pre-commit), G2 |
 | **L2** | hermetic full | `/usr/bin/python3.12 -m unittest discover -s tests -t .` | ≤150 s (verified 2026-09-26: 427 in 130 s) | G2, G4 |
 | **L3** | @gpu-smoke: runtime-image + build-banner + one 27B bring-up (1.7) + the wire-protocol probe (2026-09-26 run: ~16 s) | `tests/run_gpu.sh --l3` | ≤10 min | **release only** (decision 2026-09-26: NOT per-merge — G4 = L2-fresh + VRAM audit; late discoveries are the release checklist's job), S5.5 re-bench |
-| **L4** | @gpu full | `tests/run_gpu.sh` | ≤20 min | release, S5.5 re-bench |
+| **L4** | @gpu full | `tests/run_gpu.sh --l4` | ≤20 min | release, S5.5 re-bench |
 | **L5** | bench M-rows, S5.6 workload set, fresh-session acceptance, 72 h soak | bench runner (S5.4) + dogfood script | hours–days | release (M9/M10 rows once MAP 4.9 lands) |
 
 Consequences, deliberately:
 
-- Commits wait on at most ~105 s of tests (L0 + L1). Pre-commit = L0 + L1.
+- Commits wait on at most ~220 s of tests: pre-commit runs the ~80 s L1
+  fast-signal first, then the full `gate.sh` (L0 + L2 ≈ 140 s; see T3). L1
+  gives the fast failing signal before the slower L2 — today's gate-at-
+  commit behavior, kept.
 - G2 gate = L0 + L2: hermetic-full is the required check (what the MAP log
   already records every PR — this makes the gate actually run it instead of
   lint-only).
@@ -238,8 +241,8 @@ at `e44762a`.)
   canary. Re-admit: the spec delta lands + the test green under busy main.
 - **OD-3 S3.8 precondition on the installed subset (report §2 red #3,
   `test_s38_fanout_kill_n0_unload`)** — the precondition currently gates
-  on `stack == "healthy"`; the merged tree now also asserts
-  `len(instances) == 1` (explicit subset), but if the manager honors the
+  on `stack == "healthy"`; the merged tree also carries a
+  `len(instances) == 1` assertion (explicit subset), but if the manager honors the
   template `instances.count: 2` while only the instance-0 user unit is
   installed, `stack` still degrades and the precondition can still fail
   (09-25 failure mode: escalation → `systemctl restart
