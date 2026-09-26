@@ -1349,6 +1349,16 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
     [--deadline SECS] [--max-steps N] [--workdir DIR]
     [--out FILE] [--priority low|normal|high]
 
+    G3 PR#18 r12 P1 (verification): the `--tools` default ON means every
+    hermetic spawn test implicitly exercises the tool-loop path (auto
+    workdir + 7-day rotation + spawn_json workdir emission). Re-verified
+    round-12 that the pre-existing S3.7 hermetic suite (test_harness_spawn
+    / _34_38 / _closed_set) passes UNCHANGED — 98 tests OK, full suite
+    427/427 OK. The `--tools off` byte-identical constraint (r6 P1) is
+    preserved for the spawn JSON surface only; the tool-loop side effects
+    (workdir creation, rotation) are the new-path behavior, not a
+    pre-loop expectation.
+
     `--tools` defaults ON (the S3.4 agentic loop; the 2026-09-25 spec
     amendment). `--max-steps` defaults to the S3.6 `task_max_steps`
     (range 1-128, enforced here). `--workdir` must exist + be writable

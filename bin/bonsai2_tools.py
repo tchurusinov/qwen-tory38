@@ -480,6 +480,20 @@ def _tool_write_file(params: dict, ctx: dict) -> dict:
         # that read_file enforces at open.
         resolved = target.resolve()
         if not _under(resolved):
+            # G3 PR#18 r12 P2#1 (noted): this rejection path runs AFTER
+            # `target.parent.mkdir(parents=True)` (line above), so a
+            # post-mkdir escape that the pre-mkdir check did not catch
+            # (interpreter-dependent: older Pythons whose non-strict
+            # resolve stops at the first missing component) can leave an
+            # ORPHANED EMPTY parent dir outside the workdir (mkdir ran
+            # before resolve saw the escape). It is empty (the leaf
+            # write was skipped), so it is inert scratch — the 7-day
+            # rotation prunes the workdir tree, and a sibling task's
+            # write into the same outside dir would surface it. Not
+            # cleaned here on purpose: the mkdir already happened, and
+            # rmtree-ing a dir we just created that the model may have
+            # intended is riskier than leaving an empty dir. No behavior
+            # change.
             return _err(
                 f"ERR_TOOL_PATH: {p!r} resolves to {resolved} "
                 f"after mkdir — outside the workdir {root_real}",
