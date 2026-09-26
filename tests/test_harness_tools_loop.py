@@ -532,6 +532,18 @@ class TestToolLoopEngineExecution(LoopBase):
         self.assertEqual(rec["state"], "done")
         req = eng.request_log[0]
         self.assertNotIn("tools", req, "--tools off must not send the tools array")
+        # G3 PR#18 r6 P1: a `--tools off` spawn JSON must match the
+        # pre-loop S3.1 schema byte-for-byte — the capability-layer
+        # `workdir` field is NOT part of the off-task spawn surface
+        # (the RECORD still stores it: the S3.4 dedup key carries the
+        # workdir term regardless of the loop flag, so two off-tasks in
+        # different workdirs stay distinct).
+        self.assertNotIn(
+            "workdir", doc, "--tools off spawn JSON omits workdir (pre-loop schema)"
+        )
+        self.assertIsNotNone(
+            rec.get("workdir"), "the off-task RECORD still stores workdir (dedup key)"
+        )
         code_c, cdoc = self._collect(doc["task_id"])
         self.assertEqual(code_c, 20)
         self.assertEqual(cdoc["tool_log"], [], "no-file/off default: empty ledger")

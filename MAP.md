@@ -830,10 +830,20 @@ SPEC.md `status` → `active`.
   steer-drain case. (d) A parallel session left an untracked
   docs/testing-strategy-report.md in the working tree; excluded from the
   commit (belongs to that session).
-- spec deltas: none in this session (the spec amendment landed in the
-  prior PR #17); the @gpu probe verdict (native tool_calls at the pin)
-  is a pin-reality delta to record in SPEC S1.3 at merge time — noted in
-  the PR body under Spec amendments.
+- spec deltas: the @gpu wire-protocol probe verdict (pin 9a9394a8 chat
+  template emits the NATIVE `tool_calls` array — finish_reason=tool_calls,
+  one tool_call per completion, arguments as a JSON string; artifact
+  test-logs/tools-probe-20260926-015610.json). This is a pin-reality
+  delta against the S3.4 text-JSON fallback assumption: the host parser
+  must handle the native array FIRST (the text-JSON fence is the A2
+  fallback only), which the implementation does (taskworker _stream_chat
+  native-array path + _parse_text_tool_call fallback). SPEC S1.3
+  pin-reality + S3.4 wire-shape notes are backfilled at the merge (G4)
+  per the spec-amendment rule; the full before/after is in the PR body
+  under Spec amendments. (The S1.6 `tools:` manager-validation block and
+  the S3.6 capability keys in the `etc/*.yaml` templates are code-side
+  implementations of the prior PR #17's SPEC amendments, not new
+  SPEC.md edits — this branch does not touch SPEC.md.)
 
 ### 2026-09-25 — SPEC amendment: subagent capability layer (tool loop) back-integrated into SPEC.md + MAP 3.13–3.15 / 4.9 (docs-only PR, no code yet)
 - agent/model: Hermes qwen3.8-27b (session `spec-ammendments-expanding-subagent-capabilities` branch)

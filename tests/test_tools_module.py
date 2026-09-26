@@ -204,6 +204,18 @@ class TestTimeoutKill(ToolsModuleBase):
         self.assertEqual(res["exit_code"], 124)
         self.assertIn("ERR_TOOL_TIMEOUT", res.get("detail") or "")
 
+    def test_partial_stdout_survives_the_timeout(self) -> None:
+        # G3 PR#18 r6 P2: a tool that PRINTS before the timeout must not
+        # report empty output — TimeoutExpired.output carries the partial
+        # stdout and the post-kill re-read only returns post-timeout bytes;
+        # the module coalesces both into the tool_log entry.
+        res = T.execute(
+            "bash", {"cmd": "echo before-timeout; sleep 10", "timeout": 1}, self.ctx
+        )
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["exit_code"], 124)
+        self.assertIn("before-timeout", res.get("output") or "")
+
     def test_the_process_group_is_dead_after_timeout(self) -> None:
         # bash spawns a CHILD (sh -> sleep); the group kill must take the
         # child with it — assert no descendant of the group survives.

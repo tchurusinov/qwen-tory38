@@ -296,7 +296,15 @@ def spawn_json(rec: dict, detail: str | None = None) -> dict:
         "error": rec.get("error"),
         "detail": rec.get("detail", detail),
     }
-    if rec.get("workdir") is not None:
+    # G3 PR#18 r6 P1: emit `workdir` only for `--tools on` records, so a
+    # `--tools off` spawn JSON matches the pre-loop schema byte-for-byte
+    # (the amendment's "byte-identical to the pre-loop behavior"
+    # constraint — the S3.1 wire/result surface). The RECORD still stores
+    # workdir for off tasks (it is part of the S3.4 dedup key — "same
+    # prompt in two workdirs is two different tasks" holds regardless of
+    # the loop flag), and collect on an off task reports workdir=null
+    # (the S3.1 amendment: "tool_log is [] for --tools off tasks").
+    if rec.get("tools") == "on" and rec.get("workdir") is not None:
         out["workdir"] = rec["workdir"]
     return out
 

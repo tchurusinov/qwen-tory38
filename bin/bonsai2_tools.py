@@ -256,13 +256,21 @@ def _run_capped(
     timed_out = False
     try:
         out, _ = proc.communicate(input=input_bytes, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         timed_out = True
+        # G3 PR#18 r6 P2: the exception object carries the partial stdout
+        # buffered up to the deadline (e.output); the post-kill re-read
+        # below returns only bytes written AFTER the timeout, so coalesce
+        # the two or a tool that printed before the timeout would report
+        # empty output in the tool_log (dropping the diagnostic data the
+        # S3.1 ledger promises).
+        partial = exc.output or b""
         _kill_group(proc)
         try:
-            out, _ = proc.communicate(timeout=2.0)
+            tail, _ = proc.communicate(timeout=2.0)
+            out = partial + (tail or b"")
         except (subprocess.TimeoutExpired, OSError):
-            out = b""
+            out = partial
     finally:
         if _CURRENT_PROC["proc"] is proc:
             _CURRENT_PROC["proc"] = None

@@ -272,6 +272,19 @@ def _persist_rec_preserving(d: dict, rec: dict) -> None:
         # adopt the disk's pending-queue state (empty list if no steers);
         # do NOT clobber it with the stale local snapshot.
         rec["steer_messages"] = fresh.get("steer_messages") or []
+        # G3 PR#18 r6 P1 (defense-in-depth, no behavior change today):
+        # also re-adopt the loop-gate fields from the on-disk record.
+        # In the current flow the local `rec` (json.loads of the spawn
+        # record at worker start, _main) already carries tools/max_steps/
+        # workdir — they are set once at spawn (harness record creation)
+        # and never mutated mid-loop — so this is a no-op; but it makes
+        # the invariant structural instead of accidental: the on-disk
+        # record is the source of truth for the gate flags, and a future
+        # code path that drops or mutates them on the local snapshot can
+        # never propagate the loss to disk.
+        for k in ("tools", "max_steps", "workdir"):
+            if fresh.get(k) is not None:
+                rec[k] = fresh[k]
         H.write_task(d, rec)
 
 
