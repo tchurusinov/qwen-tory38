@@ -893,16 +893,28 @@ SPEC.md `status` → `active`.
   (v1 limitation; noted at the base64 site), #5 dedup workdir test
   live-winner-dependent (correct; the test explicitly waits for
   state=running; noted at the test). 7709c86, posted 958/959. Suite
-  425/425 OK. G3 loop state: P0-per-round r1-r10 = 0,1,1,1,0,0,1,1,0,0
-  (1-P0 rounds were 2,3,4,7,8; zero-P0 were 1,5,6,9,10), P1s for
-  r7-r10 = 1,5,2,1 (round-8's 5 included the deepest pass; the last
-  four rounds' substantive P1s: r8 port re-sync, r9 streamed
-  tool-call accumulation, r10 write-symlink containment — each probed
-  and answered). Round-10's P1 was the first "real-or-not" containment
-  question probed and answered both ways (pre-check correct + post-check
-  defense-in-depth); the loop is converging to documentation-only
-  rounds. The 3.13/3.14/3.15 boxes in the Phase 3 list flip to [x] on
-  merge (G4).
+  425/425 OK. G3 loop state: P0-per-round r1-r11 = 0,1,1,1,0,0,1,1,0,0,1
+  (round-11's P0 was in my own r9/r10 additions — the deepest pass yet
+  scrutinized the newest code). Round 11 (confirmation, 7709c86): 1 P0,
+  5 P1, 7 P2. P0+P1#4 (root_real divergence pre/post-mkdir): FIXED by
+  unification — resolve_path now returns (target, root_real); write_file's
+  post-mkdir re-check uses the SAME root, not a recomputed one. P1#2
+  (dedup-lock chmod 0o755/0o700): verified FALSE-POSITIVE — task_id
+  minted UNIQUE under the lock, no same-leaf collision; documented. P1#3
+  (streamed tool-call id overwrite): REAL, FIXED — capture FIRST
+  non-empty id (acc["id"] is None guard). P1#4 (exit_code 124
+  misclassified as timeout): REAL, FIXED — explicit timed_out flag in
+  the host tools module; the loop matches res_tool.get("timed_out") is
+  True; 2 new regression tests. P1#5 (probe while/else): verified
+  INVERTED semantics (Python while/else fires on exhaustion, not break;
+  empirical repro), documented. P1#6 (probe /v1/models container
+  leak): FIXED — _stop_container() before the raise. P2s: #9 (parent
+  workspace_dir 0o755) FIXED; #11 (ERR_TOOL_PATH) now names the
+  out-pointing symlink; #3 trailing-slash dedup verified FALSE-POSITIVE
+  (Path normalization); #8/#10/#12 documented. 20df870, posted 974/975.
+  Suite 427/427 OK. The loop is deep-scrutinizing the newest
+  round-added code; round-12 confirmation running. The 3.13/3.14/3.15
+  boxes in the Phase 3 list flip to [x] on merge (G4).
 - blockers/intricacies: (a) the @gpu probe originally failed for a
   non-obvious argv-shape reason (flag+value as one token); captured in
   the commit message + the probe now logs `docker logs` tail on early
