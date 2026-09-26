@@ -465,14 +465,48 @@ def ensure_results_dirs(d: dict) -> None:
 WORKSPACE_ROTATION_AGE_S = 7 * 24 * 3600
 
 
+def _newest_mtime_under(p: Path, now: float) -> float:
+    """The most-recent mtime among `p` and all its descendants. Returns 0.0
+    if any stat fails (best-effort; the caller treats 0.0 as "unknown ->
+    keep"). Used by rotate_workspaces so a workdir whose FILES are fresh but
+    whose top-level dir mtime is stale (e.g. a file written in place, which
+    does not bump the parent dir's mtime) is still kept."""
+    newest = 0.0
+    try:
+        newest = p.stat().st_mtime
+    except OSError:
+        return 0.0
+    try:
+        for sub in p.rglob("*"):
+            try:
+                m = sub.stat().st_mtime
+            except OSError:
+                continue
+            newest = max(newest, m)
+    except (OSError, ValueError):
+        pass
+    return newest
+
+
 def rotate_workspaces(
     workspace_dir, env: dict | None = None, now: float | None = None
 ) -> int:
     """Prune per-task workdirs older than the 7-day window. Returns the
     number of subdirs removed. A missing/empty dir is a no-op (0). Only
     DIRECTORY children are candidates (stray files are left alone); a
-    subdir whose most-recent file mtime is within the window is kept.
-    Best-effort: an OSError on any candidate is skipped (never raised)."""
+    subdir whose most-recent FILE mtime (any descendant) is within the
+    window is kept. Best-effort: an OSError on any candidate is skipped
+    (never raised).
+
+    G3 PR#18 r4 P0: the original implementation keyed off the top-level
+    dir's OWN mtime only. In-place file writes do not bump a directory's
+    mtime (verified: modifying a file leaves the parent's mtime unchanged),
+    so a workdir whose files were written at creation time and then only
+    updated in place would carry a stale dir mtime and be pruned after 7
+    days even though its files were fresh — contradicting this docstring's
+    "most-recent file mtime" promise. Now the newest mtime over the whole
+    subtree decides.
+    """
     root = Path(workspace_dir)
     if not root.is_dir():
         return 0
@@ -485,11 +519,11 @@ def rotate_workspaces(
     for child in children:
         if not child.is_dir():
             continue
-        try:
-            age = now - child.stat().st_mtime
-        except OSError:
+        newest = _newest_mtime_under(child, now)
+        if newest == 0.0:
+            # could not stat anything — leave it alone (best-effort)
             continue
-        if age > WORKSPACE_ROTATION_AGE_S:
+        if now - newest > WORKSPACE_ROTATION_AGE_S:
             try:
                 shutil.rmtree(child, ignore_errors=True)
                 removed += 1
@@ -1350,6 +1384,11 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
             if not re.fullmatch(r"[1-9][0-9]*", tok):
                 return "ERR_ARGS: --max-steps must be a positive integer"
             v = int(tok)
+            # G3 PR#18 r4 P2 (noted): a huge value ("999999999999") passes
+            # the positive-integer gate and is rejected by the 1-128 range
+            # check below with "must be in 1-128" — that message is the
+            # accurate one (the value IS in the right shape, just too
+            # large), so the two branches stay distinct on purpose.
             if not (1 <= v <= 128):
                 return "ERR_ARGS: --max-steps must be in 1-128 (S3.4)"
             args["max_steps"] = v
@@ -1390,6 +1429,17 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         cfg = load_config(env)
     except ConfigError as exc:
         return emit({"error": "ERR_ARGS", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    # S3.2/S3.6 (the 2026-09-25 spec amendment): rotate the per-task
+    # workdirs with the 7-day window. G3 PR#18 r4 P1: this was originally
+    # called INSIDE the per-key dedup lock, holding that hot lock across an
+    # O(N) filesystem scan of the whole workspace tree on every spawn. It
+    # only prunes subdirs older than 7 days, so it is safe to run once
+    # here, before any lock is taken — never holds the dedup lock during I/O.
+    # Best-effort (a failed prune never blocks the spawn).
+    try:
+        rotate_workspaces(cfg["workspace_dir"])
+    except Exception:  # noqa: BLE001, S110 — rotation is best-effort
+        pass
     # P1 #3 (G3 PR#12 r1): the wire identity is only used for the
     # port_base fallback below — the worker re-reads subagent-engine.yaml
     # itself at start (its own load_engine_identity), so a missing/malformed
@@ -1625,14 +1675,13 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                         f"workdir creation failed: {exc}",
                     )
                 workdir = str(auto_wd)
-                # S3.2: rotate the per-task workdirs with the 7-day window
-                # (best-effort; never blocks the spawn).
-                try:
-                    rotate_workspaces(cfg["workspace_dir"])
-                except Exception:  # noqa: BLE001, S110 — rotation is best-effort
-                    pass
             # S3.4 --max-steps: the flag value, else the S3.6
             # task_max_steps default (range 1-128, enforced at parse).
+            # (rotate_workspaces was called here, inside the lock, until
+            # G3 PR#18 r4 P1 moved it to the top of cmd_spawn — it no
+            # longer runs under the per-key dedup lock, so a spawn no
+            # longer holds that hot lock across an O(N) I/O scan of the
+            # whole workspace tree.)
             max_steps = (
                 parsed["max_steps"]
                 if parsed["max_steps"] is not None

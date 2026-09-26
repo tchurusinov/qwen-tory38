@@ -250,6 +250,24 @@ def _pick_retry_instance(
     return target.get("i"), port
 
 
+def _persist_rec_preserving(d: dict, rec: dict) -> None:
+    """Persist the local `rec` while preserving the on-disk record's
+    `steer_messages`. The step-loop's local `rec` is a worker-start
+    snapshot; a steer posted between step-boundaries writes
+    `steer_messages` to the DISK record, and an unconditional
+    `H.write_task(d, rec)` would squash it. G3 PR#18 r4 P1: used at every
+    step-loop write site that persists the local record (engine-retried
+    and step-end), mirroring the S4.3 lock-safe re-read-merge at the
+    step boundary. The on-disk `steer_messages` is the source of truth
+    for the pending queue; the local `rec` owns every other field."""
+    with H.lock_wait(d["base"], f"task-{rec['task_id']}"):
+        fresh = H.read_task(d, rec["task_id"])
+        # adopt the disk's pending-queue state (empty list if no steers);
+        # do NOT clobber it with the stale local snapshot.
+        rec["steer_messages"] = fresh.get("steer_messages") or []
+        H.write_task(d, rec)
+
+
 def _stream_chat(port: int, ident: dict, body: dict) -> dict:
     """One streaming chat completion against the instance at `port`.
     Returns {"ok": True, "answer", "reasoning", "tool_call", "usage"} or
@@ -866,7 +884,7 @@ def _run_tool_loop(
                 ni, "; ".join(attempt_detail)
             )
             rec["updated_ts"] = time.time()
-            H.write_task(d, rec)
+            _persist_rec_preserving(d, rec)
             _log(
                 f"{rec['task_id']}: {res.get('detail')} -> engine_retried on i={ni} (port {port})"
             )
@@ -874,7 +892,7 @@ def _run_tool_loop(
         steps += 1
         rec["steps"] = steps
         rec["updated_ts"] = time.time()
-        H.write_task(d, rec)
+        _persist_rec_preserving(d, rec)
 
         if res is None:
             # the deadline expired before the first attempt of this step

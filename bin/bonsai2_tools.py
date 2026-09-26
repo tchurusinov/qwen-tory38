@@ -215,6 +215,12 @@ def resolve_path(root: Path, p) -> Path:
     #     truth for WHERE the file actually lives. A symlink named
     #     inside the workdir that points OUT passes the textual test
     #     but fails here (the "symlinks out rejected at open" rule).
+    # G3 PR#18 r4 P2 (noted): `norm.resolve()` is the NON-STRICT
+    # resolve (Python >=3.10 default strict=False), so a brand-new path
+    # (write_file to a not-yet-existing nested file) does NOT raise
+    # FileNotFoundError — the containment check is purely textual +
+    # symlink-aware on the physical prefix, and the write itself creates
+    # the leaf. No strict=True here on purpose.
     if not _under(norm.resolve()):
         raise ValueError(
             f"ERR_TOOL_PATH: {p!r} escapes the workdir {root_real} "

@@ -53,6 +53,13 @@ LOG_DIR = REPO_ROOT / "test-logs"
 # the pinned image (S1.6; the model is baked in — verified baked at
 # the 2026-09-25 session: ls /opt/bonsai2/models inside the image).
 RUNTIME_IMAGE = "bonsai2-server:1.0"
+# G3 PR#18 r4 P2 (noted): 30170 sits above the pool's port_base + N.
+# The pool's per-instance port is port_base + i (default base 30101), so
+# 30170 collides only if i ever reaches 69+ (port_base + 69 = 30170).
+# On this box N is a single digit (SPEC worked example N=2; S1.4
+# allocation tier keeps it in the low single digits), so the margin is
+# large. If the pool base ever shifts or N grows past ~60, re-derive
+# this from port_base + instances.count + 1.
 PROBE_PORT = 30170  # outside the pool's 30101+ range (no collision)
 API_KEY = "bonsai2-local"
 ALIAS = "qwen38-27b-subagent"

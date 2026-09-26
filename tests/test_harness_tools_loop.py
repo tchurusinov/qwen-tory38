@@ -695,6 +695,28 @@ class TestWorkspaceRotation(LoopBase):
         self.assertTrue(new.exists(), "the fresh workdir survives")
         self.assertTrue((ws / "stray.txt").exists(), "stray files are untouched")
 
+    def test_file_mtime_newer_than_dir_kept(self) -> None:
+        # G3 PR#18 r4 P0: in-place file writes do not bump the parent
+        # dir's mtime. A workdir whose DIR mtime is stale (8 days old) but
+        # whose FILE was touched 1h ago must be KEPT — the pre-fix
+        # impl pruned on the dir mtime and would have rmtree'd a live
+        # workdir. (The sibling test above sets dir+file to the same old
+        # time, so it cannot distinguish dir-mtime from file-mtime.)
+        ws = self.tmp / "ws-mixed"
+        ws.mkdir()
+        old = ws / "t-old-dir-fresh-file"
+        old.mkdir()
+        f = old / "live.txt"
+        f.write_text("x")
+        old_time = time.time() - 8 * 24 * 3600
+        fresh_time = time.time() - 3600
+        # dir mtime old, file mtime fresh
+        os.utime(old, (old_time, old_time))
+        os.utime(f, (fresh_time, fresh_time))
+        removed = H.rotate_workspaces(str(ws))
+        self.assertEqual(removed, 0, "fresh file inside an old-mtime dir keeps it")
+        self.assertTrue(old.exists(), "the workdir with a fresh file survives")
+
     def test_missing_dir_is_a_noop(self) -> None:
         self.assertEqual(H.rotate_workspaces(str(self.tmp / "no-such-ws")), 0)
 
