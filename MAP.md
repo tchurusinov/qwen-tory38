@@ -585,33 +585,40 @@ Exit: hermetic closed-set suite green + S3.8 acceptance (all five).
 
 Exit: one full M1–M10 run committed with S5.9 acceptance (all five).
 
-- [ ] 4.1 `bench.yaml` + schema validation (S5.7); invalid scenario id →
-      exit 2 (S5.8 config test).
-- [ ] 4.2 Runner core `bench/run.py`: scenario loader; endpoint resolver
+- [x] 4.1 `bench.yaml` + schema validation (S5.7); invalid scenario id →
+      exit 2 (S5.8 config test). (merged 2026-09-26, PR #20, main @
+      8e7a8f6)
+- [x] 4.2 Runner core `bench/run.py`: scenario loader; endpoint resolver
       (subagent ports from `subagent-engine.yaml`, main from
       `harness.yaml`); task executor (streaming chat completions, token
       timing from stream timestamps); box-state snapshot per run
       (`nvidia-smi` query, `docker stats` read-only, `/proc/meminfo`,
-      driver, date) via stdlib subprocess (S5.4, S5.2).
-- [ ] 4.3 Reporter: JSON row per scenario + `bench-results/<date>_<commit>.md`
+      driver, date) via stdlib subprocess (S5.4, S5.2). (merged 2026-09-26,
+      PR #20, main @ 8e7a8f6)
+- [x] 4.3 Reporter: JSON row per scenario + `bench-results/<date>_<commit>.md`
       summary; 7-day rotation + 1 GB cap (keep newest); `BONSAI2_BENCH_LOCK`
       flock; exit 0 even on scenario-level fail, exit 2 on bad config
-      (S5.4, S5.2, S3.5).
-- [ ] 4.4 Auto scorers + goldens in `bench/goldens/`: M1 (compiles + own
+      (S5.4, S5.2, S3.5). (merged 2026-09-26, PR #20, main @ 8e7a8f6)
+- [x] 4.4 Auto scorers + goldens in `bench/goldens/`: M1 (compiles + own
       3-case suite), M2 (report JSON parseable + 10/10 coverage), M4
       (seeded 10-bug fixture diff, ≥ 80 % found), M5 (5 QA questions,
       golden-file binary scoring), M7 (t/s at ceiling + zero 5xx), M8
       (main t/s within `main_guardrail_pct` of M6 → `pass`/`fail` verdict
-      recorded in the row) (S5.2, S5.3).
-- [ ] 4.5 M3 semi-auto scorer: auto shape (≤ 300 tokens, 3 claims per
+      recorded in the row) (S5.2, S5.3). (merged 2026-09-26, PR #20, main @
+      8e7a8f6)
+- [x] 4.5 M3 semi-auto scorer: auto shape (≤ 300 tokens, 3 claims per
       section) + main spot-check of 1/3 sections (claim accuracy ≥ 2/3);
-      score = `auto*0.7 + spotcheck*0.3` (S5.3).
-- [ ] 4.6 M6 main-only control of M1–M5, same rubrics (S5.2).
-- [ ] 4.7 `bonsai2-bench` thin wrapper (`--scenario`, `--quick`); exit
-      code = runner's (0/2) (S3.5).
-- [ ] 4.8 S5.8 tests: dogfood (M7 row parses), rubric golden in/out pairs
+      score = `auto*0.7 + spotcheck*0.3` (S5.3). (merged 2026-09-26, PR
+      #20, main @ 8e7a8f6)
+- [x] 4.6 M6 main-only control of M1–M5, same rubrics (S5.2).
+      (merged 2026-09-26, PR #20, main @ 8e7a8f6)
+- [x] 4.7 `bonsai2-bench` thin wrapper (`--scenario`, `--quick`); exit
+      code = runner's (0/2) (S3.5). (merged 2026-09-26, PR #20, main @
+      8e7a8f6)
+- [x] 4.8 S5.8 tests: dogfood (M7 row parses), rubric golden in/out pairs
       per scorer (hermetic), mock-endpoint full M1+M2 run (zero
-      network/GPU, timings sane).
+      network/GPU, timings sane). (merged 2026-09-26, PR #20, main @
+      8e7a8f6)
 - [ ] 4.9 M9/M10 capability-layer goldens + scorers (the amendment
       doc's "4.11", renumbered so the live full run comes AFTER them):
       M9 spec-chunk fixture in `bench/goldens/` (small library spec,
@@ -772,6 +779,34 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-26 — G4 merge: PR #20 merged as `8e7a8f6`, MAP 4.1–4.8 checked
+- agent/model: Hermes qwen3.8-27b (session: G3 round-2 disposition + G4
+ merge of PR #20, branch `phase4-bench-framework`)
+- phase(s): P4 (G3 loop closure + G4; no new implementation scope)
+- items checked: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8 (all flipped to
+ [x] at merge; merge evidence: PR #20 merged via Gitea API at
+ 2026-09-26T16:17:53Z, main @ 8e7a8f6, 546 hermetic tests OK + gate
+ PASS + mock --quick e2e at head fb0e33d)
+- machine state: main @ 8e7a8f6 (bench framework now on main; Phase-4
+ frontier is 4.9 — M9/M10 capability-layer goldens + scorers). Branch
+ `phase4-bench-framework` deleted locally + remotely after the merge
+ (the G3 loop's PR comments are the record: 1015 round-1 raw
+ [stale-plan, superseded], 1016 round-2 raw [0 P0/2 P1/6 P2], 1022
+ round-2 disposition [all 8 fixed, verified], 1024 round-3 raw
+ [REVIEW CLEAN 0/0/0] + 1025 the G4 approval comment). No /opt/bonsai2
+ install yet (Phase 6); no GPU load this session.
+- next: Phase 4.9 (M9/M10 capability-layer goldens + scorers; both
+ tool_execution modes; main-side re-run scorers) — the first unchecked
+ Phase-4 item. Then 4.10 (live full M1–M10 @gpu run, S5.9) and 4.11
+ (re-bench policy wiring).
+- blockers/intricacies: none new. Round-3 came back clean on the first
+ try over the disposition-fix commit — noted as a data point for the
+ post-MVP CI/CD proposal (review-round count trending down as the DOD
+ + disposition discipline matures).
+- spec deltas: none (the round-2 P2-6 fix kept the S5.4 0/2 closed set
+ intact — crash = exit 0 + status="crash" in the S3.1 stdout JSON; no
+ SPEC.md change needed).
+
 ### 2026-09-26 — Phase 4.1–4.8: bench framework (runner, scorers, goldens, S5.8 tests)
 - agent/model: Hermes qwen3.8-27b (session: branch `phase4-bench-framework`, off `main` @ `2edde2c`)
 - phase(s): P4 (4.1–4.8 — the Phase-4 bench framework; 4.9+ NOT in this PR)
@@ -824,10 +859,11 @@ SPEC.md `status` → `active`.
   Verified: 546 tests OK, gate PASS, ruff clean, mock --quick run
   exit 0 with M1/M2/M7 pass + crash-path smoke (missing engine yaml
   -> status:"crash", exit 0). Posted the round-2 disposition comment
-  on the PR; round-3 review pending. After G3 clean: G4. After G4:
-  flip MAP 4.1–4.8 to [x] at merge; the Phase-4 frontier becomes 4.9
-  (M9/M10 capability-layer goldens + scorers, both tool_execution
-  modes).
+  on the PR; round-3 review came back CLEAN (0 P0/0 P1/0 P2, comment
+  1024) and G4 merged the PR as 8e7a8f6 (see the entry above this
+  one). After G4: flip MAP 4.1–4.8 to [x] at merge (done); the
+  Phase-4 frontier becomes 4.9 (M9/M10 capability-layer goldens +
+  scorers, both tool_execution modes).
 - blockers/intricacies: M9/M10 rows run with a named PENDING verdict
   (row fail, detail "scorer lands in MAP 4.9") until 4.9 — the S5.4
   "failure is data" rule; the S5.7 note (M9/M10 full-bench-only in v1,
