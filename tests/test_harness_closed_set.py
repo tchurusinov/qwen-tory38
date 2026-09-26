@@ -219,6 +219,10 @@ class Base(unittest.TestCase):
             "results_dir": str(self.results),
             "dedup_dir": str(self.health_dir / "dedup"),
             "queue_wait_max_s": 1,
+            # MAP 3.15: per-task workdirs live under the rig's temp tree
+            # (the S3.6 default /run/bonsai2/workspaces/ is root-owned on
+            # this box — spawn's auto-workdir creation must not hit it).
+            "workspace_dir": str(self.tmp / "workspaces"),
         }
         data.update(overrides)
         self.cfg.write_text("\n".join(f"{k}: {v}" for k, v in data.items()) + "\n")

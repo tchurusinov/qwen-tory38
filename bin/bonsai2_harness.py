@@ -109,7 +109,9 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -200,6 +202,15 @@ CONFIG_DEFAULTS: dict = {
     "instance_healthy_timeout_s": 30,
     "task_default_deadline_s": 600,
     "main_tps_guardrail_pct": 5,
+    # --- subagent capability layer (S3.4 tool loop; the 2026-09-25
+    # spec amendment's S3.6 block, MAP 3.15) ---
+    "tool_execution": "host",  # host | engine (S3.4 dual-mode)
+    "tool_python_bin": "/usr/bin/python3",  # the python tool's interpreter
+    "tool_timeout_s": 60,  # per-tool subprocess timeout
+    "tool_output_max_kb": 32,  # tool output truncation (S3.1/S3.4)
+    "task_max_steps": 32,  # default --max-steps (range 1-128)
+    "tool_invalid_max": 3,  # consecutive bad calls -> ERR_TOOL_INVALID_CALL
+    "workspace_dir": "/run/bonsai2/workspaces",  # per-task scratch workdirs
 }
 _INT_KEYS = (
     "dedup_ttl_h",
@@ -207,6 +218,10 @@ _INT_KEYS = (
     "instance_healthy_timeout_s",
     "task_default_deadline_s",
     "main_tps_guardrail_pct",
+    "tool_timeout_s",
+    "tool_output_max_kb",
+    "task_max_steps",
+    "tool_invalid_max",
 )
 
 # S3.4 priority ranks (lower = earlier; S3.3 "high jumps the queue").
@@ -267,8 +282,12 @@ def emit(payload: dict, code: int, detail: str | None = None) -> int:
 
 def spawn_json(rec: dict, detail: str | None = None) -> dict:
     """The S3.1 spawn/steer/cancel/collect JSON object (field order as in
-    the SPEC example), from a task record (the record carries extras)."""
-    return {
+    the SPEC example), from a task record (the record carries extras).
+    `workdir` is the S3.2/S3.1 capability-layer field (the 2026-09-25
+    amendment): the resolved workdir the task runs in — present for
+    post-capability-layer records, absent for older ones (the S3.1
+    schema is open to new fields)."""
+    out = {
         "task_id": rec.get("task_id"),
         "state": rec.get("state"),
         "instance": rec.get("instance"),
@@ -277,6 +296,26 @@ def spawn_json(rec: dict, detail: str | None = None) -> dict:
         "error": rec.get("error"),
         "detail": rec.get("detail", detail),
     }
+    # G3 PR#18 r6 P1: emit `workdir` only for `--tools on` records, so a
+    # `--tools off` spawn JSON matches the pre-loop schema byte-for-byte
+    # (the amendment's "byte-identical to the pre-loop behavior"
+    # constraint — the S3.1 wire/result surface). The RECORD still stores
+    # workdir for off tasks (it is part of the S3.4 dedup key — "same
+    # prompt in two workdirs is two different tasks" holds regardless of
+    # the loop flag), and collect on an off task reports workdir=null
+    # (the S3.1 amendment: "tool_log is [] for --tools off tasks").
+    # G3 PR#18 r7 P2 (noted): this creates an asymmetric surface on purpose
+    # — the off-task SPAWN JSON omits workdir (pre-loop schema), while the
+    # off-task COLLECT payload returns it (read_result defaults to
+    # rec.get("workdir"), which is set for off tasks; collect is the
+    # S3.1 "verification entry point" and the amendment's collect payload
+    # is {answer, reasoning, usage, tool_log, steps, workdir} — the
+    # off-task workdir is the harness-created scratch dir, useful info,
+    # not part of the pre-loop wire surface). No fix: both sides are
+    # consistent with their own spec clauses.
+    if rec.get("tools") == "on" and rec.get("workdir") is not None:
+        out["workdir"] = rec["workdir"]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -317,6 +356,8 @@ def load_config(env: dict | None = None) -> dict:
         "main_endpoint_healthy_probe",
         "results_dir",
         "dedup_dir",
+        "tool_python_bin",
+        "workspace_dir",
     ):
         if key in data:
             val = data[key]
@@ -325,6 +366,16 @@ def load_config(env: dict | None = None) -> dict:
                     f"ERR_CONFIG: harness.yaml: {key} must be a non-empty string"
                 )
             cfg[key] = val
+    # S3.4 dual-mode flag: a string with a LOCKED value set (same
+    # discipline as the manager's kv_cache, S1.6 delta 2026-09-23).
+    if "tool_execution" in data:
+        val = data["tool_execution"]
+        if not isinstance(val, str) or val not in ("host", "engine"):
+            raise ConfigError(
+                f"ERR_CONFIG: harness.yaml: tool_execution must be host|engine "
+                f"(got {val!r})"
+            )
+        cfg["tool_execution"] = val
     for key in _INT_KEYS:
         if key in data:
             val = data[key]
@@ -422,6 +473,98 @@ def results_dirs(cfg: dict) -> dict:
 def ensure_results_dirs(d: dict) -> None:
     for p in (d["base"], d["tasks"], d["locks"]):
         p.mkdir(parents=True, exist_ok=True)
+
+
+# S3.2/S3.6 (the 2026-09-25 spec amendment): per-task scratch workdirs are
+# "rotated with the 7-day results window". Rotation = prune
+# <workspace_dir>/<task_id> subdirs whose mtime is older than 7 days.
+# Best-effort (a failed prune never blocks a spawn; the dir is scratch).
+WORKSPACE_ROTATION_AGE_S = 7 * 24 * 3600
+
+
+def _newest_mtime_under(p: Path, now: float) -> float:
+    """The most-recent mtime among `p` and all its descendants. Returns 0.0
+    if any stat fails (best-effort; the caller treats 0.0 as "unknown ->
+    keep"). Used by rotate_workspaces so a workdir whose FILES are fresh but
+    whose top-level dir mtime is stale (e.g. a file written in place, which
+    does not bump the parent dir's mtime) is still kept."""
+    newest = 0.0
+    try:
+        newest = p.stat().st_mtime
+    except OSError:
+        return 0.0
+    try:
+        for sub in p.rglob("*"):
+            try:
+                m = sub.stat().st_mtime
+            except OSError:
+                continue
+            newest = max(newest, m)
+    except (OSError, ValueError):
+        pass
+    return newest
+
+
+def rotate_workspaces(
+    workspace_dir, env: dict | None = None, now: float | None = None
+) -> int:
+    """Prune per-task workdirs older than the 7-day window. Returns the
+    number of subdirs removed. A missing/empty dir is a no-op (0). Only
+    DIRECTORY children are candidates (stray files are left alone); a
+    subdir whose most-recent FILE mtime (any descendant) is within the
+    window is kept. Best-effort: an OSError on any candidate is skipped
+    (never raised).
+
+    G3 PR#18 r4 P0: the original implementation keyed off the top-level
+    dir's OWN mtime only. In-place file writes do not bump a directory's
+    mtime (verified: modifying a file leaves the parent's mtime unchanged),
+    so a workdir whose files were written at creation time and then only
+    updated in place would carry a stale dir mtime and be pruned after 7
+    days even though its files were fresh — contradicting this docstring's
+    "most-recent file mtime" promise. Now the newest mtime over the whole
+    subtree decides.
+    """
+    root = Path(workspace_dir)
+    if not root.is_dir():
+        return 0
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return 0
+    # G3 PR#18 r5 P2 (noted): _newest_mtime_under runs rglob("*") per
+    # candidate workdir, which is O(total files in the workspace tree) per
+    # spawn. It runs ONCE per cmd_spawn invocation (at the top, outside any
+    # lock — see G3 PR#18 r4 P1), so the cost is a one-shot full-tree stat
+    # scan per spawn, not per tool step. On a busy workspace_dir this is a
+    # per-spawn I/O cost; if it ever shows up in a load test, the next
+    # optimization is to throttle to once-per-process (cache the last
+    # rotation ts) rather than once-per-spawn. No behavior change.
+    # G3 PR#18 r10 P2 (noted): rotation runs unconditionally for every
+    # spawn, including --tools off tasks. Off tasks ALSO get an
+    # auto-created workdir (the workspace_dir/<task_id> mkdir is not
+    # gated on the tools flag — the workdir is part of the S3.4 dedup
+    # key regardless of the loop flag), and it is genuinely unused
+    # scratch (the worker passes workdir=None to the tools-off path).
+    # Rotating it is harmless (an empty 7-day-old dir, pruned the same
+    # as any other) — gating rotation on tools==on would save one
+    # iterdir pass only and complicate the "one rotation owner"
+    # invariant; deferred, no behavior change.
+    for child in children:
+        if not child.is_dir():
+            continue
+        newest = _newest_mtime_under(child, now)
+        if newest == 0.0:
+            # could not stat anything — leave it alone (best-effort)
+            continue
+        if now - newest > WORKSPACE_ROTATION_AGE_S:
+            try:
+                shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 def task_path(d: dict, task_id: str) -> Path:
@@ -1005,11 +1148,35 @@ def dedup_record(cfg: dict, dedup_key: str, task_id: str) -> None:
 # S3.2 task-result read (collect's answer/reasoning/usage)
 # --------------------------------------------------------------------------
 def read_result(rec: dict) -> dict:
-    """The S3.2 collect payload fields `answer` / `reasoning` / `usage`,
-    from the task's result file (the worker's S3.2 write). Absent/invalid
-    file -> all three null (a failed/timeout task may not have written it;
-    collect still returns the task's terminal state + code)."""
-    out = {"answer": None, "reasoning": None, "usage": None}
+    """The S3.2 collect payload fields `answer` / `reasoning` / `usage` +
+       the S3.1 capability-layer fields `tool_log` / `steps` / `workdir`
+       (the 2026-09-25 amendment's result-file shape: the taskworker writes
+       {answer, reasoning, usage, tool_log, steps, workdir}). Absent/invalid
+       file -> the answer/reasoning/usage are null AND tool_log/steps are
+       the S3.2 no-file defaults (`tool_log is [] for --tools off tasks`,
+       `steps` null when the file is absent) — a failed/timeout task may not
+       have written it; collect still returns the task's terminal state +
+       code. `workdir` comes from the RECORD (the S3.1 'main's verification
+    entry point') when the record carries it; the result file echoes it
+    for post-capability-layer records.
+
+    G3 PR#18 r10 P2 (noted at the collect site): a `--tools off` task's
+    collect payload RETURNS workdir (from the record — set for off
+    tasks too, it is part of the S3.4 dedup key) while the off-task
+    SPAWN JSON OMITS it (the r6 P1 byte-identical constraint). Both
+    sides match their own spec clause (spawn = pre-loop wire surface;
+    collect = the S3.1 amendment's {answer, reasoning, usage,
+    tool_log, steps, workdir}); the asymmetry is intentional, see the
+    r7 P2 note at spawn_json. No fix.
+    """
+    out = {
+        "answer": None,
+        "reasoning": None,
+        "usage": None,
+        "tool_log": [],
+        "steps": None,
+        "workdir": rec.get("workdir"),
+    }
     rf = rec.get("result_file")
     if not isinstance(rf, str) or not rf:
         return out
@@ -1018,7 +1185,7 @@ def read_result(rec: dict) -> dict:
     except (OSError, json.JSONDecodeError):
         return out
     if isinstance(data, dict):
-        for k in ("answer", "reasoning", "usage"):
+        for k in ("answer", "reasoning", "usage", "tool_log", "steps", "workdir"):
             if k in data:
                 out[k] = data[k]
     return out
@@ -1179,14 +1346,32 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
     emit it). Returns the parsed dict, or the detail string on failure.
 
     [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off] [--ctx N]
-    [--deadline SECS] [--out FILE] [--priority low|normal|high]
-    """
+    [--deadline SECS] [--max-steps N] [--workdir DIR]
+    [--out FILE] [--priority low|normal|high]
+
+    G3 PR#18 r12 P1 (verification): the `--tools` default ON means every
+    hermetic spawn test implicitly exercises the tool-loop path (auto
+    workdir + 7-day rotation + spawn_json workdir emission). Re-verified
+    round-12 that the pre-existing S3.7 hermetic suite (test_harness_spawn
+    / _34_38 / _closed_set) passes UNCHANGED — 98 tests OK, full suite
+    427/427 OK. The `--tools off` byte-identical constraint (r6 P1) is
+    preserved for the spawn JSON surface only; the tool-loop side effects
+    (workdir creation, rotation) are the new-path behavior, not a
+    pre-loop expectation.
+
+    `--tools` defaults ON (the S3.4 agentic loop; the 2026-09-25 spec
+    amendment). `--max-steps` defaults to the S3.6 `task_max_steps`
+    (range 1-128, enforced here). `--workdir` must exist + be writable
+    (validated at spawn; when omitted the harness creates
+    <workspace_dir>/<task_id> at claim time, S3.2/S3.6)."""
     args = {
         "prompt": None,
         "prompt_inline": False,
-        "tools": "off",
+        "tools": "on",
         "ctx": None,
         "deadline": None,
+        "max_steps": None,
+        "workdir": None,
         "out": None,
         "priority": "normal",
     }
@@ -1244,6 +1429,32 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
             args["out"] = Path(argv[i + 1])
             i += 2
             continue
+        if a == "--max-steps":
+            # G3 PR#18 r3 P0: `isdigit()` accepts leading zeros ("007" ->
+            # 7) and "000" -> 0 (range check rejects it) — inconsistent
+            # with the sibling --ctx/numeric handling. Use a strict
+            # `^[1-9][0-9]*$` so "007" is rejected outright, not silently
+            # coerced to 7.
+            tok = argv[i + 1] if i + 1 < len(argv) else ""
+            if not re.fullmatch(r"[1-9][0-9]*", tok):
+                return "ERR_ARGS: --max-steps must be a positive integer"
+            v = int(tok)
+            # G3 PR#18 r4 P2 (noted): a huge value ("999999999999") passes
+            # the positive-integer gate and is rejected by the 1-128 range
+            # check below with "must be in 1-128" — that message is the
+            # accurate one (the value IS in the right shape, just too
+            # large), so the two branches stay distinct on purpose.
+            if not (1 <= v <= 128):
+                return "ERR_ARGS: --max-steps must be in 1-128 (S3.4)"
+            args["max_steps"] = v
+            i += 2
+            continue
+        if a == "--workdir":
+            if i + 1 >= len(argv):
+                return "ERR_ARGS: --workdir needs a DIR"
+            args["workdir"] = Path(argv[i + 1]).expanduser()
+            i += 2
+            continue
         if a == "--priority":
             if i + 1 >= len(argv) or argv[i + 1] not in PRIORITY_RANK:
                 return "ERR_ARGS: --priority must be low|normal|high"
@@ -1273,6 +1484,34 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
         cfg = load_config(env)
     except ConfigError as exc:
         return emit({"error": "ERR_ARGS", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    # S3.2/S3.6 (the 2026-09-25 spec amendment): rotate the per-task
+    # workdirs with the 7-day window. G3 PR#18 r4 P1: this was originally
+    # called INSIDE the per-key dedup lock, holding that hot lock across an
+    # O(N) filesystem scan of the whole workspace tree on every spawn. It
+    # only prunes subdirs older than 7 days, so it is safe to run once
+    # here, before any lock is taken — never holds the dedup lock during I/O.
+    # Best-effort (a failed prune never blocks the spawn).
+    # G3 PR#18 r8 P1: a workspace_dir that EXISTS but is not a directory
+    # (e.g. a file at /run/bonsai2/workspaces) would otherwise be hidden
+    # by rotate_workspaces' is_dir() guard and only surface later as a
+    # cryptic mkdir failure at claim time — surface it here as the
+    # spawn-time config error (exit 2), consistent with the --workdir
+    # validation. A MISSING workspace_dir is still fine (created lazily
+    # by the auto-workdir mkdir, parents=True).
+    _wsd = Path(cfg["workspace_dir"])
+    if _wsd.exists() and not _wsd.is_dir():
+        return emit(
+            {
+                "error": "ERR_ARGS",
+                "detail": f"workspace_dir {_wsd} exists but is not a directory (S3.6)",
+            },
+            EXIT_ARGS,
+            f"workspace_dir {_wsd} is not a directory",
+        )
+    try:
+        rotate_workspaces(cfg["workspace_dir"])
+    except Exception:  # noqa: BLE001, S110 — rotation is best-effort
+        pass
     # P1 #3 (G3 PR#12 r1): the wire identity is only used for the
     # port_base fallback below — the worker re-reads subagent-engine.yaml
     # itself at start (its own load_engine_identity), so a missing/malformed
@@ -1333,6 +1572,31 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             "tools": parsed["tools"],
             "ctx": parsed["ctx"],
             "priority": parsed["priority"],
+            # S3.4 (the 2026-09-25 spec amendment, A4): --workdir is part of
+            # "everything that determines what the task will do" — same
+            # prompt in two workdirs is two different tasks.
+            # G3 PR#18 r8 P1 (documented, known limitation): an AUTO workdir
+            # (no --workdir) is keyed as None, not the resolved path — the
+            # auto path (<workspace_dir>/<task_id>) isn't known until the
+            # task_id is minted, which happens AFTER the key is computed,
+            # under the lock. Keying two concurrent same-prompt spawns by
+            # their (distinct) auto paths would defeat dedup (double slot);
+            # keying both by None is what makes them no-op onto each other.
+            # The consequence: a LATER spawn with an explicit --workdir set
+            # to a PRIOR task's auto path won't dedup onto that prior task
+            # (key: the path, vs the prior task's key: None). That's the
+            # intended direction — an auto path is unique per task and
+            # almost never reused as an explicit --workdir — so this is a
+            # documented edge, not a defect. No behavior change.
+            # G3 PR#18 r11 P2#3 (verified false-positive): parsed["workdir"]
+            # is a Path (the --workdir parse does Path(argv[i+1]).expanduser()
+            # at line 1445), and str(Path("/a/b/")) == "/a/b" — Path
+            # normalization already strips the trailing slash, so two spawns
+            # with --workdir /a/b and /a/b/ produce the SAME key string.
+            # No rstrip/resolve needed.
+            "workdir": str(parsed["workdir"])
+            if parsed["workdir"] is not None
+            else None,
         },
         sort_keys=True,
     )
@@ -1410,6 +1674,37 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 f"--out {op}: {exc}",
             )
         out_path = op
+    # S3.2 (the 2026-09-25 spec amendment, A4): --workdir must exist and
+    # be writable at SPAWN time (the tool loop's confinement root; an
+    # impossible dir is a spawn-time rejection, exit 2 — same discipline
+    # as the --out parent above). When omitted, the harness creates
+    # <workspace_dir>/<task_id> at record-creation time (S3.6
+    # workspace_dir, default /run/bonsai2/workspaces/).
+    workdir_explicit: Path | None = None
+    if parsed["workdir"] is not None:
+        wd = parsed["workdir"].expanduser().resolve()
+        if not wd.is_dir():
+            return emit(
+                {
+                    "error": "ERR_ARGS",
+                    "detail": f"--workdir {wd}: not a directory (must exist, S3.2)",
+                },
+                EXIT_ARGS,
+                f"--workdir {wd}: not a directory",
+            )
+        # G3 PR#18 r3 P2 (noted, no behavior change): this validates the
+        # explicit --workdir under the CURRENT uid at spawn, and the
+        # taskworker runs as that same uid — so the check is exactly right
+        # for the writer. (Asymmetry vs the auto-workdir, which the harness
+        # creates 0o700 owner-only: an explicit --workdir may be owned by
+        # another user but is writable by us, which is all the tools need.)
+        if not os.access(wd, os.W_OK):
+            return emit(
+                {"error": "ERR_ARGS", "detail": f"--workdir {wd}: not writable"},
+                EXIT_ARGS,
+                f"--workdir {wd}: not writable",
+            )
+        workdir_explicit = wd
     # S3.4 / MAP 3.5: claim a task id + record + dedup entry under the
     # per-key lock so two concurrent same-key spawns cannot both create a
     # record (the one that loses the lock writes its record, then re-reads
@@ -1436,6 +1731,79 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 if parsed["deadline"] is not None
                 else float(cfg["task_default_deadline_s"])
             )
+            # S3.2/S3.6 (the 2026-09-25 spec amendment): the task's
+            # workdir. Explicit --workdir is validated above; when
+            # omitted the harness creates <workspace_dir>/<task_id>
+            # NOW, under the per-key dedup lock (a concurrent same-key
+            # spawn no-ops to this task and shares the dir — the key
+            # already includes the workdir term, so two distinct
+            # workdirs can never dedup onto each other).
+            if workdir_explicit is not None:
+                workdir = str(workdir_explicit)
+            else:
+                auto_wd = Path(cfg["workspace_dir"]) / task_id
+                # G3 PR#18 r11 P2#2: remember whether the PARENT
+                # (workspace_dir root) was just created, so we can chmod it
+                # 0o700 too — the leaf chmod (r3 P1) only tightens the
+                # leaf, leaving the shared parent at umask (typically
+                # 0o755) and every sibling task workdir world-readable
+                # through it. If the parent already existed we leave its
+                # mode alone (the operator's explicit choice).
+                parent_preexisted = auto_wd.parent.is_dir()
+                try:
+                    # parents=True creates the workspace_dir root too; no
+                    # separate parent mkdir (G3 PR#18 r2 P1: the explicit
+                    # parent.mkdir was dead code — the child mkdir's
+                    # parents=True already creates it). G3 PR#18 r3 P1:
+                    # chmod the leaf 0o700 so a task's workdir is
+                    # owner-only (defense-in-depth — every task here
+                    # shares the runner uid, so this is belt-and-suspenders
+                    # for the shared workspace_dir).
+                    auto_wd.mkdir(parents=True, exist_ok=True)
+                    os.chmod(auto_wd, 0o700)
+                    # G3 PR#18 r11 P1#2 (verified false-positive): two
+                    # concurrent same-key spawns CANNOT collide on the same
+                    # auto-wd leaf — task_id is minted UNIQUE under this
+                    # lock (new_task_id, the 4-hex suffix prevents
+                    # collision), so each spawn's auto_wd =
+                    # <workspace_dir>/<its-own task_id> is a distinct path.
+                    # The "first creator 0o755, loser skips exist_ok"
+                    # scenario requires two spawns writing the SAME leaf,
+                    # which cannot happen. The leaf chmod is therefore
+                    # deterministic. No behavior change.
+                    if not parent_preexisted:
+                        try:
+                            os.chmod(auto_wd.parent, 0o700)
+                        except OSError:
+                            # parent chmod failure is non-fatal: the leaf is
+                            # still 0o700; a shared parent at umask is the
+                            # pre-r11 behavior, not a new leak.
+                            pass
+                except OSError as exc:
+                    # emit inside the lock is fine (the with-block releases
+                    # it on return): no record exists yet, so the key is
+                    # free for the caller's corrected spawn.
+                    return emit(
+                        {
+                            "error": "ERR_ARGS",
+                            "detail": f"cannot create workdir {auto_wd}: {exc}",
+                        },
+                        EXIT_ARGS,
+                        f"workdir creation failed: {exc}",
+                    )
+                workdir = str(auto_wd)
+            # S3.4 --max-steps: the flag value, else the S3.6
+            # task_max_steps default (range 1-128, enforced at parse).
+            # (rotate_workspaces was called here, inside the lock, until
+            # G3 PR#18 r4 P1 moved it to the top of cmd_spawn — it no
+            # longer runs under the per-key dedup lock, so a spawn no
+            # longer holds that hot lock across an O(N) I/O scan of the
+            # whole workspace tree.)
+            max_steps = (
+                parsed["max_steps"]
+                if parsed["max_steps"] is not None
+                else int(cfg["task_max_steps"])
+            )
             now = time.time()
             rec = {
                 "task_id": task_id,
@@ -1451,6 +1819,8 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 "ctx_need": parsed["ctx"],
                 "priority": parsed["priority"],
                 "deadline_s": deadline_s,
+                "workdir": workdir,
+                "max_steps": max_steps,
                 "created_ts": now,
                 "worker_pid": None,
                 "instances_tried": [],

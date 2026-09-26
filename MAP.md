@@ -772,6 +772,192 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-26 — MAP 3.13–3.15 implementation: subagent capability layer (host 4-tool module + taskworker tool loop + workdir/spawn flags + @gpu wire-protocol probe), PR #18 opened
+- agent/model: Hermes qwen3.8-27b
+- phase(s): P3 (3.13, 3.14, 3.15 implemented)
+- items checked: none yet — implementation complete on branch
+  `phase3-capability-layer-313-315`, G2 gate PASS, G3 review in flight
+  (PR #18 on Gitea). 3.13/3.14/3.15 remain unchecked in the Phase 3 list
+  until the review loop lands + G4 merge (this session opened the PR; do
+  NOT check the boxes here).
+- machine state: branch off main @ b6f0e99 (post PR #17). 4 commits:
+  c54aef6 (main implementation: bin/bonsai2_tools.py new 4-tool module;
+  bin/bonsai2-taskworker.py gains the step loop; bin/bonsai2_harness.py
+  config/spawn/dedup/collect/rotation; bin/bonsai2_render_config.py +
+  etc/harness.yaml + etc/subagent-engine.yaml validators; 3 new test
+  modules + fixtures/tool_engine.py mock), then 3 follow-ups: @gpu
+  wire-protocol probe test (tests/gpu/test_tools_probe.py), tests/run_gpu.sh
+  extra-args passthrough fix, and the probe argv-shape fix (the original
+  probe jammed `flag value` into one argv token → llama-server rejected
+  the args → rc 1 in 1s; now separate tokens + docker logs tail on early
+  death). Hermetic suite 366 → 413 tests (27 tool-module + 20
+  loop/flags), all OK. @gpu probe verdict: **native** tool_calls at pin
+  9a9394a8 (finish_reason=tool_calls, 4-tool schema, args as JSON string)
+  — the pin-reality delta the amendment asked to document; recorded in
+  test-logs/tools-probe-*.json (gitignored). No bonsai2 containers
+  running; main stack :30001 up. Gate baseline PASS (2026-09-20); this
+  session's gate PASS with ruff now hard (uvx ruff).
+- next: G3 review loop (PR #18, comments 849–900). Round 1 (head c54aef6):
+  0 P0, 1 P1 (engine-side python multi-line source via `sh -c` —
+  SyntaxError, verified via probe; fixed with base64-encode), 2 P2
+  (inline `import shutil` -> module-level; ad-hoc 3600 s deadline
+  fallback -> `DEFAULT_DEADLINE_S = 600.0`) — eee2cca, posted 849.
+  Round 2 (eee2cca): 1 P0 (tautological test assertion `cdoc["workdir"]
+  and "x"` in test_text_json_tool_call_fallback -> real file-content
+  assertion), 2 P1 (redundant auto-workdir parent.mkdir removed; probe
+  prompt /tmp/probe.txt -> relative for host-side containment), 4 P2
+  (engine-side cwd no longer forced — the instance container has no
+  shared volume; usage estimate now includes the tool-call payload;
+  probe --memory 16g documented as allocation-tier headroom) — 7b3e275,
+  posted 860/861. Round 3 first attempt hit the 600 s pi timeout (shared
+  :30001 contention), re-launched: 1 P0 (`--max-steps 007` leading zeros
+  via isdigit() -> `re.fullmatch(r"[1-9][0-9]*")` + range; regression
+  tests for "007"/"000"), 2 P1 (workdir merge at the final write —
+  verified false positive, the workdir is the worker-start snapshot
+  never mutated, documented; auto-workdir default mode 0755 -> 0o700
+  + assertion), 3 P2 documented — 12fcf86, posted 867/868. Round 4
+  (12fcf86): 1 P0 (rotate_workspaces used the DIR's mtime; in-place
+  file writes don't bump it -> `_newest_mtime_under` walks descendants
+  for the max mtime + dir-vs-file regression test), 2 P1 (rotation ran
+  inside the hot dedup lock -> moved to the top of cmd_spawn; the
+  engine-retried write used the stale local rec ->
+  `_persist_rec_preserving` at both loop write sites), 3 P2 documented
+  — dcd7b7c, posted 876/877. Round 5 (dcd7b7c): 0 P0, 2 P1 + 4 P2 all
+  design-contract documents (single tool_call per step = the spec's
+  "a tool call" singular + the probe verdict; result-file write already
+  tmp+rename atomic; the rglob scan is once-per-spawn outside the lock;
+  the fence regex is right for the flat tool-call shape; start_new_session
+  makes killpg cover the whole tree; the cancel-test window is an
+  implementation detail) — 301a452, posted 887/888. Round 6
+  confirmation (301a452): 0 P0, 2 P1 + 3 P2 — P1 #1 (loop-gate fields
+  in _persist_rec_preserving: verified no-op today, applied the
+  reviewer's propagation as defense-in-depth), P1 #2 (a `--tools off`
+  spawn JSON carried workdir -> now emitted only for tools==on; the
+  record still stores it for the dedup key; new assertions), P2 #1
+  (timeout handler dropped exc.output partial stdout -> coalesced;
+  regression test), P2 #3 (MAP spec-deltas line now lists the
+  pin-reality delta) — 81c96eb, posted 899/900. Round 7 (confirmation,
+  81c96eb): 1 P0, 1 P1, 3 P2 — the P0 and P1 are the same latent site
+  two ways: the step-end `rec = fresh` (disk record as loop-local) was
+  verified safe (every field the next iteration reads is spawn-persisted;
+  the reviewer's own re-analysis downgraded it), and the tool_ctx
+  staleness invariant got a loud log check at the step boundary; P2s all
+  already documented at r4/r5 (spawn/collect workdir asymmetry for off
+  tasks = intentional, both sides match their own spec clause) —
+  f1ac4fd, posted 912/913. Round 8 (confirmation, f441646): the deepest
+  pass yet — 1 P0 (port not re-synced at the step boundary), 5 P1, 5 P2.
+  4 real fixes: P0 port re-sync (structural invariant), P1 #4 killpg
+  EINTR retry before the leader-only fallback, P1 #5
+  workspace_dir-not-a-dir -> spawn-time ERR_ARGS exit 2 (was hidden by
+  the rotation is_dir() guard), P2 #9 render tools gate
+  (enabled:false + unknown name -> warning not error, matching the S1.6
+  "enabled: true" gate). 5 documented: P1 #2 max-steps is "N tool steps
+  allowed" (codified by the existing test_max_steps_exhausted_is_timeout),
+  P1 #3 symlinked workdir (false-positive, both sides physically
+  resolved), P1 #6 dedup key auto-vs-explicit path (known limitation,
+  intended direction), P2 #7 usage estimate is completion-side only
+  (estimated=True lower bound), P2 #8/#10/#11 latent-guard / false-
+  positive / false-positive. 3ab9c70, posted 930/931. Suite 421/421 OK
+  at 3ab9c70 (415 baseline + 6 new regression). Round 9 (confirmation,
+  d5c21f0): 0 P0, 2 P1, 3 P2. P1 #1 REAL: the streamed tool-call capture
+  overwrote per delta instead of accumulating — the OpenAI/llama.cpp
+  streaming contract delivers one tool call in fragments (id+name chunk
+  1, arguments pieces after), so a fragmented call would have executed
+  with partial arguments; fixed with per-index tc_acc accumulation +
+  first-named-index finalization (the r5 single-call contract preserved),
+  fixture fragmented=True spec + new end-to-end regression
+  (test_fragmented_tool_call_arguments_accumulated). P1 #2 verified
+  false-positive by probe (symlink-into-workdir reads the in-workdir
+  inode = intended outcome; the escape shape fails both containment
+  tests); documented at the site. P2s: fence regex (documented r6),
+  testing-strategy-report.md scope creep (DEFERRED to the pre-Phase-4
+  test-framework overhaul — moved out there as its own change, not
+  history-rewritten in this branch), pybin metachars (documented r3).
+  27655fd, posted 945/946. Suite 422/422 OK. Round 10 (confirmation,
+  27655fd): 0 P0, 1 P1, 5 P2. P1 (write_file through a symlinked
+  parent): PROBED — on this box (Py3.14) the pre-mkdir resolve_path
+  already catches it (non-strict resolve() follows the existing symlink
+  ancestor even for a missing leaf -> out/f.txt resolves outside
+  root_real -> ERR_TOOL_PATH, no bytes written; full 10-shape probe
+  matrix all correct); added the reviewer's post-mkdir containment
+  re-check on the fully-physical target anyway so the "symlinks OUT
+  are rejected" rule holds independent of the interpreter's resolve
+  semantics; 3 new hermetic regression tests (out-rejected,
+  out-missing-dir-rejected, in-allowed positive control). P2s all
+  documented/disposed: #1 off-task collect-returns-workdir vs
+  spawn-omits-it (noted at the collect site; r7 P2 at spawn_json is
+  the other half), #2 rglob per-spawn cost (already noted r5), #3
+  rotation unconditional for off-tasks (premise verified: off tasks DO
+  get an auto-workdir via the dedup key; harmless; noted at rotate
+  site), #4 engine-side python bin must exist in the container
+  (v1 limitation; noted at the base64 site), #5 dedup workdir test
+  live-winner-dependent (correct; the test explicitly waits for
+  state=running; noted at the test). 7709c86, posted 958/959. Suite
+  425/425 OK. G3 loop state: P0-per-round r1-r11 = 0,1,1,1,0,0,1,1,0,0,1
+  (round-11's P0 was in my own r9/r10 additions — the deepest pass yet
+  scrutinized the newest code). Round 11 (confirmation, 7709c86): 1 P0,
+  5 P1, 7 P2. P0+P1#4 (root_real divergence pre/post-mkdir): FIXED by
+  unification — resolve_path now returns (target, root_real); write_file's
+  post-mkdir re-check uses the SAME root, not a recomputed one. P1#2
+  (dedup-lock chmod 0o755/0o700): verified FALSE-POSITIVE — task_id
+  minted UNIQUE under the lock, no same-leaf collision; documented. P1#3
+  (streamed tool-call id overwrite): REAL, FIXED — capture FIRST
+  non-empty id (acc["id"] is None guard). P1#4 (exit_code 124
+  misclassified as timeout): REAL, FIXED — explicit timed_out flag in
+  the host tools module; the loop matches res_tool.get("timed_out") is
+  True; 2 new regression tests. P1#5 (probe while/else): verified
+  INVERTED semantics (Python while/else fires on exhaustion, not break;
+  empirical repro), documented. P1#6 (probe /v1/models container
+  leak): FIXED — _stop_container() before the raise. P2s: #9 (parent
+  workspace_dir 0o755) FIXED; #11 (ERR_TOOL_PATH) now names the
+  out-pointing symlink; #3 trailing-slash dedup verified FALSE-POSITIVE
+  (Path normalization); #8/#10/#12 documented. 20df870, posted 974/975.
+  Suite 427/427 OK. Round 12 (confirmation, 20df870): 0 P0, 1 P1, 2 P2 —
+  docs-only round. P1 (--tools on default couples the pre-existing
+  hermetic suite to the tool-loop path): VERIFIED with the reviewer's
+  own suggested check — the hermetic S3.7 suite (test_harness_spawn /
+  _34_38 / _closed_set) passes UNCHANGED (98 tests OK; full 427/427 OK);
+  documented at the spawn arg-parse docstring. P2 #1 (orphaned empty
+  outside dir on the post-mkdir re-check path): documented at the site
+  (empty + inert, pruned by rotation; rmtree-ing is riskier than
+  leaving it). P2 #2 (testing-strategy-report.md scope creep): re-raised
+  3rd time, disposition stands (deferred to the pre-Phase-4 test
+  overhaul). 62168c5, posted 987/988. Suite 427/427 OK. G3 loop state:
+  P0-per-round r1-r12 = 0,1,1,1,0,0,1,1,0,0,1,0; round-12 is docs-only
+  (no behavioral change since r11's fixes). The loop has been
+  deep-scrutinizing the newest round-added code each round; round-13
+  confirmation running on 62168c5 (a P2-only or CLEAN round-13 closes
+  the loop for G4). The 3.13/3.14/3.15 boxes in the Phase 3 list flip
+  to [x] on merge (G4).
+- blockers/intricacies: (a) the @gpu probe originally failed for a
+  non-obvious argv-shape reason (flag+value as one token); captured in
+  the commit message + the probe now logs `docker logs` tail on early
+  death so a future regression is self-diagnosing. (b) One hermetic
+  test (test_two_concurrent_spawns_do_not_double_claim) had a
+  teardown-race failure; pinned to --tools off (the pre-loop path it was
+  written to assert) with a comment — the tool-loop path's claim race is
+  covered by test_harness_tools_loop's concurrent-spawn case. (c) The
+  taskworker step-loop originally squashed a mid-step steer because the
+  step-end persist wrote the stale local record; fixed with a lock-safe
+  re-read-merge under the task lock, proven by test_harness_tools_loop's
+  steer-drain case. (d) A parallel session left an untracked
+  docs/testing-strategy-report.md in the working tree; excluded from the
+  commit (belongs to that session).
+- spec deltas: the @gpu wire-protocol probe verdict (pin 9a9394a8 chat
+  template emits the NATIVE `tool_calls` array — finish_reason=tool_calls,
+  one tool_call per completion, arguments as a JSON string; artifact
+  test-logs/tools-probe-20260926-015610.json). This is a pin-reality
+  delta against the S3.4 text-JSON fallback assumption: the host parser
+  must handle the native array FIRST (the text-JSON fence is the A2
+  fallback only), which the implementation does (taskworker _stream_chat
+  native-array path + _parse_text_tool_call fallback). SPEC S1.3
+  pin-reality + S3.4 wire-shape notes are backfilled at the merge (G4)
+  per the spec-amendment rule; the full before/after is in the PR body
+  under Spec amendments. (The S1.6 `tools:` manager-validation block and
+  the S3.6 capability keys in the `etc/*.yaml` templates are code-side
+  implementations of the prior PR #17's SPEC amendments, not new
+  SPEC.md edits — this branch does not touch SPEC.md.)
+
 ### 2026-09-25 — SPEC amendment: subagent capability layer (tool loop) back-integrated into SPEC.md + MAP 3.13–3.15 / 4.9 (docs-only PR, no code yet)
 - agent/model: Hermes qwen3.8-27b (session `spec-ammendments-expanding-subagent-capabilities` branch)
 - phase(s): P3 (3.13–3.15 NEW), P4 (4.9 NEW, 4.10/4.11 renumbered), P5/P6/P7 (annotations), S0/S1/S3/S4/S5/S6 (SPEC)
