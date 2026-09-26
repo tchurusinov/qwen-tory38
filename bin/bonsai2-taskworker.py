@@ -346,9 +346,14 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
             "detail": f"stream ended with no content (HTTP {status}, port {port})",
         }
     if usage is None:
+        # G3 PR#18 r2 P2: the estimate must account for the tool-call
+        # payload too — a stream carrying ONLY a tool call (answer +
+        # reasoning empty, the common native tool-call shape) would
+        # otherwise estimate ~1 completion token.
+        tc_text = json.dumps(tool_calls) if tool_calls is not None else ""
         usage = {
             "prompt_tokens": None,
-            "completion_tokens": max(1, len(answer) // 4),
+            "completion_tokens": max(1, (len(answer) + len(tc_text)) // 4),
             "estimated": True,
         }
     return {
@@ -533,7 +538,15 @@ def _execute_tool_engine(
         # engine-side path must go through the shell, hence the encode.)
         b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
         ep["command"] = f"{pybin} -c \"import base64;exec(base64.b64decode('{b64}'))\""
-    ep.setdefault("cwd", ctx.get("workdir"))
+    # G3 PR#18 r2 P2: the instance container has no shared volume
+    # (units/bonsai2-server@.service: docker run --network host --ipc=host,
+    # no -v), so the host workdir (ctx["workdir"]) does NOT exist inside the
+    # container. Do NOT force it onto the engine as `cwd` — the fork's chdir
+    # into a non-existent path would fail with a confusing error. Leave cwd
+    # to whatever the model supplied in `params` (ep == dict(params)); with
+    # no cwd the engine uses its own working dir. A model-supplied explicit
+    # cwd is honored; relative paths resolve against the engine's own dir —
+    # a documented v1 limitation until a shared-workdir volume lands.
     t0 = time.monotonic()
     body = json.dumps({"tool": engine_name, "params": ep}).encode()
     req = urllib.request.Request(

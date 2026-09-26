@@ -61,10 +61,15 @@ START_TIMEOUT_S = 300.0  # the 27B load on this box is well under 5 min
 REASONING_FORMAT = "deepseek"
 
 # the prompt: unambiguously requires a tool call (the model has nothing
-# else to do — no file content is given in the prompt itself).
+# else to do — no file content is given in the prompt itself). The path
+# is RELATIVE (G3 PR#18 r2 P1): the probe's bash command is shape-only
+# here (the response is inspected for the tool_calls array, not executed),
+# but if this prompt is ever reused for a host-execution test, an absolute
+# /tmp/... path would be rejected by the host tool's workdir containment
+# check — a relative path stays valid in both modes.
 PROBE_PROMPT = (
-    "Use the bash tool to run the command: echo probe-12345 > /tmp/probe.txt "
-    "&& cat /tmp/probe.txt\n"
+    "Use the bash tool to run the command: echo probe-12345 > probe.txt "
+    "&& cat probe.txt\n"
     "Then report the exact output of that command."
 )
 
@@ -121,6 +126,11 @@ class TestToolsWireProtocolProbe(unittest.TestCase):
                 # owns the teardown, so docker logs survives for the
                 # early-death assertion below (with --rm the container
                 # vanishes before the error can be read).
+                # 16g = the S1.4 allocation-tier ceiling for a standalone
+                # instance (footprint ~14.44 + 1.0 GB headroom, ~15.5 g,
+                # rounded up), NOT the pool's 14.78 GB planning budget —
+                # the probe is one-off, not one of the N pool instances,
+                # so it gets allocation-tier headroom.
                 "--name",
                 CONTAINER,
                 "--gpus",

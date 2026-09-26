@@ -293,8 +293,14 @@ class TestToolLoopHostExecution(LoopBase):
         code, cdoc = self._collect(doc["task_id"])
         self.assertEqual(code, 20)
         self.assertEqual(cdoc["tool_log"][0]["tool"], "write_file")
+        # the write_file tool call actually wrote "x" to <workdir>/t.txt
+        # (G3 PR#18 r2 P0: the old `cdoc["workdir"] and "x"` was a tautology
+        # — workdir is a non-empty path string, so the left side was always
+        # the literal "x" and never checked the file's real content).
         self.assertEqual(
-            cdoc["workdir"] and "x", Path(cdoc["workdir"], "t.txt").read_text()
+            "x",
+            Path(cdoc["workdir"], "t.txt").read_text(),
+            "write_file (text-JSON fallback) wrote the content to the workdir",
         )
 
     def test_invalid_calls_exhaust_tool_invalid_max(self) -> None:
@@ -459,6 +465,15 @@ class TestToolLoopEngineExecution(LoopBase):
         treq = eng.tools_log[0]
         self.assertEqual(treq["tool"], "exec_shell_command")
         self.assertEqual(treq["params"]["command"], "echo eng")
+        # G3 PR#18 r2 P2: the engine-side path must NOT force the host
+        # workdir as `cwd` — the instance container has no shared volume
+        # (units/bonsai2-server@.service, no -v), so the host workdir does
+        # not exist inside it; a chdir into a missing path would fail.
+        self.assertNotIn(
+            "cwd",
+            treq["params"],
+            "engine /tools body must not carry the host workdir as cwd",
+        )
         code_c, cdoc = self._collect(doc["task_id"])
         self.assertEqual(code_c, 20)
         self.assertEqual(cdoc["tool_log"][0]["output"], "engine-out")

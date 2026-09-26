@@ -1589,7 +1589,10 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             else:
                 auto_wd = Path(cfg["workspace_dir"]) / task_id
                 try:
-                    auto_wd.parent.mkdir(parents=True, exist_ok=True)
+                    # parents=True creates the workspace_dir root too; no
+                    # separate parent mkdir (G3 PR#18 r2 P1: the explicit
+                    # parent.mkdir was dead code — the child mkdir's
+                    # parents=True already creates it).
                     auto_wd.mkdir(parents=True, exist_ok=True)
                 except OSError as exc:
                     # emit inside the lock is fine (the with-block releases
