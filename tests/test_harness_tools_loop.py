@@ -722,6 +722,14 @@ class TestSpawnFlagsAndWorkdir(LoopBase):
         # finishes faster than the poll catches running, B would re-mint
         # instead of deduping. Kept as-is (the wait makes it a non-issue
         # in practice).
+        # G3 PR#18 r11 P2#12 (noted): the poll gate checks state ==
+        # "running", but a non-terminal `engine_retried` state (an S1.5
+        # retry in flight) would ALSO satisfy the dedup no-op — the dedup
+        # race-resolution path keys off non-terminal, not specifically
+        # running. This test's mock engine never triggers an S1.5 retry,
+        # so the gate is `running` in practice; if a future test variant
+        # exercises engine_retried mid-spawn, extend the gate to
+        # `state not in H.TERMINAL_STATES`.
         p0, p1 = 0, 0
         eng0 = self._instance(
             p0, [{"kind": "tool", "tool": "bash", "params": {"cmd": "sleep 3"}}]

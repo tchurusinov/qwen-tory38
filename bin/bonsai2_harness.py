@@ -1578,6 +1578,12 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             # intended direction — an auto path is unique per task and
             # almost never reused as an explicit --workdir — so this is a
             # documented edge, not a defect. No behavior change.
+            # G3 PR#18 r11 P2#3 (verified false-positive): parsed["workdir"]
+            # is a Path (the --workdir parse does Path(argv[i+1]).expanduser()
+            # at line 1445), and str(Path("/a/b/")) == "/a/b" — Path
+            # normalization already strips the trailing slash, so two spawns
+            # with --workdir /a/b and /a/b/ produce the SAME key string.
+            # No rstrip/resolve needed.
             "workdir": str(parsed["workdir"])
             if parsed["workdir"] is not None
             else None,
@@ -1726,6 +1732,14 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 workdir = str(workdir_explicit)
             else:
                 auto_wd = Path(cfg["workspace_dir"]) / task_id
+                # G3 PR#18 r11 P2#2: remember whether the PARENT
+                # (workspace_dir root) was just created, so we can chmod it
+                # 0o700 too — the leaf chmod (r3 P1) only tightens the
+                # leaf, leaving the shared parent at umask (typically
+                # 0o755) and every sibling task workdir world-readable
+                # through it. If the parent already existed we leave its
+                # mode alone (the operator's explicit choice).
+                parent_preexisted = auto_wd.parent.is_dir()
                 try:
                     # parents=True creates the workspace_dir root too; no
                     # separate parent mkdir (G3 PR#18 r2 P1: the explicit
@@ -1737,6 +1751,24 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                     # for the shared workspace_dir).
                     auto_wd.mkdir(parents=True, exist_ok=True)
                     os.chmod(auto_wd, 0o700)
+                    # G3 PR#18 r11 P1#2 (verified false-positive): two
+                    # concurrent same-key spawns CANNOT collide on the same
+                    # auto-wd leaf — task_id is minted UNIQUE under this
+                    # lock (new_task_id, the 4-hex suffix prevents
+                    # collision), so each spawn's auto_wd =
+                    # <workspace_dir>/<its-own task_id> is a distinct path.
+                    # The "first creator 0o755, loser skips exist_ok"
+                    # scenario requires two spawns writing the SAME leaf,
+                    # which cannot happen. The leaf chmod is therefore
+                    # deterministic. No behavior change.
+                    if not parent_preexisted:
+                        try:
+                            os.chmod(auto_wd.parent, 0o700)
+                        except OSError:
+                            # parent chmod failure is non-fatal: the leaf is
+                            # still 0o700; a shared parent at umask is the
+                            # pre-r11 behavior, not a new leak.
+                            pass
                 except OSError as exc:
                     # emit inside the lock is fine (the with-block releases
                     # it on return): no record exists yet, so the key is

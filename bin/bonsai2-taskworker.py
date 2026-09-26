@@ -384,11 +384,29 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
                         try:
                             idx = int(tc_delta.get("index", 0))
                         except (TypeError, ValueError):
+                            # G3 PR#18 r11 P2 #8 (noted): a non-int `index`
+                            # (e.g. the string "abc") is coerced to idx 0
+                            # (the first slot) rather than rejected — the
+                            # OpenAI/llama.cpp contract always emits a
+                            # non-negative int index (or omits it), so the
+                            # coercion is a safe default; if a future engine
+                            # ever emits a malformed index that should fail,
+                            # add a str.isdigit()/isinstance-int guard here.
                             idx = 0
                         acc = tc_acc.setdefault(
                             idx, {"id": None, "name": None, "arguments": ""}
                         )
-                        if tc_delta.get("id"):
+                        if tc_delta.get("id") and acc["id"] is None:
+                            # G3 PR#18 r11 P1 #3 (fix): capture the FIRST
+                            # non-empty id and ignore later ones. The
+                            # OpenAI/llama.cpp streaming contract re-emits
+                            # the id on later chunks; a non-idempotent
+                            # sequence (id A then id B) must not silently
+                            # switch to the last id, or the appended `tool`
+                            # result message's tool_call_id would no longer
+                            # match the assistant message's
+                            # tool_calls[0].id (breaking the tool-result
+                            # pairing contract).
                             acc["id"] = str(tc_delta["id"])
                         fn = tc_delta.get("function")
                         if isinstance(fn, dict):
@@ -456,6 +474,14 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
         # real prompt_tokens dominate, so the estimate UNDER-states cost.
         # It is flagged estimated=True, so a cost model that respects the
         # flag treats it as a lower bound. No behavior change.
+        # G3 PR#18 r11 P2#10 (noted): this whole block only runs when the
+        # engine did NOT provide a real `usage` (usage is None). If the
+        # engine later returns a real usage, the tool-call payload is NOT
+        # folded into the completion count and the `estimated` flag is NOT
+        # set — the real usage is trusted as-is. Fine for v1 (the engine's
+        # completion_tokens already counts the tool-call tokens the model
+        # actually emitted); note only, so a future cost-model change that
+        # wants tool-call weighting can key off a single flag.
         tc_text = json.dumps(tool_calls) if tool_calls is not None else ""
         usage = {
             "prompt_tokens": None,
@@ -703,6 +729,12 @@ def _execute_tool_engine(
                 out = json.dumps(data)[:4096]
             code = data.get("exit_code")
             code = code if isinstance(code, int) else (0 if out else 1)
+            # G3 PR#18 r11 P1#4: the engine /tools endpoint reports a
+            # timeout as exit_code 124 (the fork's own convention); mirror
+            # the host module's timed_out flag so the loop's
+            # res_tool.get("timed_out") match works in BOTH modes. A
+            # user-side exit 124 is rare and the engine does not set a
+            # distinct "timed_out" key, so we derive it from exit_code.
             return {
                 "ok": code == 0,
                 "exit_code": code,
@@ -710,6 +742,7 @@ def _execute_tool_engine(
                 "detail": None,
                 "step": step,
                 "duration_ms": duration_ms,
+                "timed_out": code == 124,
             }
         return {
             "ok": False,
@@ -1206,9 +1239,14 @@ def _run_tool_loop(
         )
         # S3.4: "a step that overruns is killed at its per-tool timeout
         # (tool_timeout_s) and the task fails ERR_TOOL_TIMEOUT" — the
-        # host-side module enforces the process-group kill and reports
-        # exit_code 124; the task-level failure is recorded here.
-        if res_tool.get("exit_code") == 124:
+        # host-side module enforces the process-group kill and reports a
+        # result with timed_out=True; the task-level failure is recorded
+        # here. G3 PR#18 r11 P1#4: match on the explicit `timed_out` flag,
+        # NOT on exit_code == 124 — a user `bash "exit 124"` (or a
+        # returncode-None post-communicate race) that is NOT a real timeout
+        # must not fail the task; and a genuine timeout whose command also
+        # happened to print 124 must still fail it.
+        if res_tool.get("timed_out") is True:
             tool_log.append(_tool_log_entry(steps, tc, res_tool))
             _set_state(
                 rec,

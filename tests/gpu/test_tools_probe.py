@@ -179,6 +179,16 @@ class TestToolsWireProtocolProbe(unittest.TestCase):
             start_new_session=True,
         )
         cls.deadline = time.monotonic() + START_TIMEOUT_S
+        # G3 PR#18 r11 P1#5 (documented, verified empirically): Python's
+        # while/else runs the `else` when the loop EXHAUSTS (the deadline
+        # condition goes false) — NOT when the loop BREAKs. So:
+        #   * port comes up mid-poll -> `break` -> else SKIPPED (correct:
+        #     the port IS up, no raise);
+        #   * deadline hit with port still free -> loop ends naturally ->
+        #     else FIRES -> the "never came up within START_TIMEOUT_S"
+        #     AssertionError (correct: fail fast on the deadline path).
+        # The reviewer's "while/else fires on break" reading is the inverse
+        # of Python's actual semantics. No restructure needed.
         while time.monotonic() < cls.deadline:
             if cls.proc.poll() is not None:
                 tail = subprocess.run(
@@ -215,6 +225,10 @@ class TestToolsWireProtocolProbe(unittest.TestCase):
                         return
             except (urllib.error.URLError, OSError):
                 time.sleep(1.0)
+        # G3 PR#18 r11 P1#6: stop the container on the raise path so a
+        # port-up-but-model-slow case does not leak the 16 GiB instance
+        # into the next @gpu test's VRAM audit.
+        _stop_container()
         raise AssertionError(
             f"/v1/models never answered on {PROBE_PORT} — instance up but "
             "not serving (the @gpu log carries the container's state)"

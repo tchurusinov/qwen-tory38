@@ -282,6 +282,32 @@ class TestTimeoutKill(ToolsModuleBase):
         res = T.execute("bash", {"cmd": "true", "timeout": 1}, self.ctx)
         self.assertTrue(res["ok"])
 
+    def test_user_exit_124_is_not_a_timeout(self) -> None:
+        # G3 PR#18 r11 P1#4 regression: a command that legitimately
+        # `exit 124`s (NOT killed by the tool timeout) must report
+        # timed_out=False so the taskworker's loop does not fail the task
+        # ERR_TOOL_TIMEOUT on a normal non-zero result. Pre-fix, the loop
+        # matched exit_code == 124, which conflated the two. The module
+        # reports a non-zero exit as a VALID result (ok=True, the
+        # exit_code is the signal — S3.1: the model sees it, not a
+        # harness crash); the timed_out flag is what distinguishes the
+        # two cases.
+        res = T.execute("bash", {"cmd": "exit 124"}, self.ctx)
+        self.assertTrue(
+            res["ok"], "a non-zero exit that is NOT a timeout is a valid result"
+        )
+        self.assertEqual(res["exit_code"], 124)
+        self.assertFalse(res.get("timed_out", True), "user exit 124 is not a timeout")
+
+    def test_genuine_timeout_sets_timed_out_true(self) -> None:
+        # G3 PR#18 r11 P1#4 (companion): a real tool timeout (killed at
+        # tool_timeout_s) MUST set timed_out=True, so the loop's flag-match
+        # still fails the task ERR_TOOL_TIMEOUT.
+        res = T.execute("bash", {"cmd": "sleep 10", "timeout": 1}, self.ctx)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["exit_code"], 124)
+        self.assertTrue(res.get("timed_out", False), "genuine timeout sets the flag")
+
 
 class TestTruncation(ToolsModuleBase):
     """output truncation at tool_output_max_kb (S3.4; the cap is on what

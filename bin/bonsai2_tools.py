@@ -149,13 +149,29 @@ _TIMEOUT_EXIT = 124  # the conventional shell timeout exit code
 # result helpers
 # --------------------------------------------------------------------------
 def _ok(output: str, exit_code: int = 0, detail: str | None = None) -> dict:
-    return {"ok": True, "exit_code": exit_code, "output": output, "detail": detail}
+    # G3 PR#18 r11 P1#4: every host tool result carries a `timed_out` flag
+    # the taskworker's loop matches on (not exit_code == 124). Default
+    # False; the timeout path sets it True.
+    return {
+        "ok": True,
+        "exit_code": exit_code,
+        "output": output,
+        "detail": detail,
+        "timed_out": False,
+    }
 
 
 def _err(output: str, exit_code: int = 1, detail: str | None = None) -> dict:
     """An error RESULT (ok=False): fed back to the model by the loop; the
-    S3.1 tool_log entry records exit_code + the (truncated) output."""
-    return {"ok": False, "exit_code": exit_code, "output": output, "detail": detail}
+    S3.1 tool_log entry records exit_code + the (truncated) output.
+    Carries the same `timed_out` flag as _ok (G3 PR#18 r11 P1#4)."""
+    return {
+        "ok": False,
+        "exit_code": exit_code,
+        "output": output,
+        "detail": detail,
+        "timed_out": False,
+    }
 
 
 def _truncate(s: str, max_bytes: int) -> str:
@@ -180,7 +196,7 @@ def _err_str(exc: Exception) -> str:
 # --------------------------------------------------------------------------
 # workdir containment (S3.4 / MAP 3.13)
 # --------------------------------------------------------------------------
-def resolve_path(root: Path, p) -> Path:
+def resolve_path(root: Path, p) -> tuple[Path, Path]:
     """Resolve `p` against the workdir root with escape rejection.
 
     Rules (the MAP 3.13 containment contract):
@@ -193,8 +209,13 @@ def resolve_path(root: Path, p) -> Path:
         root AND target, so `root/a -> /tmp/x` fails while
         `root/inner/link -> root/real` passes.
 
-    Returns the (normalized, root-anchored) path — not yet opened; the
-    caller's open/read is where a residual symlink escape would surface.
+    Returns the (normalized, root-anchored) path AND the resolved root
+    (the physical workdir) as a tuple — the normalized path is not yet
+    opened; the caller's open/read is where a residual symlink escape
+    would surface. The resolved root is returned so a caller that runs a
+    post-mkdir containment re-check (write_file, G3 PR#18 r10/r11 P1/P0)
+    compares against the SAME root the pre-mkdir check used, not a
+    freshly recomputed one.
     """
     if not isinstance(p, str) or not p:
         raise ValueError(f"ERR_TOOL_PATH: path must be a non-empty string: {p!r}")
@@ -243,12 +264,42 @@ def resolve_path(root: Path, p) -> Path:
     # physical — resolve() lands at /data/f.txt, outside root_real.
     # Probe (r9 disposition): alias->real-in-workdir passes, out->/etc
     # rejected. No behavior change.
-    if not _under(norm.resolve()):
+    resolved_target = norm.resolve()
+    if not _under(resolved_target):
+        # G3 PR#18 r11 P2#11 (hint): when the textual path sits under root
+        # but the physical (resolved) target does not, the culprit is a
+        # symlink component pointing OUT — name it so the model can see
+        # WHY the rejection fired, not just that it did. Walk the resolved
+        # target's components back to find the first that is a symlink
+        # pointing outside root_real.
+        hint = ""
+        try:
+            # candidate (textual, under root) vs resolved (physical, may be
+            # outside): find the component where they diverge — that
+            # component is (or is under) the out-pointing symlink.
+            cparts = candidate.relative_to(root).parts
+            for i, comp in enumerate(cparts):
+                probe = root.joinpath(*cparts[: i + 1])
+                if probe.is_symlink() and not probe.resolve().is_relative_to(root_real):
+                    hint = f" (symlink {comp!r} at {probe!s} points out)"
+                    break
+        except (OSError, ValueError):
+            hint = ""
         raise ValueError(
             f"ERR_TOOL_PATH: {p!r} escapes the workdir {root_real} "
-            f"(resolved to {norm.resolve()})"
+            f"(resolved to {resolved_target}){hint}"
         )
-    return norm
+    # G3 PR#18 r11 P0/P1#4 (unified root): return root_real alongside the
+    # normalized target so the caller (write_file) can run its post-mkdir
+    # containment re-check against the SAME resolved root the pre-mkdir
+    # check used. Previously write_file recomputed
+    # Path(ctx["workdir"]).resolve() independently — idempotent today
+    # (make_ctx already resolves ctx["workdir"], so the two resolve() calls
+    # land on the same path), but the reviewer flagged the latent
+    # divergence if the workdir were ever created under a different mount
+    # between the two calls. Unifying on one captured root makes the
+    # invariant explicit.
+    return norm, root_real
 
 
 # --------------------------------------------------------------------------
@@ -261,11 +312,15 @@ def _run_capped(
     *,
     cwd: Path,
     input_bytes: bytes | None = None,
-) -> tuple[bytes, int]:
+) -> tuple[bytes, int, bool]:
     """Run one subprocess in its own process group, capped at `timeout_s`
     (the per-tool `tool_timeout_s`, overridable per call). Returns
-    (combined stdout+stderr bytes, exit code). On timeout the group is
-    SIGKILLed and the exit code is the conventional 124."""
+    (combined stdout+stderr bytes, exit code, timed_out). On timeout the
+    group is SIGKILLed and the exit code is the conventional 124 AND
+    timed_out=True. G3 PR#18 r11 P1#4: the timed_out flag is returned
+    explicitly (not inferred from exit_code == 124) so a user command that
+    legitimately `exit 124`s is reported as a normal non-zero result, not a
+    task-level ERR_TOOL_TIMEOUT failure."""
     proc = subprocess.Popen(
         argv,
         cwd=str(cwd),
@@ -301,7 +356,7 @@ def _run_capped(
         if timed_out
         else (proc.returncode if proc.returncode is not None else 124)
     )
-    return out or b"", code
+    return out or b"", code, timed_out
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -339,17 +394,24 @@ def _tool_bash(params: dict, ctx: dict) -> dict:
     if not isinstance(cmd, str) or not cmd:
         return _err("ERR_TOOL_INVALID_CALL: bash needs a non-empty string `cmd`")
     timeout = _param_timeout(params, ctx)
-    out, code = _run_capped(
+    out, code, timed_out = _run_capped(
         ["/bin/sh", "-c", cmd], ctx, timeout, cwd=Path(ctx["workdir"])
     )
     text = out.decode("utf-8", "replace")
-    if code == _TIMEOUT_EXIT:
-        return _err(
+    if timed_out:
+        res = _err(
             (text or "") + f"\n[tool timeout after {timeout:.0f} s]",
             code,
             "ERR_TOOL_TIMEOUT: bash exceeded the per-tool timeout",
         )
-    return _ok(text, code)
+        res["timed_out"] = True
+        return res
+    res = _ok(text, code)
+    # G3 PR#18 r11 P1#4: the loop matches res_tool["timed_out"] (not
+    # exit_code == 124) for the task-level ERR_TOOL_TIMEOUT — a user
+    # command that `exit 124`s on its own is a normal non-zero result.
+    res["timed_out"] = False
+    return res
 
 
 def _tool_python(params: dict, ctx: dict) -> dict:
@@ -358,7 +420,7 @@ def _tool_python(params: dict, ctx: dict) -> dict:
         return _err("ERR_TOOL_INVALID_CALL: python needs a non-empty string `code`")
     timeout = _param_timeout(params, ctx)
     pybin = ctx.get("python_bin") or sys.executable
-    out, code_rc = _run_capped(
+    out, code_rc, timed_out = _run_capped(
         [str(pybin), "-"],
         ctx,
         timeout,
@@ -366,19 +428,21 @@ def _tool_python(params: dict, ctx: dict) -> dict:
         input_bytes=code.encode("utf-8"),
     )
     text = out.decode("utf-8", "replace")
-    if code_rc == _TIMEOUT_EXIT:
-        return _err(
+    if timed_out:
+        res = _err(
             (text or "") + f"\n[tool timeout after {timeout:.0f} s]",
             code_rc,
             "ERR_TOOL_TIMEOUT: python exceeded the per-tool timeout",
         )
+        res["timed_out"] = True
+        return res
     return _ok(text, code_rc)
 
 
 def _tool_read_file(params: dict, ctx: dict) -> dict:
     p = params.get("path")
     try:
-        target = resolve_path(Path(ctx["workdir"]), p)
+        target, _root_real = resolve_path(Path(ctx["workdir"]), p)
     except ValueError as exc:
         return _err(str(exc), 1, "ERR_TOOL_PATH")
     if target.is_dir():
@@ -396,26 +460,28 @@ def _tool_write_file(params: dict, ctx: dict) -> dict:
     if not isinstance(content, str):
         return _err("ERR_TOOL_INVALID_CALL: write_file needs a string `content`")
     try:
-        target = resolve_path(Path(ctx["workdir"]), p)
+        target, root_real = resolve_path(Path(ctx["workdir"]), p)
     except ValueError as exc:
         return _err(str(exc), 1, "ERR_TOOL_PATH")
-    root_real = Path(ctx["workdir"]).resolve()
 
     def _under(path: Path) -> bool:
         return path == root_real or str(path).startswith(str(root_real) + os.sep)
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        # G3 PR#18 r10 P1 (defense-in-depth): re-check containment AFTER
-        # mkdir, on the fully-physical target (all parent components now
-        # exist, so resolve() follows every symlink including any
-        # out-of-workdir parent the pre-mkdir check could not see on an
-        # older interpreter whose non-strict resolve stops at the first
-        # missing component). This is the write half of the "symlinks OUT
-        # are rejected" rule that read_file enforces at open.
-        if not _under(target.resolve()):
+        # G3 PR#18 r10 P1 (defense-in-depth) + r11 P0/P1#4 (unified root):
+        # re-check containment AFTER mkdir, on the fully-physical target,
+        # against the SAME root_real the pre-mkdir check used (returned by
+        # resolve_path, not recomputed). All parent components now exist,
+        # so resolve() follows every symlink including any out-of-workdir
+        # parent the pre-mkdir check could not see on an older interpreter
+        # whose non-strict resolve stops at the first missing component.
+        # This is the write half of the "symlinks OUT are rejected" rule
+        # that read_file enforces at open.
+        resolved = target.resolve()
+        if not _under(resolved):
             return _err(
-                f"ERR_TOOL_PATH: {p!r} resolves to {target.resolve()} "
+                f"ERR_TOOL_PATH: {p!r} resolves to {resolved} "
                 f"after mkdir — outside the workdir {root_real}",
                 1,
                 "ERR_TOOL_PATH",
