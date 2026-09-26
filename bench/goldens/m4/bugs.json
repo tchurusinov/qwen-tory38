@@ -1,0 +1,16 @@
+{
+  "scenario": "M4",
+  "description": "Seeded 10-bug ground truth (the S5.2 M4 rubric: 'draft finds >= 80% of a seeded 10-bug fixture'). The subagent reviews diff.patch and cites bug ids; the scorer takes the set-intersection against these ids (>= 8 -> pass).",
+  "bugs": [
+    {"id": "BUG-01", "file": "src/calculator.py", "line": 12, "desc": "off-by-one: range stops at len(items)-1, drops the last item"},
+    {"id": "BUG-02", "file": "src/calculator.py", "line": 18, "desc": "int division where float is required (// instead of /)"},
+    {"id": "BUG-03", "file": "src/calculator.py", "line": 25, "desc": "mutates the input list (append) instead of a copy"},
+    {"id": "BUG-04", "file": "src/calculator.py", "line": 31, "desc": "swapped lo/hi in the clamp guard (lo > hi accepted)"},
+    {"id": "BUG-05", "file": "src/parser.py", "line": 9, "desc": "off-by-one slice drops the last character"},
+    {"id": "BUG-06", "file": "src/parser.py", "line": 15, "desc": "compares with == instead of == after stripping whitespace"},
+    {"id": "BUG-07", "file": "src/parser.py", "line": 22, "desc": "returns None instead of the default on empty input"},
+    {"id": "BUG-08", "file": "src/storage.py", "line": 8, "desc": "leaked file handle: open() without with/close"},
+    {"id": "BUG-09", "file": "src/storage.py", "line": 14, "desc": "shadowed loop variable: outer name reused in inner comprehension"},
+    {"id": "BUG-10", "file": "src/storage.py", "line": 20, "desc": "unhandled IndexError: list indexed at len without bounds check"}
+  ]
+}

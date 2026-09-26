@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""bonsai2-bench — run the bench (S3.2; MAP 4.7, S5.4).
+
+Thin deploy file; the flow lives in ``bench/run.py`` (the S5.4 runner:
+scenario loader, endpoint resolver, task executor, box-state snapshot,
+scorer, reporter). This wrapper parses NO flags of its own — every flag
+goes to the runner verbatim.
+
+Deployed to /opt/bonsai2/bin/ by install.sh (the repo tree mirrors the
+host layout 1:1, bin/README.md). The bench package resolves from
+``$BONSAI2_HOME`` (default /opt/bonsai2) when the repo root is not on
+the path.
+
+Usage (the S5.4 runner surface):
+  bonsai2-bench                     # full bench (bench.yaml scenarios)
+  bonsai2-bench --quick             # the S5.5 quick bench (M1+M2+M7)
+  bonsai2-bench --scenario M1       # one scenario
+  bonsai2-bench --mock MOD:FN       # the S5.8 mock-endpoint run (hermetic)
+
+Exit codes (the runner's, S5.4 / S3.5):
+  0 = completed — even on scenario-level failures (a failure is data:
+      each scenario row carries a pass/fail verdict, S5.2; the one JSON
+      object on stdout carries the per-scenario verdicts; an unexpected
+      runner crash also exits 0 but writes status="crash" + the named
+      error to stdout instead of a "done" object)
+  2 = bench config invalid (the S5.8 "invalid scenario id -> exit 2"
+      case, the S3.2 code 2 in the closed set) OR bench already running
+      (the S3.5 flock, MAP 4.3 BONSAI2_BENCH_LOCK)
+"""
+
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _bench_root():
+    """The bench package's root: the repo root when this file runs from
+    the source tree (repo layout: <root>/bin/bonsai2-bench + <root>/bench/),
+    else $BONSAI2_HOME (the install layout: /opt/bonsai2/bin/ + the bench
+    package next to it or at /opt/bonsai2/share/bench)."""
+    if os.path.isdir(os.path.join(_REPO_ROOT, "bench")):
+        return _REPO_ROOT
+    home = os.environ.get("BONSAI2_HOME", "/opt/bonsai2")
+    for cand in (home, os.path.join(home, "share")):
+        if os.path.isdir(os.path.join(cand, "bench")):
+            return cand
+    return home
+
+
+def main():
+    root = _bench_root()
+    for p in (root, os.path.join(root, "share")):
+        if p not in sys.path and os.path.isdir(p):
+            sys.path.insert(0, p)
+    from bench import run as bench_run
+
+    return bench_run.main(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

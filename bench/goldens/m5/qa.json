@@ -1,0 +1,19 @@
+{
+  "scenario": "M5",
+  "description": "Golden QA for the S5.2 M5 long-context doc read (60K tokens). 5 QA questions, each binary-scored by this golden (the S5.2 '5 QA questions, each binary-scored by a golden file'). The subagent reads the doc (the full 60K-token run; this compact stand-in carries the same facts for the hermetic rubric test) and answers the 5 questions; the scorer binary-scores each answer against `answers`. The 5 facts are scattered through the doc so a short-context read misses them (the long-context axis the S5.2 rubric measures).",
+  "doc": "Bonsai Systems Field Manual, 2026 Edition.\n\nChapter 1. The bonsai2 subagent pool runs on the GB10-class unified-memory box. The pool size N is computed at install time by the S1.4 formula and clamped to the range [0, 8]. The default quant is PQ2_0; the fallback quant, used when the allocation tier cannot grant an instance at the PQ2_0 budget, is PTQ_1_0.\n\nChapter 2. Instance lifecycle. A subagent instance that fails the allocation tier at index i > 0 is a partial load and exits 0 with a WARN_VRAM_SHORTFALL; at index i = 0 it exits 4 with ERR_VRAM_OOM. The drift watch rechecks cgroup memory pressure on a 5-minute cadence; sustained pressure for more than 30 seconds over the instance memory cap halves the instance context and restarts it in place.\n\nChapter 3. The main stack. The main agent runs on the SGLang endpoint at localhost port 30001 and is external infrastructure: the subagent pool consumes it but never modifies it. A dead main endpoint is the harness exit code 82.\n\nChapter 4. The harness. The S3.2 control scripts form a closed set of exit codes: 0, 2, 3, 4, 5, 8, 20, 21, 22, 80, 82, 84. Spawn in a main-only (N = 0) pool exits 80 with the S2.4 JSON; collect maps a done task to 20, a failed task to 21, and a timed-out task to 22. A dead manager (absent health.json) is exit 84 for every pool-control command.\n\nChapter 5. The bench. The bench framework is SPEC Section 5. Its scenario matrix is M1 through M10. The quick bench is M1, M2, and M7. Run JSONs rotate on a 7-day window and the bench directory is capped at 1 GB, keeping the newest files and deleting the oldest. The M8 main-t/s guardrail defaults to 5 percent of the M6 control.\n\n[padding: the remaining 60K tokens of the manual are procedural tables, wiring diagrams, and calibration records, repeated to reach the S5.2 60K-token long-context budget; the five facts above are the only ones the QA golden scores.]\n",
+  "questions": [
+    "What is the fallback quant used when the allocation tier cannot grant an instance at the PQ2_0 budget?",
+    "What exit code does spawn return in a main-only (N = 0) pool?",
+    "What is the S3.2 closed set of exit codes, in ascending order?",
+    "Which scenarios make up the quick bench?",
+    "What is the default M8 main-t/s guardrail, as a percentage of the M6 control?"
+  ],
+  "answers": [
+    "PTQ_1_0",
+    "80",
+    "0, 2, 3, 4, 5, 8, 20, 21, 22, 80, 82, 84",
+    "M1, M2, M7",
+    "5"
+  ]
+}

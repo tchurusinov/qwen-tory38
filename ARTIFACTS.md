@@ -15,7 +15,8 @@ E = external (pre-existing, consumed read-only).
 |---|---|---|---|
 | llama.cpp fork source (prism branch) | `third_party/llama.cpp` (submodule, added 2026-09-20) | fork commit `9a9394a8` (prism tip at MAP 1.1; 2026-09-18), recorded in `etc/subagent-engine.yaml` `engine_pin` (rendered to `/opt/bonsai2/etc/` by install.sh) | MAP 1.1 (vendoring decided: submodule — in-repo, project-wide, never system-wide) |
 | systemd unit templates | `units/bonsai2-sglang.service` (manager, Type=notify) + `units/bonsai2-server@.service` (per-instance template; install.sh renders ExecStart per granted instance) | S2.1/S2.2 shape hermetic-asserted in `tests/test_manager.py::TestUnitFiles` | MAP 2.4 (templates only — the concrete units are rendered/installed by install.sh, MAP 6.2) |
-| bench goldens | `bench/goldens/` | versioned in repo | MAP 4.4 |
+| bench goldens | `bench/goldens/` (m1 module+3-case suite, m2 expected report, m4 seeded 10-bug diff+bugs.json, m5 QA golden) | versioned in repo | MAP 4.4 |
+| bench framework | `bench/` (config, scenarios, endpoints, exec, boxstate, rotate, report, run, score/* scorers + goldens loader) + `bin/bonsai2-bench` thin wrapper + `tests/test_bench_*.py` + `tests/fixtures/bench_mock.py` | Python 3.12, stdlib + `requests` (the S5.4 dep surface, S6.6) | MAP 4.1–4.8 |
 | subagent capability layer — host-side 4-tool module | `bin/bonsai2_tools.py` (deployed to `/opt/bonsai2/bin/` by install.sh; imported by the taskworker's tool loop, S3.4) | stdlib-only; tools: bash(cmd, timeout) / read_file(path) / write_file(path, content) / python(code, timeout); workdir containment (escape above the workdir root rejected — `/`-rooted and `..`-crossing paths; symlinks in allowed, symlinks out rejected at open); process-group kill at `tool_timeout_s`; output truncation at `tool_output_max_kb` | MAP 3.13 (S3.4 tool loop; spec amendment 2026-09-25) |
 
 ## This box (pre-existing, external — consumed read-only)

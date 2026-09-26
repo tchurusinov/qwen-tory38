@@ -40,7 +40,7 @@ class TestSuiteSmoke(unittest.TestCase):
         )
         self.assertGreaterEqual(len(files), 1, "hermetic suite has no test modules")
         allowed = set(sys.stdlib_module_names)
-        # Documented edge-dep: `yaml` (PyYAML) may appear ONLY as a
+        # Documented edge-deps: `yaml` (PyYAML) may appear ONLY as a
         # LOCAL import (inside a function body) at the YAML read/parse
         # edge — the box dep the MAP 1.3/1.4/1.5 tooling shares (the
         # same convention as tests/test_model_fetch.py, which loads the
@@ -48,7 +48,25 @@ class TestSuiteSmoke(unittest.TestCase):
         # imports stdlib). A TOP-LEVEL `import yaml` in a hermetic test
         # module is still caught by the assertion below (it would break
         # the suite on a box without PyYAML).
-        allowed_local = allowed | {"yaml"}
+        #
+        # `bench` (the Phase 4 runner package, MAP P4) follows the same
+        # LOCAL-import edge convention: the S5.8 mock-endpoint fixture
+        # (tests/fixtures/bench_mock.py) builds its canned TaskResults
+        # through `bench.exec.score_stream` (the S5.8 "timings sane"
+        # property: the real timing core runs, no network/GPU). `bench` is
+        # allowed at TOP LEVEL in test modules because the package's
+        # module-load import chain is stdlib-only: `bench.exec` imports
+        # `requests` LAZILY inside `stream_chat` (the S5.4 named
+        # non-stdlib dep, the S6.6 pin; the hermetic timing core
+        # score_stream/run_concurrent/TaskResult needs no third-party
+        # dep, so the S5.8 mock-endpoint run stays zero-network/GPU/
+        # requests), and PyYAML appears only at the file-read edge
+        # (bench/config.py's local `import yaml`). `bench` is never
+        # TOP-LEVEL-imported in a fixture (that would make the fixture's
+        # import chain depend on the runner package at module load);
+        # only test modules themselves may import it.
+        allowed_top = allowed | {"bench"}
+        allowed_local = allowed | {"yaml", "bench"}
         for f in files:
             tree = ast.parse(f.read_text(), filename=str(f))
             top_level: list[str] = []
@@ -109,7 +127,7 @@ class TestSuiteSmoke(unittest.TestCase):
                 top = n.split(".")[0]
                 self.assertIn(
                     top,
-                    allowed,
+                    allowed_top,
                     f"tests/{f.name}: TOP-LEVEL import of non-stdlib "
                     f"module {top!r} (hermetic suite = stdlib only, S6.6)",
                 )
