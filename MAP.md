@@ -546,7 +546,7 @@ Exit: hermetic closed-set suite green + S3.8 acceptance (all five).
       offload command (spawn) exit 80 with S2.4 JSON (reads exit 0 with
       `main_only_reason` per the S3.2 per-command table — S2.4/S3.8#4
       delta amended, session log); unload/reload mock cases.
-- [ ] 3.13 Host-side 4-tool module `bin/bonsai2_tools.py` (bash /
+- [x] 3.13 Host-side 4-tool module `bin/bonsai2_tools.py` (bash /
       read_file / write_file / python): workdir containment (reject
       escape above the workdir root — `/`-rooted and `..`-crossing
       paths rejected; symlinks inside the workdir allowed, symlinks out
@@ -556,7 +556,7 @@ Exit: hermetic closed-set suite green + S3.8 acceptance (all five).
       Hermetic cases: valid call → result; malformed → error result;
       workdir escape → rejected call; timeout kill; truncation
       (S3.4, spec amendment 2026-09-25).
-- [ ] 3.14 Taskworker tool loop: when `rec["tools"] == "on"`, the
+- [x] 3.14 Taskworker tool loop: when `rec["tools"] == "on"`, the
       single-attempt body becomes the step-loop (send message history →
       parse tool call — native tools-array vs text-JSON per the
       @gpu wire-protocol probe at the pin → execute: host module or the
@@ -571,7 +571,7 @@ Exit: hermetic closed-set suite green + S3.8 acceptance (all five).
       backstop); @gpu wire-protocol probe (does the Bonsai chat
       template emit `tool_calls` via the native array at
       `9a9394a8`?) logged as a pin-reality delta (S3.4, S1.5, S1.3).
-- [ ] 3.15 Workdir + spawn flags: `--workdir DIR` (must exist,
+- [x] 3.15 Workdir + spawn flags: `--workdir DIR` (must exist,
       writable; omitted → harness creates
       `/run/bonsai2/workspaces/<task_id>`, 7-day rotation) +
       `--max-steps` (default `task_max_steps` = 32, range 1-128) on
@@ -771,6 +771,56 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-26 — G4 merge: PR #18 merged as `e44762a`, MAP 3.13/3.14/3.15 done
+- agent/model: Hermes qwen3.8-27b (session: G4 merge gate, branch `main` @ `e44762a`)
+- phase(s): P3 (3.13/3.14/3.15 — the PR #18 scope; G3 closed, G4 merged)
+- items checked: 3.13, 3.14, 3.15 (flipped to [x] this session, the merge
+  commit `e44762a`; the implementation session's log entry below notes
+  they would flip at G4)
+- G4 merge (PR #18, Gitea blckwell/qwen-tory38): user approval in PR
+  comment 992 ("round 13 was mostly false positives, ... im fine with
+  r13 not being posted and hving disposition. approved, feel free to
+  merge"). G4 merge-gate record = comment 993 (posted before the merge).
+  Merged server-side via the Gitea API `do: merge` (merge commit
+  `e44762a`, source branch NOT deleted server-side — local cleanup
+  below). `main` synced to `e44762a`; feature branch
+  `phase3-capability-layer-313-315` fully merged, then deleted local +
+  remote + `git fetch --prune`.
+- review loop close-out (from the implementation session's entry): G3
+  ran 13 confirmation rounds on this branch; P0-per-round r1–r12 =
+  0,1,1,1,0,0,1,1,0,0,1,0 — all P0s closed by probe or fix; round-13
+  (on head 62168c5) = 0 P0, 1 P1, 6 P2, all carried as P3/P4 backlog
+  notes (post-MVP CI/CD / test-overhaul area), non-blocking. No
+  standalone round-13 raw/disposition comment posted (user-directed);
+  the disposition of round-13's findings is recorded in G4 comment 993.
+- machine state: main @ `e44762a`. No bonsai2 containers/units live
+  (Phase-6 install area); main stack :30001 up. Hermetic suite green
+  through the loop (427/427 at the loop-close head 62168c5); gate.sh
+  PASS on the head. @gpu wire-protocol probe verdict = NATIVE
+  (pin 9a9394a8) — the pin-reality delta recorded this session in
+  SPEC.md (below) + test-logs/tools-probe-*.json.
+- next: MAP 4.9 (M9/M10 capability-layer goldens + scorers, both
+  tool_execution modes) — the Phase-4 item the 3.13–3.15 probe verdict
+  is the input to. (Ordering: 4.1–4.8 bench framework first if not yet
+  landed; see the Phase-4 list.) Round-13's carried P1 + 6 P2 are
+  tracked against the post-MVP CI/CD proposal, not re-opened here.
+- blockers/intricacies: none new for the next session. Round-13's P1
+  (taskworker `first_idx` multi-call name-less index-0 edge — a narrow
+  shape of the r9-fixed streamed-fragment accumulation) + 6 P2 are the
+  only open items from this PR, all deferred to the P3/P4 backlog with
+  the G4 comment 993 as the record.
+- spec deltas: two backfills of the @gpu wire-protocol probe verdict
+  (pin 9a9394a8 chat template emits the NATIVE `tool_calls` array,
+  finish_reason=tool_calls, arguments as a JSON string; the A2
+  pin-reality delta the 2026-09-25 amendment asked to record):
+  (1) S1.3 `--tools` engine-side note — the host-side default path is
+  confirmed (the native array is emitted; `--tools` stays
+  engine-side-only); (2) S3.4 tool-loop "Tool-call parsing" — the
+  native `tool_calls` array is parsed FIRST, the text-JSON fence (A2)
+  is the fallback shape. Both are spec-follows-code backfills of the
+  probe result, not new locked values (the probe was the open question,
+  now answered).
 
 ### 2026-09-26 — MAP 3.13–3.15 implementation: subagent capability layer (host 4-tool module + taskworker tool loop + workdir/spawn flags + @gpu wire-protocol probe), PR #18 opened
 - agent/model: Hermes qwen3.8-27b

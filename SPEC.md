@@ -296,7 +296,15 @@ level (`--memory` + cgroup `MemoryHigh`).
   7 tools and differs from the 4-tool host-side MVP set (bash ≈
   exec_shell_command, read_file/write_file 1:1, no python tool);
   engine-side mode runs the 7-tool set, and the tool_log's `tool`
-  field names the engine-side names.
+  field names the engine-side names. Note (pin-reality, delta
+  2026-09-26, @gpu wire-protocol probe, MAP 3.14; spec follows code):
+  the probe asked what the pin's chat template emits for tool calls
+  (A2 of the 2026-09-25 amendment, then open) — verdict: **native**
+  `tool_calls` array at the pin (finish_reason=tool_calls, one tool
+  call per completion, arguments as a JSON string; artifact
+  test-logs/tools-probe-*.json). The host-side default path (above)
+  is therefore confirmed: the host parser consumes the native array
+  first; `--tools` remains engine-side-only.
 - Ports: `30101 + i` for instance i (0-indexed), overridable per instance
   in `subagent-engine.yaml`. Collision at boot (port in use) =
   `ERR_PORT_IN_USE`, exit 3.
@@ -946,7 +954,12 @@ model as an error result, up to `tool_invalid_max` = 3 consecutive bad
 calls, then the task fails `ERR_TOOL_INVALID_CALL`), execute it
 (host-side: the `bin/bonsai2_tools.py` module; engine-side: the
 instance's `/tools` endpoint, S1.3), append the result, and continue;
-if the response is a final answer, the task is `done`. The loop holds
+if the response is a final answer, the task is `done`. Tool-call
+parsing: the native `tool_calls` array is parsed first — the @gpu
+wire-protocol probe at the pin (delta 2026-09-26, MAP 3.14) recorded
+that the pin's chat template emits the native array (finish_reason=
+tool_calls, arguments as a JSON string; test-logs/tools-probe-*.json)
+— with the text-JSON fence (amendment A2) as the fallback shape. The loop holds
 its single slot for the task's whole lifetime (the existing S3.4 slot
 model, unchanged). The task's `--deadline` bounds the whole loop; a
 step that overruns is killed at its per-tool timeout (`tool_timeout_s`,
