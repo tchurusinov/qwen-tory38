@@ -808,13 +808,18 @@ SPEC.md `status` → `active`.
   pass their rubrics, timings sane, box-state snapshot on every row,
   `bench-results/*.md` summary written. No GPU load in this session
   (the S5.8 mock run is hermetic by construction).
-- next: G3 — open the Gitea PR for `phase4-bench-framework`, run
-  `./scripts/review.sh`, loop the review to clean (raw-output +
-  disposition comments), then the G4 human merge gate (AGENTS.md PR-body
-  contract: DOD + checks + residual risk + spec-amendments/uncertainties
-  sections). After G4: flip MAP 4.1–4.8 to [x] at merge; the Phase-4
-  frontier becomes 4.9 (M9/M10 capability-layer goldens + scorers, both
-  tool_execution modes).
+- next: G3c — reconcile PR #20 round-2 findings (raw posted as PR
+  comment 1016; round 1 was on a stale .git/plan.md and is superseded
+  by round 2): 0 P0, 2 P1 (bench/exec.py:113 decode window must gate on
+  content chunks, not reasoning; bench/exec.py:251 main-only M6/M8
+  control hits a hardcoded localhost port + empty Bearer instead of
+  the configured main endpoint), 6 P2 (run.py:262 dead spotcheck
+  fallback; scenarios.py:174 M7 pool_size=0 -> 8 vs docstring;
+  m5.py:66 5-QA count not asserted; run.py:652 non-ConfigError crash
+  swallowed to exit 0; test_smoke.py:135 requests-doc nit; exec.py:233
+  4xx mapped to "engine"). Loop G3b -> clean, then G4. After G4: flip
+  MAP 4.1–4.8 to [x] at merge; the Phase-4 frontier becomes 4.9 (M9/M10
+  capability-layer goldens + scorers, both tool_execution modes).
 - blockers/intricacies: M9/M10 rows run with a named PENDING verdict
   (row fail, detail "scorer lands in MAP 4.9") until 4.9 — the S5.4
   "failure is data" rule; the S5.7 note (M9/M10 full-bench-only in v1,
