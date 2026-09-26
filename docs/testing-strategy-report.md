@@ -1,28 +1,37 @@
 # qwen-tory38 — Testing Strategy & Infrastructure Report
 
-> Status: proposal (untracked). Parallel session implementing MAP 3.13–3.15 /
-> 4.9 (capability layer / tool loop) is out of scope here EXCEPT where its
-> tests must plug into the layers defined at the end (the skeleton's §7 maps
-> them). Date: 2026-09-25. Everything below is grounded in the live tree:
-> `tests/` (366 hermetic cases), `tests/gpu/` (20 cases), `scripts/gate.sh`,
-> `.githooks/pre-commit`, `tests/run_gpu.sh`, `test-logs/` (the two
-> 2026-09-25 @gpu logs), `docs/two-red-gpu-tests*.md`, SPEC §3.7/§3.8/§5.8/
-> Global testing discipline, MAP session log 2026-09-25.
+> Status: proposal, updated 2026-09-26 (branch `test-spec-live`). MAP
+> 3.13–3.15 (capability layer / tool loop) is MERGED as PR #18
+> (`e44762a`) — the "parallel session" premise of this draft is stale: its
+> tests exist and are green, and the skeleton's §7 mapping is now verified
+> fact, not plan. Original draft date: 2026-09-25. Everything below is
+> grounded in the live tree: `tests/` (427 hermetic cases, verified
+> 2026-09-26: `Ran 427 tests in 130.119s / OK` under `/usr/bin/python3.12`),
+> `tests/gpu/` (21 methods incl. the new `test_tools_probe.py`),
+> `scripts/gate.sh`, `.githooks/pre-commit`, `tests/run_gpu.sh`,
+> `test-logs/` (the two 2026-09-25 @gpu logs + the 2026-09-26 probe
+> logs), `docs/two-red-gpu-tests*.md`, SPEC §3.4/§3.7/§3.8/§5.8/Global
+> testing discipline, MAP session log 2026-09-25/2026-09-26.
 
 ---
 
 ## 0. TL;DR (recommendations up front)
 
-1. **The 366 hermetic tests are green and are the right shape** (table-driven,
+1. **The 427 hermetic tests are green and are the right shape** (table-driven,
    mock-engine, exit-code-closed-set). Keep them, stop touching their
-   semantics.
-2. **The @gpu suite (20 tests) is where all the pain lives.** The 2026-09-25
-   reds have three measured root causes, none of which are "the code is
-   broken": (a) the runner invokes bare `python3` → Hermes toolchain 3.14
-   without PyYAML; (b) wall-clock timing assumptions vs. a box running at
-   96% main-stack utilization; (c) one test asserting on a stack the test
-   itself only installed half of (N=2 template vs N=1 MVP units). Fix the
-   three, add the flake policy in §6, and the hotfix treadmill ends.
+   semantics. (366 at the original draft; PR #18 added `test_tools_module.py`
+   + `test_harness_tools_loop.py`, +4 render-config + spawn cases — 427
+   verified 2026-09-26, ~130 s wall.)
+2. **The @gpu suite (21 methods: 20 + the new wire-protocol probe) is where
+   all the pain lives.** The 2026-09-25 reds have three measured root
+   causes, none of which are "the code is broken": (a) the runner invokes
+   bare `python3` → Hermes toolchain 3.14 without PyYAML; (b) wall-clock
+   timing assumptions vs. a box running at 96% main-stack utilization;
+   (c) one test asserting on a stack the test itself only installed half
+   of (N=2 template vs N=1 MVP units). **All three remain unfixed as of
+   2026-09-26 (PR #18 merge)** — neither `test_lifecycle_2_11.py` nor
+   `test_s38_acceptance.py` changed in PR #18; see §2 status note. Fix
+   the three, add the flake policy in §6, and the hotfix treadmill ends.
 3. **We are NOT testing the wrong things — we are testing the right things
    at the wrong altitudes, in one undifferentiated pile.** No tiering, no
    fast path, no interpreter pin, no quarantine mechanism, no release
@@ -49,25 +58,28 @@
 
 ### 1.1 Hermetic suite (`tests/`, no GPU, no network)
 
-366 tests, `Ran 366 tests in 100.294s / OK`, exit 0, run under
-`/usr/bin/python3.12 -m unittest discover -s tests -t .` (the `-t .` is the
-documented target; plain `discover -s tests` breaks on the relative-import
-fixture modules — see the MAP 2026-09-25 entry). Per-file case counts:
+427 tests (verified 2026-09-26: `Ran 427 tests in 130.119s / OK`), exit 0,
+run under `/usr/bin/python3.12 -m unittest discover -s tests -t .` (the
+`-t .` is the documented target; plain `discover -s tests` breaks on the
+relative-import fixture modules — see the MAP 2026-09-25 entry). Per-file
+case counts:
 
 | file | cases | what it proves |
 |---|---|---|
-| test_render_config.py | 67 | serving/engine YAML → unit-file render round-trip, key rewrites (boot_target_s write-back), schema shape |
 | test_manager.py | 86 | S2.2 escalation, S2.5 drift watch, probe loop, health.json atomicity, boot-deadline ordering, env hooks (BONSAI2_PROBE_TIMEOUT_S etc.) |
+| test_render_config.py | 71 | serving/engine YAML → unit-file render round-trip, key rewrites (boot_target_s write-back), schema shape (PR #18 added the capability-layer keys: tool_execution, tool_timeout_s, tool_output_max_kb, tool_invalid_max, workdir surface) |
 | test_harness_34_38.py | 38 | reaper + deadline, spawn dedup, collect, steer/cancel, unload/reload (MAP 3.4–3.8) |
-| test_harness_spawn.py | 35 | spawn surface vs mock manager |
+| test_harness_spawn.py | 35 | spawn surface vs mock manager (PR #18: + the workdir/tools spawn-surface cases) |
 | test_harness_core.py | 33 | harness core, mock-engine surface |
-| test_harness_closed_set.py | 25 | the S3.2 exit-code closed set: every code table-driven, exact JSON + code asserted (SPEC §3.7/§3.8 #3) |
+| test_tools_module.py | 33 | **NEW (PR #18, MAP 3.13)** the host 4-tool module: valid-call result per tool, malformed → error result (never exception), workdir escape rejection (`/`-rooted, `..`-crossing, symlink-in-out physical/inside), timeout kill → exit 124 + no stray child, output truncation marker |
+| test_harness_tools_loop.py | 24 | **NEW (PR #18, MAP 3.14/3.15)** the taskworker tool loop: step + final answer → done (result carries tool_log/steps/workdir), native `tool_calls` AND text-JSON both drive the loop (the A2 duality), tools-array wire shape on/off, host + engine execution modes, message-history growth, loop bounds (tool_invalid_max → ERR_TOOL_INVALID_CALL, step overrun → ERR_TOOL_TIMEOUT/124, no-final-answer → ERR_DEADLINE), steer at step boundary, cancel mid-step; 3.15 workdir/flag validation (`--workdir` must exist+writable, `--max-steps` regex) |
 | test_image_build.py | 27 | Dockerfile render/build-banner/image-pin logic (no docker run) |
 | test_model_fetch.py | 18 | PQ2_0 fetch: SHA verify, backoff/retry, hash-mismatch re-download (the "download attempt failed: reset" lines in the log are FAKE resets the tests inject — normal noise, not a failure) |
 | test_vram.py | 20 | S1.4 allocation-tier math, budget planning |
+| test_harness_closed_set.py | 25 | the S3.2 exit-code closed set: every code table-driven, exact JSON + code asserted (SPEC §3.7/§3.8 #3; PR #18 added the tool-loop codes 21/22 rows) |
 | test_harness_status.py | 15 | status/health reads, N=0 main_only_reason |
 | test_smoke.py | 2 | package sanity |
-| fixtures/ | — | mock_engine.py (254 L: canned /v1/* incl. 200/400/429/500, streaming), mock_manager.py (285 L: stateful pool stub) |
+| fixtures/ | — | mock_engine.py (254 L: canned /v1/* incl. 200/400/429/500, streaming), mock_manager.py (285 L: stateful pool stub), tool_engine.py (**NEW**, 274 L: canned tool-call /v1/chat/completions incl. both wire shapes, streaming tool-call argument accumulation) |
 
 **Verdict: this is a good suite.** Table-driven, mock-backed, every test
 asserts a named SPEC criterion, exit codes asserted not implied. The shape
@@ -75,9 +87,10 @@ is correct; the debt is around it (tiers, interpreter, CI hooks), not in it.
 
 ### 1.2 @gpu suite (`tests/gpu/`, live box, live 27B engines)
 
-20 test methods, run via `tests/run_gpu.sh` (unittest discover, nvidia-smi
-pre/post snapshots into `test-logs/gpu-<ts>.log`). Observed wall time
-2026-09-25: 776 s and 892 s for the full dir. Inventory:
+21 test methods (20 at the original draft + the PR #18 probe), run via
+`tests/run_gpu.sh` (unittest discover, nvidia-smi pre/post snapshots into
+`test-logs/gpu-<ts>.log`). Observed wall time 2026-09-25: 776 s and 892 s
+for the full dir. Inventory:
 
 | file | cases | SPEC anchor | weight |
 |---|---|---|---|
@@ -91,6 +104,7 @@ pre/post snapshots into `test-logs/gpu-<ts>.log`). Observed wall time
 | test_kill_restart_1_11.py | 1 | S1.8 #4 kill -9 restart | heavy |
 | test_manager_spawn_2_5.py | 1 | S2.2/S2.5 live spawn, 2 real instances | heavy |
 | test_s38_acceptance.py | 1 | S3.8 fan-out/kill/N=0/unload live acceptance | heavy |
+| test_tools_probe.py | 1 | **NEW (PR #18, MAP 3.14)** S3.4 A2 wire-protocol probe: one `tools`-array chat completion against the pinned image; records native-vs-text-JSON verdict to `test-logs/tools-probe-<ts>.json` | light (reduced ctx 8192, ~16 s at 2026-09-26 run; verdict: **native** at pin `9a9394a8`, backfilled to SPEC S1.3/S3.4 in the 2026-09-26 G4 entry) |
 
 Note the history you recalled: 17–18 tests green → broke at 19–20. That was
 the S2.8 reactive pair (#2 crash / #4 drift) — documented in
@@ -170,6 +184,44 @@ the manager checks, with a generous deadline; never a fixed wall-clock
 number; and precondition against the subset of the system the test
 actually installed** (MVP = N=1 subset, not the template's N).
 
+### Status as of 2026-09-26 (PR #18 merged as `e44762a`)
+
+- **Red #1 (drift settle, `test_4_drift_ctx_halve`): still open.** The merged
+  tree still has no "all instances healthy" settle before the drift phase;
+  `test_lifecycle_2_11.py` was last touched by the PR #11 hotfix chain, not
+  PR #18. The §5.5 condition-poll settle remains the fix.
+- **Red #2 (S2.8 #5 reload budget, `test_5_unload_reload_cycle`): still open.**
+  SPEC S2.8 #5 still asserts `reload --all → N healthy within
+  `boot_target_s`` (a warm single-boot write-back value); the §2 spec fork
+  (amend #5 to the 30 s budget vs measure the write-back under a busy main)
+  was not taken in PR #18. §8.6 remains live.
+- **Red #3 (S3.8 precondition, `test_s38_fanout_kill_n0_unload`): STILL AS
+  WRITTEN in the merged tree.** The precondition is `health.get("stack") ==
+  "healthy" and any(instance healthy)` plus a NEW explicit
+  `len(health["instances"]) == 1` assertion (MVP: exactly one instance) —
+  i.e. the assertion now names the installed subset explicitly, but the
+  `stack == "healthy"` gate is unchanged: if the manager honors the
+  template `instances.count: 2` (its S2.3 boot path reads the live YAML the
+  test snapshots/restores) while only the instance-0 user unit is
+  installed, `stack` still goes `degraded` and the precondition can still
+  fail. The "assert on the installed subset, not the stack" fix from this
+  report is the remaining half; verify against the live manager's current
+  N behavior when it is next run (the 2026-09-25 failure mode: escalation →
+  `systemctl restart bonsai2-server@1` → "Unit not found" ×5).
+- **Interpreter bug (red class (a)): still open.** `tests/run_gpu.sh` still
+  invokes bare `python3` (PR #18 only added the extra-args passthrough).
+  The 2026-09-26 probe runs were therefore done under the Hermes toolchain
+  python 3.14 — the probe passed (it needs no yaml), but the 7-phantom-
+  failure class would still bite any yaml-importing @gpu test. §4 is
+  untouched by PR #18 and remains "fix, do this first."
+- **New since the draft: the wire-protocol probe.** Two early probe runs
+  (2026-09-26 01:32 / 01:44) errored in `setUpClass` (the argv-shape fix:
+  `flag value` jammed into one argv token → llama-server rejected the args),
+  then the post-fix run passed in 16.2 s with verdict **native** (recorded
+  to `test-logs/tools-probe-20260926-015610.json`). The A2 question is
+  answered: the pin emits the native `tool_calls` array; SPEC S1.3/S3.4
+  backfilled at G4 (spec-follows-code, no new locked value).
+
 ---
 
 ## 3. Are we testing the correct things? (strategy + result)
@@ -193,8 +245,8 @@ actually installed** (MVP = N=1 subset, not the template's N).
 
 ### 3.2 What is missing or wrong (negatives)
 
-1. **No tiers.** 366 hermetic cases run in one undifferentiated 100 s pile.
-   There is no 10 s "did I break the package" subset, so pre-commit runs the
+1. **No tiers.** 427 hermetic cases run in one undifferentiated ~130 s pile.
+   There is no "did I break the package" subset, so pre-commit runs the
    whole gate (correct, but slow to iterate on), and there is no cheap
    signal at all between commits.
 2. **No interpreter pin.** `run_gpu.sh` calls bare `python3`; the box's
@@ -224,13 +276,17 @@ actually installed** (MVP = N=1 subset, not the template's N).
      install.sh has zero tests (not even dry-run). Highest-risk untested
      code in the repo.
    - **Global acceptance #5** (72 h soak) — manual; no soak harness.
-   - **Capability layer (3.13–3.15)**: MAP assigns hermetic cases to 3.13
-     (the 4-tool module) and a @gpu wire-protocol probe to 3.14. The 4-tool
-     module is ideal for **property-style tests** (path containment:
-     arbitrary adversarial paths — `..`-crossing, `/`-rooted, symlink
-     escape — against the workdir) and the closed tool-exit contract
-     (ok/exit_code/output/detail shape). That work belongs to the parallel
-     session; the layer it lands in is defined in §5.
+   - **Capability layer (3.13–3.15)**: MERGED (PR #18, 2026-09-26).
+     Hermetic side: `test_tools_module.py` (33 cases — the exit-contract
+     table + path-containment, the latter as explicit adversarial cases
+     rather than a property framework) + `test_harness_tools_loop.py`
+     (24 cases — both wire shapes, both execution modes, loop bounds,
+     flags) + `fixtures/tool_engine.py`. @gpu side: `test_tools_probe.py`
+     (the A2 wire-protocol probe, verdict native, recorded). All green at
+     merge; the layer they live in is §5 (L1/L2 hermetic, L3 probe).
+     What remains from this report's original ask: nothing structural —
+     the 4-tool module got the containment cases as table entries, and a
+     dedicated property-style module is optional polish, not a gap.
 7. **No release surface.** No changelog, no tags, no "what changed since
    last release + what was verified" artifact. For a project whose
    install path is one command and whose spec is locked values, a release
@@ -249,11 +305,11 @@ stochastic LLM edge, locked spec values) the right mix is:
 
 | strategy | verdict |
 |---|---|
-| Table-driven exit-code tests | keep — best practice here, already done |
-| Mock-engine integration (hermetic) | keep — done well |
+| Table-driven exit-code tests | keep — best practice here, already done (incl. the tool-loop codes 21/22, PR #18) |
+| Mock-engine integration (hermetic) | keep — done well; `fixtures/tool_engine.py` extended it to both tool-call wire shapes |
 | Live acceptance (@gpu, SPEC-anchored) | keep, add the observe-don't-predict doctrine + tiers |
-| **Contract tests (wire protocol goldens)** | ADD — cheap, closes the mock-to-real gap (§3.2.8) |
-| **Property tests (workdir containment)** | ADD — natural fit for the 4-tool module (3.13) |
+| **Contract tests (wire protocol goldens)** | PARTIAL → the A2 probe answered the native-vs-text-JSON fork with a live verdict (PR #18); the hermetic golden-response goldens pinning the mock-to-real gap remain to add (§3.2.8) |
+| **Property tests (workdir containment)** | DONE-AS-TABLE — PR #18 landed the adversarial containment cases as table entries; a property framework around them is optional, not a gap |
 | **Golden-file round-trips (config render)** | PARTIAL → formalize under `tests/golden/` |
 | Fast/smoke tier | ADD — biggest leverage per minute (§5) |
 | **Acceptance-as-code for Global #2 (fresh-session dogfood script)** | ADD, post-MVP — turns the user story into a re-runnable test |
@@ -299,7 +355,7 @@ prose.
 | layer | what | command (target) | budget | blocks what |
 |---|---|---|---|---|
 | **L0** | lint + syntax + secrets | `gate.sh` steps 1–4 (bash -n, shellcheck, ruff, secret scan) | ~10 s | commit (pre-commit), G2 gate |
-| **L1** | hermetic-fast subset: closed-set + manager + harness_core (the invariants that regress most) | `python -m unittest discover -s tests -t . -p 'test_harness_closed_set.py|test_manager.py|test_harness_core.py'` (or -k in pytest) | ~30 s | pre-commit (add), G2 gate |
+| **L1** | hermetic-fast subset: closed-set + manager + harness_core + the tool layer (test_tools_module + test_harness_tools_loop — the newest code regresses most until it has scar tissue) | `/usr/bin/python3.12 -m unittest tests.test_harness_closed_set tests.test_manager tests.test_harness_core tests.test_tools_module tests.test_harness_tools_loop` (explicit module list — note: `discover -p` takes ONE glob, so the multi-pattern pipe form in this draft's v0.1 was never a working command; module names are the correct form) | ~80 s (measured 2026-09-26: closed-set 44 s is the floor — 25 cases each round-trip-serialize JSON docs; manager 6 s; core 2 s; tools 4 s; tools_loop 23 s) | pre-commit (add), G2 gate |
 | **L2** | hermetic full | `python -m unittest discover -s tests -t .` (py3.12) | ≤150 s | G2 gate, G4 merge |
 | **L3** | @gpu-smoke: runtime-image + build-banner + ONE 27B bring-up (1.7) | `tests/run_gpu.sh -k smoke` (subset flag) | ≤10 min | G4 merge (VRAM-audited), release |
 | **L4** | @gpu full | `tests/run_gpu.sh` | ≤20 min | release, S5.5 re-bench |
@@ -307,9 +363,12 @@ prose.
 
 Consequences, deliberately:
 
-- **Commits never wait on more than ~40 s of tests.** Pre-commit = L0 + L1.
-  The current pre-commit already runs full `gate.sh`; add L1, keep L0.
-  Nothing changes about the "only new failures block" baseline.
+- **Commits wait on at most ~95 s of tests.** Pre-commit = L0 + L1 (L1
+  measured 79.8 s, closed-set dominates; §8.1 re-raises the L1-membership
+  question: the original draft guessed ~30 s — the guess was wrong, the
+  closed-set round-trip serialization is the floor). The current
+  pre-commit already runs full `gate.sh`; add L1, keep L0. Nothing changes
+  about the "only new failures block" baseline.
 - **G2 gate = L0 + L2.** Hermetic-full becomes the required check (it is
   what the MAP log already records every PR; this just makes the gate
   actually run it instead of lint-only).
@@ -475,35 +534,57 @@ obligation, not a merge gate, until the 72 h harness exists).
 
 ---
 
-## 7. How the new spec items (3.13–3.15, 4.9) plug in
+## 7. How the new spec items (3.13–3.15, 4.9) plug in — VERIFIED against the merged tree
 
-The parallel session owns the implementation; it should NOT pay @gpu
-technical-debt (your instruction) — it lands in the general harness:
+PR #18 (merged 2026-09-26 as `e44762a`) owned the 3.13–3.15 implementation
+and its tests; the original "parallel session" framing of this section is
+retired. What actually landed, and where it sits in §5:
 
-- **3.13 (4-tool module, hermetic cases)** → L1/L2: table-driven tool-exit
-  contract (ok/exit_code/output/detail shape for bash/read_file/
-  write_file/python: success, timeout→124, path-error→ERR_TOOL_PATH,
-  truncation marker) + property-style path-containment cases (adversarial
-  paths against the workdir; symlink in/out). New file
-  `tests/test_tools_3_13.py`, runs in the L1 subset (it is pure stdlib,
-  no yaml — ideal fast layer).
-- **3.14 (taskworker loop + @gpu wire-protocol probe)** → the wire-protocol
-  probe is L3 (smoke-eligible: one spawn with `tools=on`, one tool call,
-  assert tool_log shape) until the box can carry L4 for it; dual-mode
-  (host vs engine-side) hermetic halves land in L2.
-- **3.15 (workdir + spawn flags + config keys)** → L2 (flag validation,
-  config round-trip — the render-config table already has the pattern).
-- **4.9 (M9/M10 goldens + scorers)** → L5 (SPEC §5.8 rubric-test pattern:
-  golden in/out pairs hermetic for the scorer, M-row execution in the bench
-  layer). The scorer goldens are hermetic (L2-eligible); the M-row runs are
-  not.
-- All of the above follow §6.1 (observe-don't-predict, re-run, quarantine)
-  from day one — that is the "extend to them" requirement: they get the
-  harness discipline without the hotfix treadmill.
+- **3.13 (4-tool module)** → L1/L2, landed as
+  `tests/test_tools_module.py` (33 cases): the tool-exit contract
+  (ok/exit_code/output/detail shape per tool; malformed → error result,
+  never exception; timeout → 124 + dead process group; truncation marker)
+  + workdir path-containment (adversarial `/`-rooted, `..`-crossing,
+  symlink-in-out physical cases — table entries, not a property
+  framework). Pure stdlib: it is in the L1 fast subset (§5).
+- **3.14 (taskworker tool loop)** → L2, landed as
+  `tests/test_harness_tools_loop.py` (24 cases): both wire shapes
+  (native `tool_calls` + text-JSON), both execution modes (host /
+  engine-side `tool_execution: engine` incl. name mapping + error shape),
+  loop bounds (21/22/124 in the closed set — the `test_harness_closed_set.py`
+  rows were extended to match), steer/cancel semantics, message-history
+  growth. The @gpu wire-protocol probe landed as
+  `tests/gpu/test_tools_probe.py` → L3 (smoke-eligible: one spawn, one
+  tool call, verdict recorded; ~16 s at its 2026-09-26 run). The A2
+  verdict (native at pin `9a9394a8`) is backfilled into SPEC S1.3/S3.4.
+- **3.15 (workdir + spawn flags + config keys)** → L2, landed in
+  `test_harness_tools_loop.py` (flag validation: `--workdir`
+  exist+writable, `--max-steps` regex) + `test_render_config.py`
+  (+4 cases: the capability-layer keys' render round-trip).
+- **4.9 (M9/M10 goldens + scorers)** → still the frontier (MAP 4.9 is
+  next after 4.1–4.8 bench framework). L5 for M-row execution; scorer
+  goldens hermetic/L2-eligible per the original plan — now with one
+  fewer unknown: the goldens are tuned against the recorded probe
+  verdict (native), not guesswork.
+- All four follow §6.1 (observe-don't-predict, re-run, quarantine) from
+  day one — requirement met: they landed in the general harness, and the
+  @gpu probe followed the @gpu conventions (always-stop instance,
+  recorded log, port-margined above the pool range).
 
 ---
 
 ## 8. Open decisions (need your call, in priority order)
+
+> Decisions recorded 2026-09-26 (branch `test-spec-live`, user-confirmed):
+> #1 → hybrid (unittest hermetic core, pytest @gpu subset selection);
+> #2 → L3 release-only (G4 = L2-fresh + VRAM audit only);
+> #3 → hand-written changelog section (as leant);
+> #4 → install.sh hermetic tests deferred to a MAP phase item (they land
+> with that MAP item; the release checklist's S6.8 row is the compensating
+> control until then); #5 → post-commit non-blocking + log;
+> #6 → deferred to test-spec T9/OD-2 as a standing open defect (the spec
+> fork itself is untouched — no SPEC move without the re-measurement).
+> All of these are now locked in `docs/test-spec.md` (T2/T3/T4/T6/T8/T9).
 
 1. **unittest vs pytest** (§5.4): keep unittest (default) or migrate ~half
    day to unlock flake/reruns/JSON. My lean: migrate IF we adopt the
@@ -531,10 +612,14 @@ technical-debt (your instruction) — it lands in the general harness:
 
 ---
 
-## 9. Skeleton: TESTING-SPEC (redo + extension)
+## 9. Skeleton: TESTING-SPEC (extracted to `docs/test-spec.md`)
 
-Populated in the next iteration after this draft is read/discussed. Intended
-to be implementable in 1–3 sessions. Compact form:
+The skeleton below was the v0.1 draft; it is now a standalone document,
+**`docs/test-spec.md`**, updated against the 2026-09-26 reality (PR #18
+merged, §2 status note, L1 command + budget corrected from the v0.1 guess —
+`discover -p 'a|b|c'` was never a working unittest invocation and the
+measured L1 is ~80 s, not ~30 s). This section is kept as the historical
+draft; `docs/test-spec.md` is the living text.
 
 ```text
 # qwen-tory38 TESTING SPEC v0.1 (skeleton — see report §5/§6/§8)
