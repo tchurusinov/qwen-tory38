@@ -11,11 +11,20 @@ Scoring (auto, per-question binary — S5.3 "machine-scored"):
     ``bench/goldens/m5/qa.json``: PASS when the normalized golden answer
     appears in the normalized subagent answer (exact match is a special
     case of containment; the subagent may pad the answer with prose, so
-    containment — not equality — is the match rule).
-  * normalization: case-fold, keep only alphanumerics + underscores +
-    commas + spaces collapsed (the golden answers are short tokens:
-    "PTQ_1_0", "80", "M1, M2, M7" — the normalization is tolerant of
-    case, surrounding punctuation, and extra whitespace, but NOT of a
+    containment — not equality — is the match rule). The match is
+    TOLERANT of conjunction / word-boundary phrasing (the 2026-09-27
+    post-live-run amendment, H8: the live M5 miss was golden "M1, M2,
+    M7" vs answer "M1, M2, and M7" — a conjunction the strict substring
+    containment did not tolerate, while the long-context read itself
+    worked): common particles (and/or/the/a/an) are dropped from both
+    sides, and the rule is ordered containment OR every golden token
+    present in the answer's token set. A missing fact still fails (the
+    token-set half is strict on missing tokens).
+  * normalization: case-fold, drop the conjunction/word-boundary
+    particles, keep only alphanumerics + underscores + commas + spaces
+    collapsed (the golden answers are short tokens: "PTQ_1_0", "80",
+    "M1, M2, M7" — the normalization is tolerant of case, surrounding
+    punctuation, extra whitespace, and "and"-phrasing, but NOT of a
     different value).
   * ``pass`` = all 5 questions correct (the S5.2 "5 QA questions, each
     binary-scored" rubric: the long-context read is right when all 5 of
@@ -41,6 +50,12 @@ EXPECTED_QUESTIONS = 5
 
 _NORM_RE = re.compile(r"[^a-z0-9_,\s]+")
 _WS_RE = re.compile(r"\s+")
+# H8 (post-live-run): the conjunction / word-boundary particles dropped
+# from both sides before matching (the live miss: "M1, M2, M7" vs
+# "M1, M2, and M7" — the "and" the strict containment did not tolerate).
+# Matched as whole words only (a value like "an80" keeps its "an" — the
+# _NORM_RE already bounds tokens by punctuation/word characters).
+_STOP = frozenset({"and", "or", "the", "a", "an"})
 
 
 def _normalize(s: str) -> str:
@@ -50,13 +65,27 @@ def _normalize(s: str) -> str:
     return s
 
 
+def _tokens(s: str) -> set[str]:
+    return {t for t in s.split() if t not in _STOP}
+
+
 def _match(answer: str, golden: str) -> bool:
     a = _normalize(answer)
     g = _normalize(golden)
     if not g:
         return False
     # exact match or containment (the subagent may pad the answer).
-    return a == g or g in a
+    if a == g or g in a:
+        return True
+    # H8 tolerant half: conjunctions / word-boundary phrasing. Drop the
+    # stop particles and require every golden token in the answer's token
+    # set. Ordered containment above remains the strict special case.
+    g_tokens = _tokens(g)
+    if not g_tokens:
+        # a golden that is ALL stop words (e.g. "and") — fall back to the
+        # raw containment (unchanged behavior for that degenerate case).
+        return g in a
+    return g_tokens <= _tokens(a)
 
 
 def score(payload: dict, root=None) -> dict:

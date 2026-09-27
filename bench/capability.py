@@ -55,6 +55,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import tempfile
 import time
 from contextlib import redirect_stdout
@@ -136,8 +137,9 @@ def _stage_m10_workdir(root: str | None) -> Path:
 
 def stage_workdir(sid: str, root: str | None = None) -> Path:
     """The S5.2 fixture workdir for one capability scenario (M9 or M10).
-    Caller owns the workdir lifetime (the driver cleans it on the live
-    path; the mock path stages it itself for the scorer's file check)."""
+    The LIVE driver (``run_mode``) cleans it in its ``finally``; the
+    hermetic mock path (``tests/fixtures/bench_mock.mock_cap``) stages it
+    itself and the scorer's file check reads it while it exists."""
     if sid == "M9":
         return _stage_m9_workdir(root)
     if sid == "M10":
@@ -309,7 +311,7 @@ def run_mode(
     root: str | None = None,
     deadline_s: float | None = None,
     max_steps: int = 16,
-    wait_s: float = 120.0,
+    wait_s: float | None = None,
     instance_port: int = 30101,
     main_endpoint: str | None = None,
     engine_yaml: str | Path | None = None,
@@ -348,6 +350,13 @@ def run_mode(
     non-zero spawn exit or a non-terminal task within ``wait_s`` raises
     :class:`CapabilityError` (the caller records the failed row — the
     S5.4 "failure is data" rule).
+
+    wait_s: the terminal-poll window. None (the default) = the task's own
+    ``deadline_s`` + a 60 s poll margin (the post-live-run amendment,
+    S5.2/S5.9 #5: the live M9 crash was a hardcoded 120 s window racing
+    a 300/600 s task deadline — the driver must cover the backstop, not
+    a constant smaller than it). An explicit ``wait_s`` wins (the
+    hermetic seam).
     """
     if tool_execution not in ("host", "engine"):
         raise CapabilityError(
@@ -356,6 +365,8 @@ def run_mode(
     if main_endpoint is None:
         main_endpoint = f"http://127.0.0.1:{instance_port}"
     deadline_s = deadline_s or default_deadline_s(sid)
+    if wait_s is None:
+        wait_s = deadline_s + 60.0
 
     H = _load_harness()
 
@@ -485,6 +496,11 @@ def run_mode(
         return out
     finally:
         _tmp.cleanup()
+        # H6 (post-live-run): the staged fixture workdir is the driver's
+        # to clean — every live capability call leaked a
+        # /tmp/bonsai2-m{9,10}-* dir (confirmed in the first live run,
+        # the staged M9 workdir survived the crash).
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _m10_canned_report() -> str:

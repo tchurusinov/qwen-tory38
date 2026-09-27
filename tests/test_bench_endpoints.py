@@ -82,6 +82,19 @@ class MainEndpointTest(unittest.TestCase):
         ep = endpoints.main_endpoint(_harness("http://localhost"))
         self.assertEqual(ep["port"], 30001)  # the documented default
 
+    def test_main_api_key_flows_through(self):
+        # H3 (post-live-run): a key-walled main stack (no-key -> 401) needs
+        # the Bearer key for completions. main_endpoint reads
+        # harness.main_api_key into the endpoint dict's api_key; empty/absent
+        # = keyless (the pre-amendment behavior).
+        ep = endpoints.main_endpoint(
+            {"main_endpoint": "http://localhost:30001", "main_api_key": "sk-live-key"}
+        )
+        self.assertEqual(ep["api_key"], "sk-live-key")
+        # absent key -> keyless (the empty-string default)
+        ep2 = endpoints.main_endpoint({"main_endpoint": "http://localhost:30001"})
+        self.assertEqual(ep2["api_key"], "")
+
 
 class ResolveForScenarioTest(unittest.TestCase):
     def test_m6_is_main_only(self):

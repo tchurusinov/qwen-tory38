@@ -54,6 +54,13 @@ class MeminfoTest(unittest.TestCase):
         # on this box /proc/meminfo is present: the two fields are named
         self.assertIn("MemTotal=", s)
         self.assertIn("MemAvailable=", s)
+        # H12 (post-live-run): the reclaimable-pool fields are present too
+        # (the live run's VRAM climb 100->116 GiB with cache ~99% could not
+        # be distinguished as resident vs reclaimable from a 2-field snapshot).
+        self.assertIn("MemFree=", s)
+        self.assertIn("Cached=", s)
+        self.assertIn("Shmem=", s)
+        self.assertIn("SReclaimable=", s)
 
 
 if __name__ == "__main__":

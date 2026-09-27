@@ -17,8 +17,12 @@ The resolved endpoint is a small dict the executor consumes:
 ``{"kind": "subagent"|"main", "port": int, "url": str, "alias": str,
 "api_key": str, "index": int}``. The subagent alias + api_key are the
 S1.3 wire identity (the same values the taskworker's
-``load_engine_identity`` reads); the main endpoint has no api_key by
-default (the S3.2 main-probe convention: 401-walled is still UP).
+``load_engine_identity`` reads); the main endpoint's api_key comes from
+``harness.yaml`` ``main_api_key`` when present (the 2026-09-27
+post-live-run amendment, H3 / S3.6: the live main stack is key-walled —
+no-key completions 401; the S3.2 main-probe "401-walled is still UP"
+convention applies to the HEALTH PROBE, not to completions). Empty or
+absent = keyless (today's behavior, back-compatible).
 
 Pure + hermetic: given the two YAML dicts (or the loaded engine/harness
 identities) the resolver returns the endpoints with no I/O. The file
@@ -88,9 +92,17 @@ def subagent_ports(engine: dict) -> tuple[int, list[dict]]:
 
 def main_endpoint(harness: dict) -> dict:
     """The main-only endpoint (M6 control, M8 main half): from
-    ``harness.yaml`` main_endpoint (the S3.6 convention). No api_key by
-    default (the S3.2 main-probe: 401-walled is still UP)."""
+    ``harness.yaml`` main_endpoint (the S3.6 convention). The api_key
+    comes from ``harness.yaml`` ``main_api_key`` when present (the
+    2026-09-27 post-live-run amendment, H3: the live main stack is
+    key-walled — completions need the key; the 401-walled-is-still-UP
+    main-PROBE convention is for the health probe, not completions).
+    Absent/empty key = keyless (back-compatible: no Authorization
+    header, today's behavior)."""
     url = harness.get("main_endpoint", "http://localhost:30001")
+    api_key = harness.get("main_api_key", "")
+    if not isinstance(api_key, str):
+        api_key = ""
     port = 30001
     # parse the port out of the url for the record (best-effort; the url is
     # authoritative for the executor).
@@ -103,7 +115,7 @@ def main_endpoint(harness: dict) -> dict:
         "port": port,
         "url": url,
         "alias": "main",
-        "api_key": "",
+        "api_key": api_key,
         "index": -1,
     }
 

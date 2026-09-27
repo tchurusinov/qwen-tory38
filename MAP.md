@@ -779,6 +779,110 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
 
+### 2026-09-27 — Post-live-run hotfixes H1–H13 implemented on PR #22 (branch `hotfix-post-live-run-plan`)
+- agent/model: Hermes qwen3.8-27b (session: hotfix implementation on the
+ open PR #22 branch `hotfix-post-live-run-plan`, off the docs-only state
+ report + hotfix plan commit `25b9222`)
+- phase(s): P4 (4.9/4.10 post-live-run hotfixes; the docs-only PR is now
+ docs + hotfixes)
+- items implemented: the 13 hotfixes from
+ `docs/post-live-run-hotfix-plan-2026-09-27.md` (§1–§13), the run-stopper
+ bugs the 2026-09-27 4.10 pre-prod live run hit:
+  - H1 (P0): `bench/capability.py` — the driver's terminal-poll window
+    `wait_s` was a hardcoded 120 s racing a 300/600 s task deadline
+    (the live M9 crash `not terminal within 120.0s`). Now `wait_s`
+    defaults to None = `deadline_s + 60 s` margin; an explicit value wins
+    (the hermetic seam).
+  - H2 (P1): `bench/run.py` `_run_capability` — a capability-row failure
+    (CapabilityError) is now a ROW verdict (fail, named detail), not a
+    run crash; the run continues and the degraded row is recorded.
+  - H3 (P1): `bench/endpoints.py` `main_endpoint` reads
+    `harness.main_api_key` (M6/M8 completions on a key-walled main stack
+    401'd with no key). `etc/harness.yaml` gains `main_api_key: ""`
+    (S3.6); `etc/bench.yaml` mirrors it; `bench/config.py` schema takes
+    it (string, "" = keyless). Executor already sends Bearer when
+    non-empty.
+  - H4 (P1): `bench/run.py` M1 prompt forces content-only ("Your final
+    answer must be EXACTLY the two ```python fences"); the pin's deepseek
+    reasoning format put the whole M1 answer in reasoning_content (1
+    content token) → the rubric compiled an empty artifact → 0/3.
+  - H5 (P1): `bench/score/m3.py` — the undriven M3 spot-check seam is
+    recorded `spotcheck: "unjudged"` + a named detail ("seam not driven"),
+    not silent 0.0; a judged 0.0 is distinguished. The numeric blend
+    still computes at the 0.0 weight for the unjudged case.
+  - H6 (P2): `bench/capability.py` — the staged fixture workdir leaked
+    `/tmp/bonsai2-m{9,10}-*` on every live capability call; the live
+    driver's `finally` now `shutil.rmtree(workdir, ignore_errors=True)`
+    after `_tmp.cleanup()`.
+  - H7 (P2): `bench/score/m9.py` `_tool_log_shows_test_run` — no
+    early-return on a non-zero match (EXISTS semantics: a
+    failed-then-successful run is a successful run); returns False only
+    after the loop.
+  - H8 (P2): `bench/score/m5.py` — the matcher is tolerant of
+    conjunctions / word-boundary particles (drops and/or/the/a/an from
+    both sides; ordered containment OR every-golden-token-present);
+    the live miss was golden "M1, M2, M7" vs answer "M1, M2, and M7".
+  - H9 (P2, §0.2): `bench/exec.py` `run_concurrent` records BOTH
+    `aggregate_tps_wall` (total tokens / batch wall-clock — the "ceiling"
+    headline; the live 0.25 was the serial sum, not the ~2.3 wall) and
+    `aggregate_tps_serial` (the decode-throughput invariant);
+    `aggregate_tps` aliases the wall for backward compat. M7 rubric
+    (`bench/score/m7.py`) scores from the wall figure + records serial.
+    The M7 row (`bench/run.py` `_run_scenario`) carries the COMPARABILITY
+    triple `{n_tasks, concurrency, N}` + the measured aggregate. The
+    re-bench gate (`bench/rebench.py`) compares LIKE-WITH-LIKE: a
+    mismatched triple → "not comparable" (named, not a silent compare;
+    the rubric half still blocks).
+  - H10 (P2): `bench/rebench.py` `_config_value` — a PRESENT-but-malformed
+    `--config` is now a named bad-input error (exit 2), not a silent
+    default fallback; an ABSENT config keeps the legacy default.
+  - H11 (P2): `bench/config.py` — the "results_dir does not exist yet"
+    WARN names the `--results-dir` override flag; the pre-install
+    convention (BONSAI2_CONFIG + BONSAI2_ENGINE_YAML + --results-dir) is
+    documented in `bench-results/README.md` as THE path until Phase 6.
+  - H12 (P2): `bench/boxstate.py` `meminfo()` — beyond
+    MemTotal/MemAvailable the snapshot carries the RECLAIMABLE pool
+    (MemFree, Cached, Shmem, SReclaimable) so a reader can tell
+    page-cache/shared-memory (reclaimable) from resident growth. The
+    runner (`bench/run.py`) writes ONE extra post-run box-state snapshot
+    (`box_state_post_run`) so the end-of-run state is explicit (the
+    per-row snapshots are the VRAM time series).
+  - H13 (P1, §0.3–§0.7): `bench/run.py` — two pool-release flags
+    `--release-after` (tier 2 after the run writes rows + summary) and
+    `--release-between` (tier 2 at each scenario boundary: unload →
+    reload → a 16-token warmup completion per reloaded instance,
+    discarded, to keep cold-prefill out of the next scenario's timing).
+    Manager-mediated through `bin/bonsai2-unload` / `bin/bonsai2-reload`
+    (S3.2 closed set; the bench never touches docker directly). Both
+    default OFF; no-ops recorded as such under `--mock`; unload exit 84
+    (manager down) logs `skipped (84)` and the run CONTINUES; the records
+    ride the run JSON + the S3.1 stdout JSON.
+- machine state: hermetic suite GREEN `~/prod/.venv/bin/python -m
+ unittest discover -s tests -t .` → 591 tests OK (was 583 pre-hotfix;
+ +8 new named tests: H12 reclaimable fields, H3 main_api_key, H9
+ not-comparable ×2, H13 release flags ×5). No /opt/bonsai2 install (Phase
+ 6); no GPU load this session (the @gpu live re-run is H14, its own step).
+ PR #22 retitled docs + hotfixes; the docs-only state report
+ (`docs/post-live-run-state-report-2026-09-27.md`) + hotfix plan
+ (`docs/post-live-run-hotfix-plan-2026-09-27.md`) are the record.
+- next: G3 review (review.sh → the isolated pi reviewer) on PR #22; then
+ H14 (the post-hotfix live re-run runbook, @gpu) + 4.10's clean half.
+- blockers/intricacies: the exec test `test_task_order_preserved_and_
+aggregate_computed` asserted the PRE-amendment serial figure on
+`aggregate_tps`; H9 repurposed it as the wall alias (the serial moved to
+`aggregate_tps_serial`) — the test now asserts both + that
+`aggregate_tps == aggregate_tps_wall`. The 583-test baseline held; no
+regressions.
+- spec deltas: SPEC.md amended this session — S3.6 (harness.yaml
+main_api_key, H3), S5.2 M1 row (content-only prompt, H4) + M7 row
+(wall-t/s + comparability triple, H9), S5.2 reproducible block
+(reclaimable-pool meminfo fields + box_state_post_run, H12) + the
+pre-install live-run convention (H11), S4.3 "Pool release" (H13 tier
+1/2 + the bench flags), S5.4 (the --release-after/--release-between
+flags, H13), S5.5 (the like-with-like not-comparable gate, H9), S5.7
+(bench.yaml main_api_key mirror, H3). All deltas carry a "post-live-run"
+note at the amended site per the spec-amendment rule.
+
 ### 2026-09-26 — G4 merge: PR #20 merged as `8e7a8f6`, MAP 4.1–4.8 checked
 - agent/model: Hermes qwen3.8-27b (session: G3 round-2 disposition + G4
  merge of PR #20, branch `phase4-bench-framework`)

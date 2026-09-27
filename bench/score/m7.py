@@ -4,9 +4,15 @@ Input (the runner's saturation payload for one M7 task, the
 ``bench.exec.run_concurrent`` aggregate):
   {"agg": <dict from run_concurrent>, "results": [<TaskResult>, ...]}
   * ``agg`` — the concurrency aggregate: ``n_ok``, ``n_errors``,
-    ``total_completion_tokens``, ``total_elapsed_s``, ``aggregate_tps``
-    (the S5.1 "t/s at the ceiling" — the concurrency ceiling: all
-    instances, all slots, 8*N concurrent).
+    ``total_completion_tokens``, ``total_elapsed_s`` (the SERIAL sum —
+    the decode-throughput invariant), ``total_wall_s`` (the batch
+    wall-clock), and the t/s figures. The S5.1 "t/s at the ceiling" is
+    the WALL figure (the 2026-09-27 post-live-run amendment, H9 / S5.5:
+    the live first run's 0.25 was the serial sum 370/1484 s, not the
+    ~2.3 batch wall 370/161 s — the ceiling is a wall-clock saturation
+    figure). ``aggregate_tps_wall`` is the headline; ``aggregate_tps``
+    aliases it; ``aggregate_tps_serial`` is recorded for the
+    decode-throughput comparison.
   * ``results`` — the per-task results (the 5xx/429 count the "zero 5xx"
     half checks: any task whose error is an engine/5xx-class failure
     counts; a ctx/parse task failure is NOT a 5xx — it is the request
@@ -54,8 +60,16 @@ def score(payload: dict, root=None) -> dict:
     results = payload.get("results") or []
     if not isinstance(agg, dict):
         return verdict(False, 0.0, "M7: no concurrency aggregate in payload")
-    tps = agg.get("aggregate_tps")
+    # H9 (post-live-run): the headline "t/s at the ceiling" is the BATCH
+    # WALL figure. Prefer the explicit wall key; fall back to the legacy
+    # ``aggregate_tps`` (which pre-amendment was the serial sum — recorded
+    # in the run JSON that predates the amendment).
+    tps = agg.get("aggregate_tps_wall")
+    if not isinstance(tps, (int, float)):
+        tps = agg.get("aggregate_tps")
     tps = tps if isinstance(tps, (int, float)) else 0.0
+    tps_serial = agg.get("aggregate_tps_serial")
+    tps_serial = tps_serial if isinstance(tps_serial, (int, float)) else None
     n_errors = agg.get("n_errors", 0)
     # cross-check the 5xx count two ways: the agg's n_errors and the
     # results' engine-class failures — they should agree; use the results
@@ -71,10 +85,13 @@ def score(payload: dict, root=None) -> dict:
         f"({'pass' if ok else 'fail'})",
         {
             "aggregate_tps": tps,
+            "aggregate_tps_wall": tps,
+            "aggregate_tps_serial": tps_serial,
             "n_5xx": n_5xx,
             "n_errors_agg": n_errors,
             "n_tasks": agg.get("n_tasks", 0),
             "n_ok": agg.get("n_ok", 0),
             "total_completion_tokens": agg.get("total_completion_tokens", 0),
+            "total_wall_s": agg.get("total_wall_s"),
         },
     )

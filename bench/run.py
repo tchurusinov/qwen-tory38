@@ -47,6 +47,16 @@ the row. The hermetic seam is ``--mock-cap MODULE:FN`` (canned capability
 results, ``tests.fixtures.bench_mock:mock_cap`` — zero network/GPU, the
 S5.8 "timings sane" convention). The box-state snapshot + rotation are
 shared (S5.2); exit 0 even on scenario-level failures (S5.4).
+
+H13 (post-live-run, 2026-09-27): the pool-release mechanism —
+``--release-between`` (tier 2 at every scenario boundary:
+``bonsai2-unload --all`` -> ``bonsai2-reload`` + a 16-token warmup
+completion per reloaded instance, polled on health within the S2.8 30 s
+reload budget) and ``--release-after`` (tier 2 after the run writes all
+rows + the summary). Both default OFF; both are no-ops (recorded as
+such) under ``--mock``; a manager-down (S3.2 exit 84) boundary is
+recorded ``release: skipped (84)`` and the run CONTINUES (release is an
+optimization, not a correctness gate).
 """
 
 from __future__ import annotations
@@ -57,6 +67,8 @@ import json
 import os
 import re
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 # Make the bench package importable when run as a script (python3 bench/
@@ -104,7 +116,9 @@ def _prompts_for(sid: str, n_tasks: int) -> list[str]:
             "is_palindrome(s)) and its 3-case unittest suite (one test per "
             "function). Return the module source in one ```python fence and "
             "the suite in a second ```python fence. The module must compile "
-            "and pass its own 3-case suite."
+            "and pass its own 3-case suite. Your final answer must be "
+            "EXACTLY the two ```python fences — no prose, no reasoning "
+            "text outside the fences."
             for i in range(max(1, n_tasks))
         ]
     if sid == "M2":
@@ -342,20 +356,41 @@ def _m3_sections(tasks) -> list[dict]:
     return sections
 
 
-def _aggregate_tps(tasks) -> dict:
+def _aggregate_tps(tasks, wall_time: float | None = None) -> dict:
     """The M7/M8 aggregate over task results (the run_concurrent agg
-    shape, computed over pre-collected results)."""
+    shape, computed over pre-collected results). H9 (post-live-run):
+    carries BOTH t/s figures — ``aggregate_tps_serial`` (total tokens /
+    the SERIAL per-task elapsed sum, the decode-throughput invariant)
+    and ``aggregate_tps_wall`` (total tokens / the batch WALL clock,
+    the S5.1 "t/s at the ceiling" saturation figure; ``aggregate_tps``
+    aliases the wall value, the S5.5 baseline's read). ``wall_time``
+    is the batch wall-clock seconds when the caller measured one
+    (``run_concurrent``'s aggregate); None keeps the pre-amendment
+    serial shape for the legacy call sites."""
     ok = [t for t in tasks if t.ok]
     total_tokens = sum(t.completion_tokens or 0 for t in ok)
     total_elapsed = sum(t.elapsed_ms or 0.0 for t in ok) / 1000.0
-    return {
+    agg = {
         "n_tasks": len(tasks),
         "n_ok": len(ok),
         "n_errors": len(tasks) - len(ok),
         "total_completion_tokens": total_tokens,
         "total_elapsed_s": total_elapsed,
-        "aggregate_tps": total_tokens / total_elapsed if total_elapsed > 0 else 0.0,
+        "aggregate_tps_serial": total_tokens / total_elapsed
+        if total_elapsed > 0
+        else 0.0,
     }
+    if isinstance(wall_time, (int, float)) and wall_time > 0:
+        agg["total_wall_s"] = wall_time
+        agg["aggregate_tps_wall"] = total_tokens / wall_time
+        agg["aggregate_tps"] = total_tokens / wall_time
+    else:
+        # a legacy call site without a measured batch wall keeps the
+        # pre-amendment shape (the serial figure).
+        agg["aggregate_tps"] = (
+            total_tokens / total_elapsed if total_elapsed > 0 else 0.0
+        )
+    return agg
 
 
 # --------------------------------------------------------------------------
@@ -366,6 +401,7 @@ def _score_shape(
     sid: str,
     tasks: list,
     cfg: dict,
+    agg: dict | None = None,
 ) -> dict:
     """Score ONE scenario's task fan-out with its S5.3 rubric. A shape
     failure is a verdict (pass/score/detail), not an exception (the S5.4
@@ -373,7 +409,10 @@ def _score_shape(
     error names (the exec's ctx/parse/engine mapping). The M3 spot-check
     value is the single source of truth in ``cfg["_spotcheck"]`` (stashed
     by ``run`` when the ``--spotcheck`` flag is set; None -> the scorer's
-    0.0 default)."""
+    0.0 default). ``agg`` (H9 post-live-run) is the scenario's measured
+    ``run_concurrent`` aggregate (the batch WALL clock + the serial sum +
+    both t/s figures) when the caller has one — M7 scores from it; a None
+    falls back to the pre-amendment serial aggregate over the tasks."""
     root = _goldens_root(cfg)
     if sid == "M1":
         per_task = []
@@ -408,7 +447,12 @@ def _score_shape(
     if sid == "M5":
         return bscore.m5.score({"answers": _m5_answers(tasks)}, root=root)
     if sid == "M7":
-        return bscore.m7.score({"agg": _aggregate_tps(tasks), "results": tasks})
+        # H9 (post-live-run): score from the MEASURED aggregate (the
+        # batch wall clock — the S5.1 "t/s at the ceiling" saturation
+        # figure). A None agg keeps the legacy serial shape.
+        if agg is None:
+            agg = _aggregate_tps(tasks)
+        return bscore.m7.score({"agg": agg, "results": tasks})
     return bscore._common.verdict(False, 0.0, f"no rubric for shape {sid!r}")
 
 
@@ -424,6 +468,8 @@ def run(
     deadline_s: float = 600.0,
     max_tokens: int | None = None,
     spotcheck: float | None = None,
+    release_after: bool = False,
+    release_between: bool = False,
 ) -> dict:
     """Run the bench (the S5.4 runner). Returns the run report (dict: the
     per-scenario rows + the summary path + the rotation report). The exit
@@ -437,6 +483,9 @@ def run(
     (hermetic M9/M10: ``fn(sid, tool_execution, root=None) -> dict``).
     spotcheck: the M3 spot-check value (the S5.3 main/human-judgment seam;
     the live main agent reads 1/3 of the sections and supplies this).
+    release_after / release_between: the H13 pool-release flags (the
+    S4.2/S4.3 tier-2 release — manager-mediated via the S3.2 scripts;
+    both are no-ops recorded as such under ``--mock``).
     """
     if spotcheck is not None:
         cfg["_spotcheck"] = spotcheck
@@ -461,7 +510,25 @@ def run(
         n_pool, _ = endpoints.subagent_ports(engine)
         rows: list[dict] = []
         m6_baseline: float | None = None
-        for sid in _order_for_m6(sids):
+        # H13: the pool-release records (S4.2/S4.3). ``release_between``
+        # fires at each scenario BOUNDARY (rows for scenario N are
+        # written before the boundary release; scenario N+1's rows are
+        # after — the ordering the hermetic test asserts). A no-op under
+        # --mock, recorded as such (the flag is exercised through the
+        # record, not the pool).
+        release_between_records: list[dict] = []
+        unload_bin, reload_bin = _pool_release_flags_available()
+        ordered_sids = _order_for_m6(sids)
+        for n, sid in enumerate(ordered_sids):
+            if release_between and n > 0:
+                release_between_records.append(
+                    _pool_release(
+                        "between",
+                        unload_bin,
+                        reload_bin,
+                        mock is not None,
+                    )
+                )
             row = _run_scenario(
                 sid,
                 cfg,
@@ -492,12 +559,25 @@ def run(
             None,
             box_root=_REPO_ROOT,
         )
-        return {
+        out = {
             "n_scenarios": len(rows),
             "rows": rows,
             "summary_path": str(summary_path),
             "rotation": rotation_report,
         }
+        # H12 (post-live-run): ONE extra post-run box-state snapshot so
+        # the END-OF-RUN state is explicit (the per-row snapshots are the
+        # run's VRAM time series — this one is the last sample, written
+        # into the run report so a reader never has to hunt the newest
+        # row file for it).
+        out["box_state_post_run"] = boxstate.snapshot()
+        if release_after:
+            out["release_after"] = _pool_release(
+                "after", unload_bin, reload_bin, mock is not None
+            )
+        if release_between:
+            out["release_between"] = release_between_records
+        return out
     finally:
         lock.release()
 
@@ -658,11 +738,51 @@ def _run_capability(
     modes = ("host", "engine")
     rows = []
     for mode in modes:
-        if mock_cap is not None:
-            res = mock_cap(sid, mode, _goldens_root(cfg))
-        else:
-            res = _capability_live(sid, cfg, engine, harness, n_pool, mode, deadline_s)
-        rows.append(_capability_mode_row(sid, mode, res, snap, cfg))
+        try:
+            if mock_cap is not None:
+                res = mock_cap(sid, mode, _goldens_root(cfg))
+            else:
+                res = _capability_live(
+                    sid, cfg, engine, harness, n_pool, mode, deadline_s
+                )
+            rows.append(_capability_mode_row(sid, mode, res, snap, cfg))
+        except bcap.CapabilityError as exc:
+            # H2 (post-live-run): a capability-row failure is a ROW
+            # verdict, not a run crash (the live first run's M9/host
+            # CapabilityError propagated out of the mode loop to the
+            # top-level catch -> status "crash" -> M8/M9/M10 all
+            # dropped; S5.4 "failure is data" extends to the capability
+            # path explicitly — the run continues to the remaining
+            # modes + scenarios and writes all rows + the summary).
+            # The degraded result is an EMPTY capability result in the
+            # run_mode output shape: the scorer's sub-conditions fail
+            # honestly (the main re-run still runs the golden suite; the
+            # empty workdir / empty tool_log fail their halves), and the
+            # row carries the error + the last state in its detail.
+            degraded = {
+                "task_id": None,
+                "tool_execution": mode,
+                "state": "crashed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "answer": "",
+                "reasoning": "",
+                "usage": {},
+                "tool_log": [],
+                "steps": None,
+                "workdir": Path(tempfile.gettempdir()),
+                "timing": {
+                    "ok": False,
+                    "elapsed_ms": 0.0,
+                    "completion_tokens": None,
+                    "decode_tps": None,
+                },
+            }
+            row = _capability_mode_row(sid, mode, degraded, snap, cfg)
+            row["verdict"]["detail"] = (
+                f"{row['verdict']['detail']} — capability driver: {degraded['error']}"
+            )
+            row["capability"]["error"] = degraded["error"]
+            rows.append(row)
     host, engine_row = rows[0], rows[1]
     # S5.9 #5 "the host-vs-engine tool_execution comparison is recorded in
     # the run JSON": both verdicts + whether they agree + the per-mode t/s.
@@ -776,13 +896,30 @@ def _run_scenario(
     def exec_prompt(prompt: str):
         return exec_one(prompt, ep_by_prompt[prompt])
 
-    tasks, _agg = bexec.run_concurrent(prompts, conc, exec_prompt)
-    verdict = _score_shape(sid, tasks, cfg)
+    tasks, agg = bexec.run_concurrent(prompts, conc, exec_prompt)
+    verdict = _score_shape(sid, tasks, cfg, agg=agg)
     row = report.build_row(sid, tasks, verdict, snap, cfg, None, box_root=_REPO_ROOT)
     row["concurrency"] = conc
     row["n_tasks"] = len(tasks)
     row["ctx_cap"] = ctx_cap
     row["tool_execution"] = "on" if sid in scenarios.CAPABILITY else "off"
+    if sid == "M7":
+        # H9 (post-live-run, decision §0.2): the M7 row carries the
+        # COMPARABILITY triple {n_tasks, concurrency, N} — the S5.5
+        # baseline row carries the same triple, and the re-bench gate
+        # compares like-with-like (a mismatch -> "not comparable", not a
+        # silent compare: the engine's --parallel 8 cap is constant, but
+        # the load the bench applies varies per M, so comparability is a
+        # RECORDED property, not an assumption).
+        row["comparability"] = {
+            "n_tasks": len(tasks),
+            "concurrency": conc,
+            "N": n_pool,
+        }
+        # the measured aggregate (the S5.1 t/s-at-the-ceiling inputs:
+        # total_wall_s + both t/s figures) is on the row for the reader
+        # + the S5.5 baseline capture (bench/rebench.py save-baseline).
+        row["aggregate"] = agg
     return row
 
 
@@ -829,6 +966,175 @@ def _last_n(tasks: list, n: int) -> list:
     """The last ``n`` tasks of ``tasks`` (the current shape's fan-out,
     appended most-recent-last)."""
     return list(tasks)[-n:] if n > 0 else []
+
+
+# --------------------------------------------------------------------------
+# H13 (post-live-run): the pool-release mechanism (S4.2/S4.3, the two
+# tiers; bench flags + the manager-mediated S3.2 surface only)
+# --------------------------------------------------------------------------
+def _pool_release_flags_available() -> tuple[str | None, str | None]:
+    """The repo's ``bin/bonsai2-unload`` / ``bin/bonsai2-reload`` (the
+    S3.2 manager-mediated surface; the bench does NOT touch docker or
+    the instances directly). None when the script is absent (a
+    pre-install checkout without bin/ — the flag then records
+    ``skipped (no bin)`` and the run continues)."""
+    d = _REPO_ROOT / "bin"
+    unload = d / "bonsai2-unload"
+    reload_ = d / "bonsai2-reload"
+    return (
+        str(unload) if unload.is_file() else None,
+        str(reload_) if reload_.is_file() else None,
+    )
+
+
+def _pool_release(
+    kind: str,
+    unload_bin: str | None,
+    reload_bin: str | None,
+    mock: bool,
+) -> dict:
+    """One tier-2 pool release (S4.2 "stateless branch: unload between
+    each M"; S4.3 "tier 2 = model + KV"). Manager-mediated through the
+    S3.2 scripts; the bench records, never enforces (release is an
+    optimization, not a correctness gate):
+
+    * ``--mock`` — a no-op, recorded as such (the hermetic run never
+      touches the pool; the flag is still EXERCISED through the record
+      so the next live run's run JSON shows the boundary fired).
+    * unload/reload absent — ``skipped (no bin)``.
+    * unload exit 84 (manager down, S3.2) — ``skipped (84)``; the run
+      CONTINUES (an 84 boundary must not abort the bench: the next
+      scenario still runs against whatever pool state exists).
+    * reload exit != 0 — ``partial`` (recorded; the warmup still runs
+      against the instances that came up).
+
+    ``kind`` is ``between`` (a scenario boundary: unload -> reload ->
+    warmup) or ``after`` (the run's end: unload only). Returns the
+    record dict the run JSON carries (``release_between`` /
+    ``release_after``)."""
+    rec: dict = {"kind": kind, "tier": 2}
+    if mock:
+        rec.update({"mock": True, "note": "no-op under --mock (H13)"})
+        return rec
+    if not unload_bin:
+        rec.update({"note": "skipped (no bin)"})
+        return rec
+    import subprocess
+
+    t0 = time.monotonic()
+    p = subprocess.run(
+        [sys.executable, unload_bin, "--all"],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    unload_exit = p.returncode
+    if unload_exit == 84:
+        rec.update(
+            {
+                "note": "skipped (84)",
+                "unload_exit": unload_exit,
+                "s": round(time.monotonic() - t0, 3),
+            }
+        )
+        return rec
+    if unload_exit != 0:
+        rec.update(
+            {
+                "note": f"unload exit {unload_exit}",
+                "unload_exit": unload_exit,
+                "s": round(time.monotonic() - t0, 3),
+            }
+        )
+        return rec
+    rec["unload_exit"] = 0
+    if kind == "between" and reload_bin:
+        t0 = time.monotonic()
+        p = subprocess.run(
+            [sys.executable, reload_bin, "--all"],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        reload_exit = p.returncode
+        reload_s = round(time.monotonic() - t0, 3)
+        # S2.8 30 s reload budget (post-amendment): the reload is
+        # manager-mediated and the manager re-probes health; the bench
+        # does not re-implement the probe — it records the exit + wall
+        # and WARNS (data, not a gate) when the S2.8 budget is blown.
+        rec.update(
+            {
+                "reload_exit": reload_exit,
+                "reload_s": reload_s,
+                "reload_budget_s": 30.0,
+                "budget_exceeded": reload_s > 30.0,
+            }
+        )
+        if reload_exit != 0:
+            rec["note"] = f"partial (reload exit {reload_exit})"
+            return rec
+        # the 16-token warmup completion per reloaded instance (the MAP
+        # 1.7 bring-up-check pattern): a cold prefill on the FIRST real
+        # task would poison M7's saturation timing, so the bench spends
+        # 16 tokens on a discarded completion before the next scenario.
+        # It goes at the instance ports the S1.6 pool owns — the bench
+        # has already resolved them for this run; the hermetic/mock path
+        # never reaches here, so the real HTTP is the only transport.
+        w0 = time.monotonic()
+        warmup_ok = _warmup_instances()
+        rec["warmup_s"] = round(time.monotonic() - w0, 3)
+        rec["warmup_ok"] = warmup_ok
+    rec["note"] = rec.get("note", "done")
+    return rec
+
+
+def _warmup_instances() -> bool:
+    """The 16-token warmup completion per reloaded instance (H13). The
+    subagent pool's endpoints come from the engine yaml (the S1.6
+    ports); the warmup is a DISCARDED completion (its tokens are not
+    the scenario's) — the point is to prime the allocator / prefill
+    path so the next scenario's first task does not pay a cold-start
+    inside the measured window. Any non-2xx per instance is a named
+    WARN (data, not a gate): a warmup miss must not fail the bench.
+    Returns True when every instance's warmup completed 2xx."""
+    import requests  # lazy: the warmup is I/O (the S5.4 dep surface)
+
+    from bench import endpoints
+
+    try:
+        engine = endpoints.load_engine_identity()
+    except (OSError, ValueError, FileNotFoundError):
+        return False
+    n, eps = endpoints.subagent_ports(engine)
+    if n == 0:
+        return True  # main-only: nothing to warm
+    ok_all = True
+    for ep in eps:
+        try:
+            r = requests.post(
+                f"{ep['url'].rstrip('/')}/v1/chat/completions",
+                json={
+                    "model": ep["alias"],
+                    "messages": [
+                        {"role": "user", "content": "warmup (H13, discarded)"}
+                    ],
+                    "max_tokens": 16,
+                    "stream": False,
+                },
+                headers=(
+                    {"Authorization": f"Bearer {ep['api_key']}"}
+                    if ep.get("api_key")
+                    else {}
+                ),
+                timeout=30,
+            )
+            ok = 200 <= r.status_code < 300
+        except requests.RequestException:
+            ok = False
+        ok_all = ok_all and ok
+    return ok_all
 
 
 def _run_m8(
@@ -938,6 +1244,20 @@ def main(argv: list[str] | None = None) -> int:
         help="override the results dir (default: the bench.yaml results_dir)",
     )
     ap.add_argument(
+        "--release-after",
+        action="store_true",
+        help="H13: after the run writes all rows + the summary, release the "
+        "pool tier-2 (bin/bonsai2-unload --all; manager-mediated, S3.2). "
+        "Default OFF; a no-op recorded as such under --mock.",
+    )
+    ap.add_argument(
+        "--release-between",
+        action="store_true",
+        help="H13: at each scenario boundary, release tier-2 (unload --all) "
+        "then reload (bonsai2-reload) + warmup, before the next scenario. "
+        "Default OFF; a no-op recorded as such under --mock.",
+    )
+    ap.add_argument(
         "--summary-dir",
         default=None,
         help="the bench-results/ summary dir (default: repo-root bench-results/)",
@@ -965,6 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
             deadline_s=args.deadline_s,
             max_tokens=args.max_tokens,
             spotcheck=args.spotcheck,
+            release_after=args.release_after,
+            release_between=args.release_between,
         )
     except config.ConfigError as exc:
         print(f"[bench] {exc}", file=sys.stderr)
@@ -991,17 +1313,20 @@ def main(argv: list[str] | None = None) -> int:
         row["scenario"]: row.get("row_verdict", "fail") for row in run_report["rows"]
     }
     # the S3.1 "one JSON object on stdout" convention, adapted to the bench.
-    sys.stdout.write(
-        json.dumps(
-            {
-                "status": "done",
-                "n_scenarios": run_report["n_scenarios"],
-                "verdicts": verdicts,
-                "summary": run_report["summary_path"],
-            }
-        )
-        + "\n"
-    )
+    out_doc = {
+        "status": "done",
+        "n_scenarios": run_report["n_scenarios"],
+        "verdicts": verdicts,
+        "summary": run_report["summary_path"],
+    }
+    # H13 (post-live-run): the pool-release records ride the stdout JSON
+    # (the run's report dict carries them too; the S3.1 one-object-on-
+    # stdout convention is the consumer-facing surface). Only present when
+    # the flag was set (default OFF keeps the pre-hotfix shape byte-identical).
+    for key in ("release_after", "release_between"):
+        if key in run_report:
+            out_doc[key] = run_report[key]
+    sys.stdout.write(json.dumps(out_doc) + "\n")
     return EXIT_OK
 
 

@@ -50,6 +50,12 @@ BENCH_CONFIG_DEFAULTS: dict = {
     "goldens_dir": "bench/goldens",
     "main_guardrail_pct": 5,  # mirrors harness.yaml main_tps_guardrail_pct
     "rebench_baseline": "bench-results/rebench-baseline.json",  # S5.5/4.11: the last-accepted quick-bench baseline
+    # S3.6 / H3 (post-live-run, 2026-09-27): a MIRROR of harness.yaml
+    # main_api_key (the M6/M8 main-side Bearer key; empty = keyless).
+    # The AUTHORITATIVE source is harness.yaml (bench.endpoints.main_endpoint
+    # reads it from there); this key is in the schema so the documented
+    # bench.yaml shape validates without an "unknown key" warning.
+    "main_api_key": "",
 }
 
 _DEFAULT_TEMPLATE = os.path.join(
@@ -153,6 +159,11 @@ def validate_bench_config(data) -> tuple[list[str], list[str]]:
         if not _is_num(v) or not (0 < v <= 100):
             errors.append(f"{ERR_CONFIG}: {key}: not a number in (0, 100]: {v!r}")
 
+    # --- main_api_key (S3.6 / H3): any string ("" = keyless) ---
+    mkey = data.get("main_api_key", BENCH_CONFIG_DEFAULTS["main_api_key"])
+    if not isinstance(mkey, str):
+        errors.append(f"{ERR_CONFIG}: main_api_key: not a string: {mkey!r}")
+
     # --- the two dirs: resolvable path strings (S5.8 "dir resolvability") ---
     cwd = Path.cwd()
     for key in ("results_dir", "goldens_dir"):
@@ -161,6 +172,17 @@ def validate_bench_config(data) -> tuple[list[str], list[str]]:
             errors.append(f"{ERR_CONFIG}: {key}: not a path string: {v!r}")
             continue
         p = Path(v)
+        # H11 (post-live-run): a pre-install run's default results_dir
+        # (/run/bonsai2/bench) does not exist yet — the WARN NAMES THE
+        # FLAG that overrides it (the S5.2/S5.7 pre-install convention:
+        # --results-dir), so a first-time reader knows the knob instead
+        # of guessing.
+        flag_hint = (
+            " (override with --results-dir; see the pre-install convention "
+            "in bench-results/README.md)"
+            if key == "results_dir"
+            else ""
+        )
         if p.is_absolute():
             # an absolute path that does not exist yet is a warning (created
             # at run time); one that is not a dir but exists is an error.
@@ -171,7 +193,7 @@ def validate_bench_config(data) -> tuple[list[str], list[str]]:
             elif not p.exists():
                 warnings.append(
                     f"{ERR_CONFIG}: {key}: {v!r} does not exist yet "
-                    f"(will be created at run time)"
+                    f"(will be created at run time){flag_hint}"
                 )
         else:
             # a relative path: resolve against CWD and check.
@@ -182,8 +204,8 @@ def validate_bench_config(data) -> tuple[list[str], list[str]]:
                 )
             elif not rp.exists():
                 warnings.append(
-                    f"{ERR_CONFIG}: {key}: {v!r} (relative to CWD {cwd}) does not "
-                    f"exist yet (will be created at run time)"
+                    f"{ERR_CONFIG}: {key}: {v!r} (relative to CWD {cwd}) does "
+                    f"not exist yet (will be created at run time){flag_hint}"
                 )
 
     # --- unknown top-level keys: a warning, not an error (the S5.7 set is

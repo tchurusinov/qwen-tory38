@@ -400,5 +400,68 @@ class RunnerExitCodeTest(MockRunTestBase):
         self.assertIn("boom", obj["error"])
 
 
+class ReleaseFlagsTest(MockRunTestBase):
+    """H13 (post-live-run): the pool-release flags. Under --mock both
+    flags are no-ops RECORDED as such (the hermetic run never touches the
+    pool; the flag is exercised through the record). --release-between
+    fires at each scenario BOUNDARY (rows for scenario N are written
+    before the boundary release; scenario N+1's rows after)."""
+
+    def test_release_after_records_noop_under_mock(self):
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M1", "M2"], self.results)
+        rc, stdout = self._run_main(["--mock", MOCK_SPEC, "--release-after"], cfg, env)
+        self.assertEqual(rc, 0, stdout)
+        doc = json.loads(stdout)
+        self.assertIn("release_after", doc)
+        # a no-op under --mock, recorded with the S3.2 tier-2 shape.
+        self.assertTrue(doc["release_after"]["mock"])
+        self.assertEqual(doc["release_after"]["tier"], 2)
+
+    def test_release_between_fires_at_each_boundary(self):
+        # TWO scenarios -> ONE boundary (between M1 and M2). The record is
+        # present, no-opped under --mock, and one entry per boundary.
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M1", "M2"], self.results)
+        rc, stdout = self._run_main(
+            ["--mock", MOCK_SPEC, "--release-between"], cfg, env
+        )
+        self.assertEqual(rc, 0, stdout)
+        doc = json.loads(stdout)
+        self.assertIn("release_between", doc)
+        self.assertEqual(len(doc["release_between"]), 1)  # one boundary
+        self.assertTrue(doc["release_between"][0]["mock"])
+        self.assertEqual(doc["release_between"][0]["kind"], "between")
+
+    def test_release_flags_off_keeps_pre_hotfix_stdout_shape(self):
+        # default OFF: no release_* keys on the stdout JSON (the pre-hotfix
+        # shape stays byte-identical for the unflagged path).
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M1"], self.results)
+        rc, stdout = self._run_main(["--mock", MOCK_SPEC], cfg, env)
+        self.assertEqual(rc, 0, stdout)
+        doc = json.loads(stdout)
+        self.assertNotIn("release_after", doc)
+        self.assertNotIn("release_between", doc)
+
+    def test_pool_release_unload_84_is_skipped_not_aborted(self):
+        # H13 honest failure path: manager down -> unload exit 84 -> the
+        # record is "skipped (84)" and the run CONTINUES (release is an
+        # optimization, not a correctness gate). Drive the real
+        # _pool_release with a fake unload script that exits 84.
+        script = self.tmp / "fake_unload.py"
+        script.write_text("import sys\nsys.exit(84)\n")
+        rec = bench_run._pool_release("after", str(script), None, mock=False)
+        self.assertEqual(rec["note"], "skipped (84)")
+        self.assertEqual(rec["unload_exit"], 84)
+        self.assertEqual(rec["tier"], 2)
+
+    def test_pool_release_no_bin_is_skipped(self):
+        # pre-install checkout without bin/ (or the flag pointed at a missing
+        # script): the record is "skipped (no bin)", the run continues.
+        rec = bench_run._pool_release("after", None, None, mock=False)
+        self.assertEqual(rec["note"], "skipped (no bin)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1014,6 +1014,11 @@ excluded from doctrine stats).
 ```yaml
 main_endpoint: http://localhost:30001
 main_endpoint_healthy_probe: /v1/models
+# H3 / S3.6 delta (2026-09-27): the main endpoint's API key for
+# COMPLETIONS. The healthy probe is keyless by the "401-walled is
+# still UP" convention; M6/M8 completions need the key when the main
+# stack is key-walled. Empty = keyless mains keep working.
+main_api_key: ""
 results_dir: /run/bonsai2/results
 dedup_dir: /run/bonsai2/dedup
 dedup_ttl_h: 24
@@ -1168,6 +1173,36 @@ sessions in check, we have limited instances, one sglang engine")
   prompt is the effective path. Cancel is for wrong-shape tasks, not
   impatience.
 
+**Pool release (S4.2/S4.3 delta, 2026-09-27, H13):** two tiers,
+manager-mediated through the S3.2 closed set (`bin/bonsai2-unload` /
+`bin/bonsai2-reload`; the bench does not touch docker or the instances
+directly):
+
+- **Tier 2 (model + KV):** `bonsai2-unload --all` → the manager
+  SIGTERMs the instance units (instant VRAM release) → stack enters
+  main-only mode; re-delegation triggers `bonsai2-reload` (boot ~8-15 s
+  warm, 21.5 s observed under contention; the S2.8 reload budget is
+  30 s post-amendment). The bench exposes `--release-after` (after the
+  run writes all rows + the summary) and `--release-between` (at each
+  scenario boundary: unload → reload → a 16-token warmup completion per
+  reloaded instance, discarded, to prevent cold-prefill poisoning the
+  next scenario's timing). Both default OFF; a no-op recorded as such
+  under `--mock`; an unload exit 84 (manager down, S3.2) logs
+  `skipped (84)` in the row and the run CONTINUES (release is an
+  optimization, not a correctness gate). The records ride the run JSON
+  (`release_after`, `release_between`) + the S3.1 stdout JSON.
+- **Tier 1 (KV only):** no unload — the instance stays up, weights
+  resident, and idle slots carry no KV by construction (default
+  `cache_prompt=false` at the pinned fork; the slot's KV is discarded
+  when the task ends). A main agent that expects to re-delegate to the
+  same instance within the KV-reuse window keeps it warm; it costs
+  nothing to ask for (the engine's default), so the doctrine (Phase 5)
+  documents it as a *decision* (what to expect from VRAM), not a command.
+
+Borderline: the DOCTRINE half (the main-agent's tier + timing judgment
+against S4.4's cost constants) is Phase 5; the MECHANISM + the bench
+flags are this hotfix.
+
 ### 4.4 Cost doctrine (v1 numbers — calibrated by S5; C-11: "t/s first,
 quality becomes apparent from task success")
 
@@ -1261,13 +1296,13 @@ the success-rate gap at equal or better cost.
 
 | id | shape | instances | concurrency | ctx | success rubric |
 |---|---|---|---|---|---|
-| M1 | single-file code-gen (3 tasks) | 1 | 1 | 8k | compiles + passes its own 3-case test suite (auto) |
+| M1 | single-file code-gen (3 tasks) | 1 | 1 | 8k | compiles + passes its own 3-case test suite (auto). **S5.2 delta (2026-09-27, H4):** at the pinned engine the model's answer lands in `reasoning_content` (1 content token per task); the M1 prompt forces content-only ("Your final answer must be EXACTLY the two ```python fences"); the rubric measures the content artifact — a reasoning-only payload still fails the strict rubric when content is empty. |
 | M2 | test execution batch (10 tasks) | 1 | 8 | 8k | report JSON parseable + 10/10 files covered (auto) |
 | M3 | fan-out doc analysis (N=6 sections) | min(6,avail) | parallel | 8k | each section: summary ≤ 300 tokens + 3 named claims each; main verifies 1/3 by spot-check (rubric: claim accuracy ≥ 2/3) |
 | M4 | diff review (1 PR-sized diff) | 1 | 1 | 32k | draft finds ≥ 80% of a seeded 10-bug fixture (auto, seeded) |
 | M5 | long-context doc read (60K tokens) | 1 | 1 | 64k | 5 QA questions, each binary-scored by a golden file (auto) |
 | M6 | main-only control of M1–M5 | — | 1 | — | same rubrics; the control (idea.txt capability comparison) |
-| M7 | saturation: all instances, all slots | N | 8×N | 8k | t/s at the ceiling + zero 5xx (auto) |
+| M7 | saturation: all instances, all slots | N | 8×N | 8k | t/s at the ceiling + zero 5xx (auto). **S5.2 delta (2026-09-27, H9 / §0.2):** "t/s at the ceiling" = total tokens / batch WALL-clock at the scenario's concurrency (the live first run's 0.25 was the serial sum 370/1484 s, not the ~2.3 batch wall 370/161 s). The M7 row carries the COMPARABILITY triple `{n_tasks, concurrency, N}`; the S5.5 baseline row carries the same triple, and the re-bench gate compares like-with-like (a mismatch → "not comparable", recorded, not a silent compare). |
 | M8 | contention: main at working load + subagents at working load | N | 4×N | 8k | main t/s guardrail: within `main_tps_guardrail_pct` of M6 (auto). The runner records the verdict per scenario row as `pass`/`fail` (e.g. `{"M8": "pass"}`); a guardrail breach flips the row to `fail` while the run still exits 0 (S5.4) |
 | M9 | tool-loop spec-chunk: implement a bounded spec chunk (fixture: a small library spec with 3 functions + a 3-case suite) | 1 | 1 | 32k, --tools on | the suite the subagent claims to have passed actually passes when MAIN re-runs it (auto: main-side re-run, exit 0) + tool_log shows the test run with exit 0 + the spec's 3 functions exist in the workdir (file check) |
 | M10 | tool-loop test batch: run a 10-file test batch, produce a structured report (per-file pass/fail, durations) | 1 | 8 | 8k, --tools on | report JSON parseable + 10/10 files covered + main re-runs 2/10 files to confirm the pass/fail verdicts agree (auto, 2/10 spot) |
@@ -1285,8 +1320,15 @@ date) recorded per run. The runner captures the snapshot via stdlib
 `subprocess` (no extra dep): `nvidia-smi --query-gpu=driver_version,memory.used --format=csv,noheader`,
 `docker stats --no-stream --format '{{.Name}} {{.MemUsage}}'` (main
 stack container, read-only, per S6.4), and a `MemTotal`/`MemAvailable`
-read of `/proc/meminfo`; results are stored as strings in the run
-row. Scenario ctx (the `ctx` column) is a runner-enforced token
++ **reclaimable pool** (`MemFree`, `Cached`, `Shmem`, `SReclaimable` —
+S5.2 delta 2026-09-27 H12: the live run's VRAM climb 100→116 GiB with
+cache ~99% needed these fields to distinguish resident from reclaimable
+memory) read of `/proc/meminfo`; results are stored as strings in the run
+row. **S5.2 delta (2026-09-27, H12):** the runner additionally writes
+ONE extra post-run box-state snapshot (`box_state_post_run`) into the
+run JSON so the end-of-run state is explicit (the per-row snapshots are
+the VRAM time series; this is the last sample, no need to hunt the
+newest row file). Scenario ctx (the `ctx` column) is a runner-enforced token
 budget, not a server setting: the runner keeps each scenario's input
 + output within the column's tokens (prompt shaping + a completion
 cap), records actual tokens used in the row, and the engine serves at
@@ -1299,6 +1341,15 @@ so the global #5 disk budget (2 GB) covers them. Results dir:
 `/run/bonsai2/bench/` + committed
 summary `bench-results/<date>_<commit>.md` (the doctrine's citation
 source).
+
+**S5.2 pre-install live-run convention (2026-09-27, H11):** until
+Phase 6's install.sh lands, the default `results_dir`
+(`/run/bonsai2/bench`) assumes the installed layout. A pre-install run
+sets `BONSAI2_CONFIG` + `BONSAI2_ENGINE_YAML` + `--results-dir` (the
+S3.2 env hooks + the runner's override flag); the config loader's
+"does not exist yet" WARN names the `--results-dir` flag so a
+first-time reader knows the knob. The convention is documented in
+`bench-results/README.md` as THE path until Phase 6.
 
 ### 5.3 Success rubrics (locked, named)
 
@@ -1333,12 +1384,25 @@ bench config invalid — the S3.2 code 2 (malformed args / bad config),
 in the closed set; `bonsai2-bench` is a S3.2 command and follows the
 same exit-code contract.
 
+**S5.4 delta (2026-09-27, H13):** the runner exposes two pool-release
+flags — `--release-after` and `--release-between` (S4.2/S4.3 tier 2,
+manager-mediated through the S3.2 scripts; both default OFF; no-ops
+recorded as such under `--mock`). See S4.3 "Pool release" for the
+semantics; the records ride the run JSON + the S3.1 stdout JSON.
+
 ### 5.5 Re-bench policy (locked — feeds S6.5 upgrade procedure)
 
 - **Quick bench (M1+M2+M7, `--quick`):** run on every engine-pin bump,
   every model re-download with changed SHA, and weekly (cron, optional).
   Regression > 10% t/s or any auto-rubric regression → the PR that
-  bumped the pin is blocked until re-resolved.
+  bumped the pin is blocked until re-resolved. **S5.5 delta (2026-09-27,
+  H9 / §0.2):** the M7 t/s comparison is now LIKE-WITH-LIKE — the M7 row
+  and the baseline row carry the COMPARABILITY triple
+  `{n_tasks, concurrency, N}`; a mismatched triple makes the t/s half
+  "not comparable" (recorded in the gate output as
+  `tps.comparable: false` + a named reason, NOT silently compared and
+  NOT silently skipped — the rubric half still runs). Pre-amendment
+  rows (no triple) compare on t/s alone, the legacy behavior.
 - **Full bench (M1–M10):** on model revision changes, quant fallback
   switches, or when a S4.2 row flips. Output feeds the doctrine audit
   (S4.6) in the same PR.
@@ -1379,6 +1443,7 @@ results_dir: /run/bonsai2/bench
 goldens_dir: bench/goldens
 main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
 rebench_baseline: bench-results/rebench-baseline.json   # MAP 4.11: the last-accepted quick-bench baseline (bench/rebench.py owns it)
+main_api_key: ""               # S3.6 / H3 (2026-09-27): MIRROR of harness.yaml main_api_key (the M6/M8 main-side Bearer key; empty = keyless). Authoritative source: harness.yaml.
 ```
 
 > S5.5 unchanged in policy: quick = M1+M2+M7 (the engine-regression

@@ -329,9 +329,11 @@ def run_concurrent(
     per-task callable (the runner wires it to ``stream_chat`` against the
     chosen endpoint). Returns ``(results, agg)`` where ``results`` is in
     TASK order and ``agg`` carries the M7/M8 metrics: total completions,
-    total 5xx/error count, total completion_tokens, aggregate decode
-    window, and the aggregate t/s (the M7 "t/s at the ceiling" + zero-5xx
-    rubric inputs)."""
+    total 5xx/error count, total completion_tokens, the SERIAL elapsed
+    sum (decode-throughput invariant, ``total_elapsed_s`` /
+    ``aggregate_tps_serial``), and the BATCH WALL-CLOCK (``total_wall_s``
+    / ``aggregate_tps_wall``) — the M7 "t/s at the ceiling" saturation
+    figure, which ``aggregate_tps`` aliases for the S5.5 baseline."""
     concurrency = max(1, int(concurrency))
     results: list[TaskResult | None] = [None] * len(tasks)
 
@@ -339,27 +341,44 @@ def run_concurrent(
         idx, prompt = idx_prompt
         return idx, exec_one(prompt)
 
+    batch_start = time.monotonic()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [pool.submit(_wrapped, (i, p)) for i, p in enumerate(tasks)]
         for fut in as_completed(futures):
             idx, res = fut.result()
             results[idx] = res
+    batch_wall_s = time.monotonic() - batch_start
 
     out: list[TaskResult] = [r for r in results if r is not None]
     n_errors = sum(1 for r in out if not r.ok)
     total_completion_tokens = sum(r.completion_tokens or 0 for r in out if r.ok)
-    # aggregate t/s = total tokens / total wall time (the concurrency ceiling
-    # the M7 rubric measures: "t/s at the ceiling + zero 5xx").
-    total_elapsed_s = sum((r.elapsed_ms or 0.0) for r in out if r.ok) / 1000.0
-    aggregate_tps = (
-        total_completion_tokens / total_elapsed_s if total_elapsed_s > 0 else 0.0
+    # aggregate t/s, two denominators (the post-live-run amendment, H9 /
+    # S5.1 + S5.5): the M7 "t/s at the ceiling" is a BATCH WALL-CLOCK
+    # saturation figure (total tokens / batch wall) — the live first run's
+    # 0.25 was the serial sum (370 tokens / 1484 s of *per-task* elapsed),
+    # not the ~161 s wall. The serial sum stays recorded as the
+    # decode-throughput invariant (aggregate_tps_serial).
+    total_serial_s = sum((r.elapsed_ms or 0.0) for r in out if r.ok) / 1000.0
+    aggregate_tps_serial = (
+        total_completion_tokens / total_serial_s if total_serial_s > 0 else 0.0
     )
+    total_wall_s = batch_wall_s
+    aggregate_tps_wall = (
+        total_completion_tokens / total_wall_s if total_wall_s > 0 else 0.0
+    )
+    # `aggregate_tps` stays as the WALL alias (the S5.5 baseline reads it;
+    # the M7 rubric reads aggregate_tps_wall when present, falls back to
+    # this for pre-amendment aggregates).
+    aggregate_tps = aggregate_tps_wall
     agg = {
         "n_tasks": len(out),
         "n_ok": sum(1 for r in out if r.ok),
         "n_errors": n_errors,
         "total_completion_tokens": total_completion_tokens,
-        "total_elapsed_s": total_elapsed_s,
+        "total_elapsed_s": total_serial_s,
+        "total_wall_s": total_wall_s,
         "aggregate_tps": aggregate_tps,
+        "aggregate_tps_wall": aggregate_tps_wall,
+        "aggregate_tps_serial": aggregate_tps_serial,
     }
     return out, agg

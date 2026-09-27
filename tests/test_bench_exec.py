@@ -168,7 +168,16 @@ class RunConcurrentTest(unittest.TestCase):
         self.assertEqual(agg["n_errors"], 0)
         self.assertEqual(agg["total_completion_tokens"], 30)
         self.assertAlmostEqual(agg["total_elapsed_s"], 0.3, places=5)
-        self.assertAlmostEqual(agg["aggregate_tps"], 30 / 0.3, places=5)
+        # H9 (post-live-run): the SERIAL sum (decode-throughput invariant)
+        # is aggregate_tps_serial; the WALL figure is the headline. The old
+        # assertion checked the serial figure on aggregate_tps, which is
+        # now the wall alias — the serial figure moved to
+        # aggregate_tps_serial (the 30/0.3 s decode-throughput invariant).
+        self.assertAlmostEqual(agg["aggregate_tps_serial"], 30 / 0.3, places=5)
+        # aggregate_tps aliases the wall figure (the S5.5 baseline reads it;
+        # the M7 rubric reads aggregate_tps_wall when present).
+        self.assertEqual(agg["aggregate_tps"], agg["aggregate_tps_wall"])
+        self.assertIn("total_wall_s", agg)
         # all prompts ran
         self.assertEqual(set(calls), {"a", "b", "c"})
 

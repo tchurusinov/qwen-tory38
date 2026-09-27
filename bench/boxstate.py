@@ -103,10 +103,27 @@ def docker_stats() -> str:
 
 
 def meminfo() -> str:
-    """The MemTotal + MemAvailable pair of /proc/meminfo, one string."""
-    total = _meminfo_field("MemTotal")
-    avail = _meminfo_field("MemAvailable")
-    return f"MemTotal={total} MemAvailable={avail}"
+    """The /proc/meminfo memory fields, one string. H12 (post-live-run):
+    beyond ``MemTotal``/``MemAvailable`` the snapshot carries the
+    RECLAIMABLE pool (``MemFree``, ``Cached``, ``Shmem``,
+    ``SReclaimable``) — the live run's VRAM climb (100 -> 116 GiB) with
+    cache at ~99% could not be distinguished as resident vs reclaimable
+    from a 2-field snapshot; the committed per-row snapshots form the
+    run's VRAM time series, so a reader can tell page-cache /
+    shared-memory (reclaimable) from resident growth."""
+    fields = (
+        "MemTotal",
+        "MemAvailable",
+        "MemFree",
+        "Cached",
+        "Shmem",
+        "SReclaimable",
+    )
+    parts = []
+    for name in fields:
+        val = _meminfo_field(name)
+        parts.append(f"{name}={val if val is not None else 'n/a'}")
+    return " ".join(parts)
 
 
 def snapshot() -> dict:
@@ -117,12 +134,17 @@ def snapshot() -> dict:
       {
         "nvidia_smi": str,     # driver_version + memory.used
         "docker_stats": str,   # name + MemUsage per container
-        "meminfo": str,        # MemTotal + MemAvailable
+        "meminfo": str,        # MemTotal + MemAvailable + the reclaimable
+                               # pool (MemFree/Cached/Shmem/SReclaimable,
+                               # H12 post-live-run)
         "driver": str,        # extracted from the nvidia-smi line
         "date": str,          # UTC date string
         "epoch": int,         # the capture time (unix seconds)
       }
-    """
+    The runner already snapshots PER ROW (one per M row) — the committed
+    rows form the run's VRAM time series; the runner adds ONE extra
+    post-run snapshot (the run JSON's ``box_state_post_run``) so the
+    end-of-run state is explicit (H12)."""
     gpu = nvidia_smi()
     return {
         "nvidia_smi": gpu,

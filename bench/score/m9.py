@@ -109,13 +109,18 @@ def _main_rerun_suite(root, python_bin: str | None) -> tuple[bool, str, int]:
 
 
 def _tool_log_shows_test_run(tool_log: list | None) -> tuple[bool, str]:
-    """The S5.2 "tool_log shows the test run with exit 0" half: there is a
-    ``bash``/``python`` tool_log entry that ran the 3-case suite (its command
-    / code mentions the suite runner) and whose exit_code is 0. A tool_log
-    with no such entry (or whose suite run is non-zero) is a fail of this
-    sub-condition."""
+    """The S5.2 "tool_log shows the test run with exit 0" half: there EXISTS
+    a ``bash``/``python`` tool_log entry that ran the 3-case suite (its
+    command / code mentions the suite runner) and whose exit_code is 0.
+    A failed-then-successful run PASSES this sub-condition (the 2026-09-27
+    post-live-run amendment, H7: the pre-fix loop returned False on the
+    FIRST suite-mentioning entry with a non-zero exit_code instead of
+    continuing — a failed-then-successful suite was mis-scored "no
+    successful run"). A tool_log with no exit-0 suite run at all is the
+    fail of this sub-condition."""
     if not isinstance(tool_log, list):
         return False, "M9: tool_log is not a list"
+    n_suite_runs = 0
     for entry in tool_log:
         if not isinstance(entry, dict):
             continue
@@ -131,11 +136,13 @@ def _tool_log_shows_test_run(tool_log: list | None) -> tuple[bool, str]:
         text += " " + str(entry.get("output") or "")
         if "unittest" not in text and "test_textkit" not in text:
             continue
+        n_suite_runs += 1
         code = entry.get("exit_code")
         if code == 0:
             return True, "M9: tool_log shows the suite run with exit 0"
-        return False, f"M9: tool_log suite run exited {code} (non-zero)"
-    return False, "M9: tool_log has no successful suite run"
+    if n_suite_runs == 0:
+        return False, "M9: tool_log has no successful suite run"
+    return False, f"M9: tool_log suite runs all non-zero ({n_suite_runs} run(s))"
 
 
 def _functions_in_workdir(

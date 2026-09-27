@@ -6,6 +6,14 @@
 
 main_endpoint: http://localhost:30001
 main_endpoint_healthy_probe: /v1/models
+# S3.6 / H3 (post-live-run, 2026-09-27): the main endpoint's API key for
+# COMPLETIONS. The healthy probe (main_endpoint_healthy_probe) is keyless
+# by the "401-walled is still UP" convention; but M6/M8 completions need
+# the key when the live main stack is key-walled (no-key -> 401, confirmed
+# live). Empty (the default) = keyless mains keep working; bench/endpoints.py
+# reads this into the main endpoint dict's api_key (the executor sends the
+# Bearer header when non-empty).
+main_api_key: ""
 results_dir: /run/bonsai2/results
 dedup_dir: /run/bonsai2/dedup
 dedup_ttl_h: 24

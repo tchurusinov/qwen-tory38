@@ -250,6 +250,55 @@ class QuickGateTest(unittest.TestCase):
         self.assertFalse(rebench.quick_gate(base, cur, 10.0)["blocked"])
         self.assertTrue(rebench.quick_gate(base, cur, 5.0)["blocked"])
 
+    def test_m7_load_triple_mismatch_is_not_comparable(self):
+        # H9 (post-live-run, decision §0.2): a baseline whose M7 load triple
+        # {n_tasks, concurrency, N} differs from the current run's is RECORDED
+        # "not comparable" (named, not silently compared). The >10% t/s rule
+        # is NOT applied when the load differs — a 120 -> 100 drop (16.7%)
+        # would block a like-with-like comparison, but here the load changed,
+        # so the t/s half is skipped while the rubric half still runs.
+        base = _baseline(_quick_pass_rows(120.0))
+        base["scenarios"]["M7"]["comparability"] = {
+            "n_tasks": 16,
+            "concurrency": 16,
+            "N": 2,
+        }
+        cur = _quick_pass_rows(100.0)  # a 16.7% drop: would block if compared
+        cur["M7"]["comparability"] = {
+            "n_tasks": 8,
+            "concurrency": 8,
+            "N": 1,
+        }
+        gate = rebench.quick_gate(base, cur, 10.0)
+        self.assertFalse(gate["blocked"])  # not blocked by the skipped t/s half
+        self.assertFalse(gate["tps"].get("comparable", True))
+        self.assertFalse(gate["tps"].get("regression", False))
+        self.assertTrue(
+            any("not comparable" in r for r in gate["reasons"]),
+            gate["reasons"],
+        )
+
+    def test_m7_load_triple_mismatch_rubric_half_still_blocks(self):
+        # H9: not-comparable skips the t/s half, but a RUBRIC regression still
+        # blocks (the rubric half is load-independent). A baseline M1 pass that
+        # now fails is blocked even when the M7 t/s comparison is not-comparable.
+        base = _baseline(_quick_pass_rows(120.0))
+        base["scenarios"]["M7"]["comparability"] = {
+            "n_tasks": 16,
+            "concurrency": 16,
+            "N": 2,
+        }
+        cur = _quick_pass_rows(100.0)
+        cur["M7"]["comparability"] = {
+            "n_tasks": 8,
+            "concurrency": 8,
+            "N": 1,
+        }
+        cur["M1"] = {"verdict": "fail", "score": 0.4, "tps": None}
+        gate = rebench.quick_gate(base, cur, 10.0)
+        self.assertTrue(gate["blocked"])
+        self.assertIn("M1", gate["rubric_regressions"])
+
 
 # ---------------------------------------------------------------------------
 # the S5.5 full-bench due-detection

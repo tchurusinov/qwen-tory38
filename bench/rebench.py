@@ -36,8 +36,11 @@ bench runner's 0/2 closed set — the runner is the bench; the re-bench gate
 is a gate that can BLOCK a PR, so a distinct "blocked/due" exit is the
 signal the pin-bump PR flow asserts on):
 
-  * ``gate``    — 0 = no regression (the PR is unblocked), 2 = bad config /
-                  input, 3 = regression found (the PR is BLOCKED).
+  * ``gate``    — 0 = no regression (the PR is unblocked) OR not-comparable
+                  (the named H9 status: the M7 t/s comparison is recorded
+                  "not comparable", NOT silently skipped — a rubric
+                  regression still blocks), 2 = bad config / input,
+                  3 = regression found (the PR is BLOCKED).
   * ``due``     — 0 = full bench not due, 2 = bad config, 3 = full bench DUE.
   * ``save-baseline`` — 0 = baseline written, 2 = bad config / input.
 
@@ -133,6 +136,26 @@ def row_tps(row: dict) -> float | None:
     return None
 
 
+def row_comparability(row: dict) -> dict | None:
+    """The M7 row's COMPARABILITY triple (the 2026-09-27 post-live-run
+    amendment, H9 / decision §0.2): ``{n_tasks, concurrency, N}`` —
+    the load the bench applied. The S5.5 baseline row carries the same
+    triple; the gate compares LIKE-WITH-LIKE (a mismatch -> "not
+    comparable", named, not a silent compare: the engine's ``--parallel
+    8`` cap is constant, but the load varies per M — M2 = 8-wide,
+    M7 = 16, M8 = 8 — so comparability is a RECORDED property). Pre-
+    amendment rows carry no triple -> None (the gate compares on t/s
+    alone, the legacy behavior)."""
+    c = row.get("comparability")
+    if isinstance(c, dict):
+        return {
+            "n_tasks": c.get("n_tasks"),
+            "concurrency": c.get("concurrency"),
+            "N": c.get("N"),
+        }
+    return None
+
+
 def rows_summary(rows: list[dict]) -> dict:
     """The gate's per-scenario summary from a run's rows (a list of S5.2
     run-row dicts): ``{sid: {"verdict": str, "tps": float|None, "score":
@@ -148,6 +171,7 @@ def rows_summary(rows: list[dict]) -> dict:
             "verdict": row_verdict(row),
             "score": float(verdict.get("score") or 0.0),
             "tps": row_tps(row),
+            "comparability": row_comparability(row),
         }
     return out
 
@@ -223,7 +247,13 @@ def quick_gate(
       1. **t/s regression** — the M7 ``aggregate_tps`` (the quick bench's
          throughput scenario). A drop ``> regression_tps_pct`` over the
          baseline M7 t/s is a regression. No baseline M7 t/s (the first
-         run) -> no t/s gate (nothing to drop from).
+         run) -> no t/s gate (nothing to drop from). H9 (post-live-run,
+         decision §0.2): when BOTH sides carry a COMPARABILITY triple
+         (the {n_tasks, concurrency, N} load), a mismatched triple makes
+         the t/s comparison "not comparable" — it is RECORDED as such
+         (``tps["comparable"] = False`` + a reason), NOT silently compared
+         and NOT silently skipped (the rubric half still runs, and a
+         rubric regression still blocks).
       2. **auto-rubric regression** — a quick auto-rubric scenario (M1,
          M2, M7) that PASSED in the baseline now FAILS in the current run
          (a rubric flip; the S5.5 "any auto-rubric regression"). A scenario
@@ -240,8 +270,21 @@ def quick_gate(
     cur_tps = current.get(_M7, {}).get("tps")
     tps_regression = False
     tps_info: dict = {"baseline_tps": base_tps, "current_tps": cur_tps}
+    base_c = base_scen.get(_M7, {}).get("comparability")
+    cur_c = current.get(_M7, {}).get("comparability")
+    comparable = True
+    if base_c is not None and cur_c is not None and base_c != cur_c:
+        comparable = False
+        tps_info["comparable"] = False
+        tps_info["baseline_comparability"] = base_c
+        tps_info["current_comparability"] = cur_c
+        reasons.append(
+            "M7 t/s not comparable (load triple differs: "
+            f"baseline {base_c} vs current {cur_c}) — recorded, not silently compared"
+        )
     if (
-        isinstance(base_tps, (int, float))
+        comparable
+        and isinstance(base_tps, (int, float))
         and base_tps > 0
         and isinstance(cur_tps, (int, float))
     ):
@@ -391,11 +434,19 @@ class RebenchError(Exception):
 # --------------------------------------------------------------------------
 # the CLI (the S5.5 gate: a named tool distinct from the S5.4 bench runner)
 # --------------------------------------------------------------------------
-def _config_value(cfg_path: str | None, key: str, default):
+def _config_value(
+    cfg_path: str | None, key: str, default, strict_malformed: bool = False
+):
     """Read one S5.7 bench.yaml key (``regression_tps_pct`` /
-    ``rebench_baseline``) with a default. A bad/absent file uses the
-    default (the gate still runs — the config is not the source of the
-    regression data)."""
+    ``rebench_baseline``). File ABSENT -> the default (the gate still
+    runs — the config is not the source of the regression data).
+
+    H10 (post-live-run): a file PRESENT but unparseable (or whose top
+    level is not a mapping) is NOT a silent default — it is a named bad
+    input. ``strict_malformed=True`` (the documented CLI ``--config``
+    path) makes that a ``RebenchError`` (the caller maps it to exit 2
+    "bad input"); without strictness the legacy lenient behavior is
+    kept for internal callers."""
     if not cfg_path:
         return default
     p = Path(cfg_path)
@@ -407,9 +458,17 @@ def _config_value(cfg_path: str | None, key: str, default):
         return default
     try:
         data = yaml.safe_load(p.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError) as exc:
+        if strict_malformed:
+            raise RebenchError(f"--config {cfg_path} unparseable: {exc!r}") from exc
         return default
-    if isinstance(data, dict) and key in data:
+    if not isinstance(data, dict):
+        if strict_malformed:
+            raise RebenchError(
+                f"--config {cfg_path} top level is not a mapping: {type(data).__name__}"
+            )
+        return default
+    if key in data:
         return data[key]
     return default
 
@@ -458,10 +517,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    baseline_path = args.baseline or _config_value(
-        args.config, "rebench_baseline", DEFAULT_BASELINE
-    )
-    regression_tps_pct = _config_value(args.config, "regression_tps_pct", 10.0)
+    # H10 (post-live-run): a PRESENT-but-malformed --config is a named
+    # bad-input error (exit 2), not a silent default fallback; an ABSENT
+    # config keeps the legacy default (the gate still runs).
+    try:
+        baseline_path = args.baseline or _config_value(
+            args.config, "rebench_baseline", DEFAULT_BASELINE, strict_malformed=True
+        )
+        regression_tps_pct = _config_value(
+            args.config, "regression_tps_pct", 10.0, strict_malformed=True
+        )
+    except RebenchError as exc:
+        _print({"status": "error", "error": str(exc)})
+        return EXIT_CONFIG
 
     try:
         if args.command == "gate":

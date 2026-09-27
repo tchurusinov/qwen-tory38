@@ -1,4 +1,38 @@
-# bench-results/ — live bench run output
+# bench-results/
+
+Committed bench summary artifacts (S5.2/S5.7). Per-row raw JSON lives under
+the install layout's `results_dir` (7-day rotation, 1 GB cap); this directory
+carries the committed, readable summaries + the S5.5 rebench baseline.
+
+## Pre-install live-run convention (until Phase 6's install.sh lands)
+
+Before install.sh exists, the bench has to point at its inputs explicitly,
+because the defaults assume the installed layout (`/run/bonsai2/bench`,
+`/opt/bonsai2/etc/harness.yaml`). A pre-install live run is:
+
+- `BONSAI2_CONFIG=<path to harness.yaml>` (the S3.2 hook; default is
+  `etc/harness.yaml` in the repo)
+- `BONSAI2_ENGINE_YAML=<path to subagent-engine.yaml>` (the engine identity
+  the runner reads for the pool ports + the quant/revision it records)
+- `--results-dir <writable dir>` (overrides the template's
+  `results_dir: /run/bonsai2/bench`; the runner creates it at run start)
+
+The default `results_dir` stays the installed path. Running pre-install
+without `--results-dir` is still fine (the dir is created at run time), but
+the config loader emits a WARN that names the flag: `results_dir: ... does
+not exist yet (will be created at run time) (override with --results-dir;
+see the pre-install convention in bench-results/README.md)`.
+
+A pre-install run of the full bench looks like:
+
+```bash
+BONSAI2_CONFIG=$PWD/etc/harness.yaml \
+BONSAI2_ENGINE_YAML=$PWD/etc/subagent-engine.yaml \
+python3 -m bench.run --results-dir /tmp/bonsai2-bench-preinstall
+```
+
+(The prod venv is the box Python; `python3 -m bench.run` from the repo root
+is equivalent to `bin/bonsai2-bench` minus the install-time path fixes.)
 
 The `bench/run.py` results dir (the S5.2 row JSONs + the summary .md the
 runner writes). Git-ignored by default (local, rotated: 7-day prune +
