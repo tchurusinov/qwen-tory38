@@ -67,7 +67,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -769,7 +768,14 @@ def _run_capability(
                 "usage": {},
                 "tool_log": [],
                 "steps": None,
-                "workdir": Path(tempfile.gettempdir()),
+                # G3c round-1 P2 (degraded workdir): the real staged dir was
+                # already rmtree'd in the driver's finally, so pointing at
+                # the shared tempdir (which still holds OTHER tasks' debris)
+                # would send a reader looking for this task's artifact in
+                # the wrong place. A named placeholder is honest: the
+                # workdir was cleaned; the scorer's file-check half fails
+                # against it by construction.
+                "workdir": "<staged-workdir: cleaned>",
                 "timing": {
                     "ok": False,
                     "elapsed_ms": 0.0,
@@ -919,6 +925,13 @@ def _run_scenario(
         # the measured aggregate (the S5.1 t/s-at-the-ceiling inputs:
         # total_wall_s + both t/s figures) is on the row for the reader
         # + the S5.5 baseline capture (bench/rebench.py save-baseline).
+        # G3c round-1 P2 (authoritative-figure guidance): this dict carries
+        # BOTH the serial and the wall t/s; the row's per-row
+        # total_elapsed_s / timing can disagree with them after a scenario
+        # retry, so name which is which for a reader — the S5.1 headline
+        # "t/s at the ceiling" is `aggregate_tps_wall` (== `aggregate_tps`,
+        # the S5.5 baseline read), and `aggregate_tps_serial` is the
+        # decode-throughput invariant recorded for comparison only.
         row["aggregate"] = agg
     return row
 
@@ -1022,13 +1035,33 @@ def _pool_release(
     import subprocess
 
     t0 = time.monotonic()
-    p = subprocess.run(
-        [sys.executable, unload_bin, "--all"],
-        capture_output=True,
-        text=True,
-        timeout=90,
-        check=False,
-    )
+    try:
+        # G3c round-1 P1: invoke the S3.2 script by its OWN
+        # shebang/interpreter, not the bench's python. Pre-install the
+        # script is a python3-shebang .py; a Phase-6 install may ship it
+        # as a bash wrapper (S3.2), and [sys.executable, unload_bin]
+        # would run that bash wrapper under the bench's python and crash
+        # the release path (the pre-install .py path only "worked" by
+        # accident). Executing the path directly hands it to its shebang.
+        p = subprocess.run(
+            [unload_bin, "--all"],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except OSError as exc:
+        # a present-but-not-launchable script (e.g. exec bit stripped) is
+        # a named skip, not an abort (H13: release is an optimization,
+        # not a correctness gate).
+        rec.update(
+            {
+                "note": f"skipped (unload not launchable: {exc.__class__.__name__})",
+                "unload_exit": None,
+                "s": round(time.monotonic() - t0, 3),
+            }
+        )
+        return rec
     unload_exit = p.returncode
     if unload_exit == 84:
         rec.update(
@@ -1051,13 +1084,29 @@ def _pool_release(
     rec["unload_exit"] = 0
     if kind == "between" and reload_bin:
         t0 = time.monotonic()
-        p = subprocess.run(
-            [sys.executable, reload_bin, "--all"],
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
+        try:
+            # G3c round-1 P1 (reload side, same class as the unload side):
+            # invoke the S3.2 script by its own shebang/interpreter, not
+            # the bench's python (pre-install .py vs Phase-6 bash wrapper).
+            p = subprocess.run(
+                [reload_bin, "--all"],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=False,
+            )
+        except OSError as exc:
+            # a not-launchable reload script is a named partial (the
+            # instances the manager already has keep serving; the bench
+            # records, never enforces).
+            rec.update(
+                {
+                    "note": f"partial (reload not launchable: {exc.__class__.__name__})",
+                    "reload_exit": None,
+                    "reload_s": round(time.monotonic() - t0, 3),
+                }
+            )
+            return rec
         reload_exit = p.returncode
         reload_s = round(time.monotonic() - t0, 3)
         # S2.8 30 s reload budget (post-amendment): the reload is

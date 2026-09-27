@@ -82,9 +82,12 @@ def _match(answer: str, golden: str) -> bool:
     # set. Ordered containment above remains the strict special case.
     g_tokens = _tokens(g)
     if not g_tokens:
-        # a golden that is ALL stop words (e.g. "and") — fall back to the
-        # raw containment (unchanged behavior for that degenerate case).
-        return g in a
+        # a golden that is ALL stop words (e.g. "an") — the token-set half
+        # is vacuous, so fall back to a WHOLE-WORD containment (a bare
+        # stop-word golden must match "an" as a word, not as a substring
+        # of "banana"; G3c round-1 P2). No golden answer is a bare stop
+        # word today, so this only hardens the degenerate path.
+        return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
     return g_tokens <= _tokens(a)
 
 

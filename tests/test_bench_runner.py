@@ -449,11 +449,49 @@ class ReleaseFlagsTest(MockRunTestBase):
         # record is "skipped (84)" and the run CONTINUES (release is an
         # optimization, not a correctness gate). Drive the real
         # _pool_release with a fake unload script that exits 84.
+        # G3c round-1 P1: the release path now execs the S3.2 script by its
+        # OWN shebang/interpreter, so the fake must be a launchable
+        # python3-shebang .py (the pre-install S3.2 shape) with the exec
+        # bit — a bare no-shebang / no-exec-bit file would hit the new
+        # "not launchable" skip edge, not the 84 path.
         script = self.tmp / "fake_unload.py"
-        script.write_text("import sys\nsys.exit(84)\n")
+        script.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(84)\n")
+        import os as _os
+
+        _os.chmod(str(script), 0o755)
         rec = bench_run._pool_release("after", str(script), None, mock=False)
         self.assertEqual(rec["note"], "skipped (84)")
         self.assertEqual(rec["unload_exit"], 84)
+        self.assertEqual(rec["tier"], 2)
+
+    def test_pool_release_bash_wrapper_is_executed_by_shebang(self):
+        # G3c round-1 P1: post-install the S3.2 scripts may be bash
+        # wrappers (S3.2); the release path must exec the path directly
+        # (its shebang), not run it under the bench's python. A bash
+        # wrapper that prints a marker + exits 0 must come back "done",
+        # not crash (the old [sys.executable, bin] shape would have run
+        # the bash wrapper under python -> exit 1).
+        wrapper = self.tmp / "fake_unload_wrapper"
+        wrapper.write_text("#!/usr/bin/env bash\necho 'wrapper ok'\nexit 0\n")
+        import os as _os
+
+        _os.chmod(str(wrapper), 0o755)
+        rec = bench_run._pool_release("after", str(wrapper), None, mock=False)
+        self.assertEqual(rec["unload_exit"], 0)
+        self.assertEqual(rec["note"], "done")
+
+    def test_pool_release_not_launchable_is_a_named_skip(self):
+        # G3c round-1 P1 edge: a present-but-not-launchable script (exec
+        # bit stripped) is a named skip, not an abort — the run continues
+        # (H13: release is an optimization, not a correctness gate).
+        script = self.tmp / "fake_unload_noperm"
+        script.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        import os as _os
+
+        _os.chmod(str(script), 0o644)
+        rec = bench_run._pool_release("after", str(script), None, mock=False)
+        self.assertIn("not launchable", rec["note"])
+        self.assertIsNone(rec["unload_exit"])
         self.assertEqual(rec["tier"], 2)
 
     def test_pool_release_no_bin_is_skipped(self):
