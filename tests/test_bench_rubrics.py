@@ -30,7 +30,13 @@ from __future__ import annotations
 import unittest
 
 from bench.exec import TaskResult
-from bench.score import goldens, m1, m2, m3, m4, m5, m6, m7, m8
+from bench.score import goldens, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10
+
+# The MAP 4.9 canned capability result (the M9/M10 hermetic seam) — a
+# RELATIVE import (the hermetic-suite fixture convention, S6.6; the smoke
+# stdlib-only check skips relative imports, and bench_mock's top-level
+# import chain is stdlib-only: the `bench` dep is local inside _run).
+from .fixtures.bench_mock import mock_cap as _mock_cap
 
 
 class M1RubricTest(unittest.TestCase):
@@ -317,6 +323,194 @@ class M6RubricTest(unittest.TestCase):
         v = m6.score({"main_tps": 40.0, "verdicts": verdicts})
         self.assertFalse(v["pass"])
         self.assertEqual(v["extra"]["per_shape"]["M4"], False)
+
+
+class M9RubricTest(unittest.TestCase):
+    """MAP 4.9 M9 rubric golden in/out pairs (hermetic)."""
+
+    def _payload(self, workdir, tool_log, funcs=None):
+        from bench.score import goldens
+
+        if funcs is None:
+            funcs = [
+                f["function"] if isinstance(f, dict) else str(f)
+                for f in goldens.m9_spec().get("spec_functions", [])
+            ]
+        return {
+            "workdir": str(workdir),
+            "tool_log": tool_log,
+            "answer": "Suite passed: Ran 3 tests, OK (exit 0).",
+            "module_name": "textkit",
+            "suite_file": "test_textkit.py",
+            "run_command": "python -m unittest test_textkit",
+            "spec_functions": funcs,
+        }
+
+    def _suite_run_entry(self, exit_code=0):
+        return {
+            "step": 3,
+            "tool": "bash",
+            "params": {"cmd": "python -m unittest test_textkit"},
+            "exit_code": exit_code,
+            "output": "Ran 3 tests in 0.001s\nOK",
+            "duration_ms": 40,
+        }
+
+    def _workdir_with_module(self, module_src):
+        import tempfile
+        from pathlib import Path
+
+        wd = Path(tempfile.mkdtemp(prefix="bonsai2-m9-test-"))
+        (wd / "textkit.py").write_text(module_src)
+        (wd / "test_textkit.py").write_text(goldens.m9_suite_source())
+        return wd
+
+    def test_golden_capability_result_passes(self):
+        res = _mock_cap("M9", "host")
+        v = m9.score(bench_mock_mod_payload("M9", res))
+        self.assertTrue(v["pass"], v)
+        self.assertEqual(v["score"], 1.0)
+        self.assertTrue(v["extra"]["main_rerun"]["pass"], v)
+        self.assertTrue(v["extra"]["tool_log"]["pass"], v)
+        self.assertTrue(v["extra"]["functions"]["pass"], v)
+
+    def test_missing_suite_run_in_tool_log_scores_2_3(self):
+        import tempfile
+        from pathlib import Path
+
+        wd = Path(tempfile.mkdtemp(prefix="bonsai2-m9-test-"))
+        (wd / "textkit.py").write_text(goldens.m9_module_source())
+        v = m9.score(
+            self._payload(
+                wd,
+                [
+                    {
+                        "step": 1,
+                        "tool": "write_file",
+                        "params": {"path": "x"},
+                        "exit_code": 0,
+                        "output": "ok",
+                    }
+                ],
+            )
+        )
+        self.assertFalse(v["pass"])
+        self.assertAlmostEqual(v["score"], 2.0 / 3.0, places=5)
+        self.assertFalse(v["extra"]["tool_log"]["pass"])
+        # the suite is NOT in the workdir -> the functions check fails too
+        # (workdir has no test_textkit.py), but the module does -> 2/3
+        # is main_re-run + functions; re-run is always the golden.
+        self.assertTrue(v["extra"]["main_rerun"]["pass"])
+
+    def test_nonzero_suite_run_scores_2_3(self):
+        import tempfile
+        from pathlib import Path
+
+        wd = Path(tempfile.mkdtemp(prefix="bonsai2-m9-test-"))
+        (wd / "textkit.py").write_text(goldens.m9_module_source())
+        (wd / "test_textkit.py").write_text(goldens.m9_suite_source())
+        v = m9.score(self._payload(wd, [self._suite_run_entry(exit_code=1)]))
+        self.assertFalse(v["pass"])
+        self.assertAlmostEqual(v["score"], 2.0 / 3.0, places=5)
+        self.assertFalse(v["extra"]["tool_log"]["pass"])
+
+    def test_workdir_missing_a_function_scores_2_3(self):
+        import tempfile
+        from pathlib import Path
+
+        wd = Path(tempfile.mkdtemp(prefix="bonsai2-m9-test-"))
+        # the golden module minus one spec function (drop truncate)
+        src = goldens.m9_module_source()
+        lines = []
+        skipping = False
+        for line in src.splitlines(keepends=True):
+            if line.startswith("def truncate("):
+                skipping = True
+                continue
+            if skipping and line.startswith("def "):
+                skipping = False
+            if not skipping:
+                lines.append(line)
+        (wd / "textkit.py").write_text("".join(lines))
+        (wd / "test_textkit.py").write_text(goldens.m9_suite_source())
+        v = m9.score(self._payload(wd, [self._suite_run_entry()]))
+        self.assertFalse(v["pass"])
+        self.assertFalse(v["extra"]["functions"]["pass"])
+        self.assertEqual(v["extra"]["functions"]["n_present"], 2)
+        self.assertEqual(v["extra"]["functions"]["n_expected"], 3)
+        self.assertAlmostEqual(v["score"], 2.0 / 3.0, places=5)
+
+
+class M10RubricTest(unittest.TestCase):
+    """MAP 4.9 M10 rubric golden in/out pairs (hermetic)."""
+
+    def test_golden_report_passes(self):
+        import json
+
+        v = m10.score({"report": json.dumps(goldens.m10_expected_report())})
+        self.assertTrue(v["pass"], v)
+        self.assertEqual(v["score"], 1.0)
+        self.assertTrue(v["extra"]["parse"]["pass"])
+        self.assertEqual(v["extra"]["coverage"]["n_files"], 10)
+        self.assertEqual(v["extra"]["rerun"]["n_agree"], 2)
+
+    def test_wrong_spot_claim_scores_2_3(self):
+        """A report that claims files_003 passed when the golden module
+        fails -> the 2/10 main re-run observes the fail, the verdicts
+        disagree -> the re-run half drops (the S5.9 #5 spot catch)."""
+        import json
+
+        report = goldens.m10_expected_report()
+        for entry in report["files"]:
+            if entry["file"] == "files_003.py":
+                entry["status"] = "pass"
+                entry["exit_code"] = 0
+        v = m10.score({"report": json.dumps(report)})
+        self.assertFalse(v["pass"])
+        self.assertFalse(v["extra"]["rerun"]["pass"])
+        self.assertEqual(v["extra"]["rerun"]["n_agree"], 1)
+
+    def test_9_file_report_scores_0_9667(self):
+        import json
+
+        report = goldens.m10_expected_report()
+        report["files"] = report["files"][:9]
+        v = m10.score({"report": json.dumps(report)})
+        self.assertFalse(v["pass"])
+        self.assertFalse(v["extra"]["coverage"]["pass"])
+        # the M10 score is the BLEND of the three halves (S5.3 rubric-
+        # score shape): parse 1.0 + coverage 0.9 + re-run agreement
+        # 1.0 (the 2/10 spot files are still covered, the spot is
+        # files_003/007 — the dropped 10th is not in the spot set) ->
+        # (1 + 0.9 + 1) / 3 = 0.9667 (the coverage HALF is 0.9; the
+        # blend is the documented score).
+        self.assertAlmostEqual(v["score"], (1.0 + 0.9 + 1.0) / 3.0, places=5)
+
+    def test_unparseable_report_fails(self):
+        v = m10.score({"report": "{not json"})
+        self.assertFalse(v["pass"])
+        self.assertFalse(v["extra"]["parse"]["pass"])
+
+
+def bench_mock_mod_payload(sid, res):
+    """The M9/M10 runner payload from a canned capability result (mirrors
+    ``bench.run._capability_payload`` without importing the runner)."""
+    from bench.score import goldens as g
+
+    if sid == "M9":
+        return {
+            "workdir": str(res.get("workdir")),
+            "tool_log": res.get("tool_log") or [],
+            "answer": res.get("answer") or "",
+            "module_name": "textkit",
+            "suite_file": "test_textkit.py",
+            "run_command": "python -m unittest test_textkit",
+            "spec_functions": [
+                f["function"] if isinstance(f, dict) else str(f)
+                for f in g.m9_spec().get("spec_functions", [])
+            ],
+        }
+    return {"report": res.get("answer") or ""}
 
 
 class VerdictShapeTest(unittest.TestCase):

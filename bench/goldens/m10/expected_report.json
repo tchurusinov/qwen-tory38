@@ -1,0 +1,19 @@
+{
+  "scenario": "M10",
+  "rubric": "M10",
+  "description": "Golden M10 test-batch report: the S5.2 'report JSON parseable + 10/10 files covered + main re-runs 2/10 files and the verdicts agree' shape. The M10 scorer (bench.score.m10) scores a subagent's tool-loop report against THIS shape: it must (a) parse as JSON, (b) cover all 10 files with a per-file pass/fail verdict, and (c) agree with main's 2/10 spot re-run (the S5.9 #5 'verdicts agree'). The 10 files are files_000.py..files_009.py; 8 pass, 2 fail (files_003.py and files_007.py, the seeded failures in the M10 golden batch).",
+  "n_files": 10,
+  "files": [
+    {"file": "files_000.py", "status": "pass", "exit_code": 0, "duration_ms": 240},
+    {"file": "files_001.py", "status": "pass", "exit_code": 0, "duration_ms": 235},
+    {"file": "files_002.py", "status": "pass", "exit_code": 0, "duration_ms": 231},
+    {"file": "files_003.py", "status": "fail", "exit_code": 1, "duration_ms": 258},
+    {"file": "files_004.py", "status": "pass", "exit_code": 0, "duration_ms": 244},
+    {"file": "files_005.py", "status": "pass", "exit_code": 0, "duration_ms": 239},
+    {"file": "files_006.py", "status": "pass", "exit_code": 0, "duration_ms": 236},
+    {"file": "files_007.py", "status": "fail", "exit_code": 1, "duration_ms": 261},
+    {"file": "files_008.py", "status": "pass", "exit_code": 0, "duration_ms": 233},
+    {"file": "files_009.py", "status": "pass", "exit_code": 0, "duration_ms": 237}
+  ],
+  "summary": {"n_files": 10, "n_pass": 8, "n_fail": 2, "covered": 10}
+}

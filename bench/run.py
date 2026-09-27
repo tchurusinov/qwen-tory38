@@ -38,11 +38,15 @@ the S5.8 test (the canned executor builds TaskResults through
 ``bench.exec.score_stream`` over canned (ts, chunk) pairs — the S5.8
 "timings sane" assertion).
 
-M9/M10 in this phase (MAP 4.1-4.8): their S5.3 rubrics (main-side re-runs)
-land in MAP 4.9. Until then a selected M9/M10 row still RUNS its task(s) on
-the subagent pool (the capability-layer t/s + box state are recorded) and
-carries a named pending verdict (row ``fail``, detail "scorer lands in MAP
-4.9") — exit 0 even on scenario-level failures (S5.4).
+M9/M10 (the S5.2 capability-layer rows, MAP 4.9): they run through the
+REAL subagent tool loop (``bench.capability``) in BOTH ``tool_execution``
+modes (host + engine — the S5.2 "run in both modes; the run records the
+mode in the row"), score via the S5.9 #5 main-side re-runs
+(``bench.score.m9`` / ``.m10``), and record the host-vs-engine comparison in
+the row. The hermetic seam is ``--mock-cap MODULE:FN`` (canned capability
+results, ``tests.fixtures.bench_mock:mock_cap`` — zero network/GPU, the
+S5.8 "timings sane" convention). The box-state snapshot + rotation are
+shared (S5.2); exit 0 even on scenario-level failures (S5.4).
 """
 
 from __future__ import annotations
@@ -63,8 +67,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from bench import boxstate, config, endpoints, report, scenarios
+from bench import capability as bcap
 from bench import exec as bexec
 from bench import score as bscore
+from bench.exec import TaskResult
 from bench.rotate import BenchLock
 from bench.rotate import rotate as rotate_dir
 from bench.score import goldens
@@ -72,10 +78,12 @@ from bench.score import goldens
 EXIT_OK = 0
 EXIT_CONFIG = 2
 
-# M9/M10 rows are run-but-pending until MAP 4.9 lands the capability
-# scorers (the S5.7 note: M9/M10 are full-bench-only, their rubrics need
-# main-side re-runs).
-_PENDING_CAPABILITY = ("M9", "M10")
+# M9/M10 are the S5.2 capability-layer rows (MAP 4.9): they run through
+# the REAL subagent tool loop in both tool_execution modes and score via
+# the S5.9 #5 main-side re-runs (the capability path, _run_capability).
+# The set is also the _prompts_for fallback for the canned M9/M10 prompt
+# shape (the S5.2 task shapes).
+_CAPABILITY = ("M9", "M10")
 # The S5.2 "M8 main t/s guardrail" needs the M6 control baseline; M6 is
 # ordered before M8 in every run that carries both.
 _M6_BEFORE = "M6"
@@ -138,7 +146,7 @@ def _prompts_for(sid: str, n_tasks: int) -> list[str]:
         ]
     if sid == "M6":
         return ["[M6] Control: complete the task."]
-    if sid in _PENDING_CAPABILITY:
+    if sid in _CAPABILITY:
         shape = scenarios.get(sid).get("shape", sid)
         return ["[M9] " + shape if sid == "M9" else "[M10] " + shape]
     # M7 / M8: the throughput shapes (short, repeatable tasks).
@@ -213,6 +221,22 @@ def _load_mock_executor(spec: str):
     fn = getattr(mod, fn_name)
     if not callable(fn):
         raise config.ConfigError(f"--mock {spec!r} is not callable")
+    return fn
+
+
+def _load_mock_cap(spec: str):
+    """The S5.8/4.9 canned capability result: import ``<module>:<fn>`` from
+    the repo root. ``fn(sid, tool_execution, root=None) -> dict`` (the
+    ``bench.capability.run_mode`` output shape — the runner's capability
+    row consumes it identically; canned tool-loop results, zero
+    network/GPU, the S5.8 "timings sane" convention)."""
+    if ":" not in spec:
+        raise config.ConfigError(f"--mock-cap needs a module:fn spec, got {spec!r}")
+    mod_name, fn_name = spec.split(":", 1)
+    mod = importlib.import_module(mod_name)
+    fn = getattr(mod, fn_name)
+    if not callable(fn):
+        raise config.ConfigError(f"--mock-cap {spec!r} is not callable")
     return fn
 
 
@@ -396,6 +420,7 @@ def run(
     quick: bool = False,
     scenario: str | None = None,
     mock_spec: str | None = None,
+    mock_cap_spec: str | None = None,
     deadline_s: float = 600.0,
     max_tokens: int | None = None,
     spotcheck: float | None = None,
@@ -408,6 +433,8 @@ def run(
     quick: the S5.5 quick bench (M1+M2+M7).
     scenario: run ONE scenario id (a single-row re-run / the S5.8 dogfood).
     mock_spec: the S5.8 ``module:fn`` canned executor (hermetic).
+    mock_cap_spec: the S5.8/4.9 ``module:fn`` canned capability result
+    (hermetic M9/M10: ``fn(sid, tool_execution, root=None) -> dict``).
     spotcheck: the M3 spot-check value (the S5.3 main/human-judgment seam;
     the live main agent reads 1/3 of the sections and supplies this).
     """
@@ -428,6 +455,7 @@ def run(
     try:
         sids = _select_scenarios(cfg, quick, scenario)
         mock = _load_mock_executor(mock_spec) if mock_spec else None
+        mock_cap = _load_mock_cap(mock_cap_spec) if mock_cap_spec else None
         engine = endpoints.load_engine_identity()
         harness = endpoints.load_harness_main()
         n_pool, _ = endpoints.subagent_ports(engine)
@@ -441,12 +469,20 @@ def run(
                 harness,
                 n_pool,
                 mock,
+                mock_cap,
                 deadline_s,
                 max_tokens,
                 m6_baseline,
             )
             rows.append(row)
             report.write_row(row, results_dir, sid)
+            # the capability row (S5.2 both modes) carries the second-mode
+            # row: write it too (the `<ts>_<sid>_engine.json` sibling) so
+            # the host-vs-engine comparison is in the run JSON on disk,
+            # not only inline (S5.9 #5).
+            cap_row = row.get("capability_comparison_engine_row")
+            if isinstance(cap_row, dict):
+                report.write_row(cap_row, results_dir, f"{sid}_engine")
             if sid == "M6":
                 m6_baseline = row.get("main_tps")
         summary_path = report.write_summary(
@@ -516,6 +552,177 @@ def _concurrency(sid: str, n_pool: int) -> int | None:
     return max(1, int(c))
 
 
+# --------------------------------------------------------------------------
+# the capability-layer path (M9/M10, MAP 4.9): both tool_execution modes
+# --------------------------------------------------------------------------
+def _capability_payload(sid: str, res: dict, root: str | None) -> dict:
+    """The S5.9 #5 main-side re-run payload for one capability result (the
+    scorer's input shape — the workdir + the tool-loop ledger + the
+    subagent's claim)."""
+    if sid == "M9":
+        return {
+            "workdir": str(res.get("workdir")),
+            "tool_log": res.get("tool_log") or [],
+            "answer": res.get("answer") or "",
+            "module_name": "textkit",
+            "suite_file": "test_textkit.py",
+            "run_command": "python -m unittest test_textkit",
+            "spec_functions": [
+                f["function"] if isinstance(f, dict) else str(f)
+                for f in bscore.goldens.m9_spec(root).get("spec_functions", [])
+            ],
+        }
+    return {"report": res.get("answer") or ""}
+
+
+def _capability_mode_row(sid: str, mode: str, res: dict, snap: dict, cfg: dict) -> dict:
+    """Build + score ONE capability task (M9/M10) in ONE tool_execution
+    mode into the S5.2 row shape (the S5.4 "one JSON row per scenario"
+    contract, extended with the tool_execution mode). The S5.2 "the run
+    records the mode in the row" half: ``tool_execution_mode``. The box-
+    state snapshot is shared (S5.2); scoring is the S5.9 #5 main-side
+    re-run (the m9/m10 scorer plugins, ``bench.score``)."""
+    root = _goldens_root(cfg)
+    verdict = _score_capability(sid, res, root)
+    timing = res.get("timing") or {}
+    task = TaskResult(
+        ok=bool(res.get("state") == "done"),
+        answer=res.get("answer") or "",
+        reasoning=res.get("reasoning") or "",
+        usage=res.get("usage") or {},
+        prompt_tokens=timing.get("prompt_tokens"),
+        completion_tokens=timing.get("completion_tokens"),
+        time_to_first_token_ms=timing.get("time_to_first_token_ms"),
+        elapsed_ms=timing.get("elapsed_ms"),
+        n_content_chunks=timing.get("n_content_chunks") or (res.get("steps") or 0),
+        decode_tps=timing.get("decode_tps"),
+        error=res.get("error"),
+        detail=None,
+    )
+    row = report.build_row(
+        sid,
+        [task],
+        verdict,
+        snap,
+        cfg,
+        None,
+        box_root=_REPO_ROOT,
+    )
+    row["tool_execution_mode"] = mode
+    row["tool_execution"] = "on"
+    row["capability"] = {
+        "task_id": res.get("task_id"),
+        "state": res.get("state"),
+        "error": res.get("error"),
+        "tool_log": res.get("tool_log") or [],
+        "steps": res.get("steps"),
+        "workdir": str(res.get("workdir") or ""),
+    }
+    return row
+
+
+def _score_capability(sid: str, res: dict, root: str | None) -> dict:
+    """Score one capability task with its S5.3 rubric (the S5.9 #5
+    main-side re-run: m9 / m10)."""
+    payload = _capability_payload(sid, res, root)
+    if sid == "M9":
+        return bscore.m9.score(payload, root=root)
+    if sid == "M10":
+        return bscore.m10.score(payload, root=root)
+    return bscore._common.verdict(False, 0.0, f"no capability rubric for {sid!r}")
+
+
+def _run_capability(
+    sid: str,
+    cfg: dict,
+    engine: dict,
+    harness: dict,
+    n_pool: int,
+    mock_cap,
+    deadline_s: float,
+    snap: dict,
+) -> dict:
+    """Run the M9/M10 capability row (S5.2 "run in both tool_execution
+    modes (host and engine); the run records the mode in the row"):
+    execute ONE capability task in EACH mode (the real harness tool loop
+    via ``bench.capability.run_mode``, or the ``mock_cap`` canned results
+    for the S5.8 hermetic run), score each via the S5.9 #5 main-side
+    re-runs, and record the host-vs-engine comparison in the row
+    (S5.9 #5). Both mode rows carry the box-state snapshot (S5.2).
+
+    Returns the canonical row (the host-mode row) with the second-mode
+    verdict + the comparison stashed under ``capability_comparison``; the
+    caller writes BOTH rows to the results dir (the host row is the
+    canonical one, the engine row is written as
+    ``<ts>_<sid>_engine.json``)."""
+    modes = ("host", "engine")
+    rows = []
+    for mode in modes:
+        if mock_cap is not None:
+            res = mock_cap(sid, mode, _goldens_root(cfg))
+        else:
+            res = _capability_live(sid, cfg, engine, harness, n_pool, mode, deadline_s)
+        rows.append(_capability_mode_row(sid, mode, res, snap, cfg))
+    host, engine_row = rows[0], rows[1]
+    # S5.9 #5 "the host-vs-engine tool_execution comparison is recorded in
+    # the run JSON": both verdicts + whether they agree + the per-mode t/s.
+    comparison = {
+        "host": {"row_verdict": host["row_verdict"], "score": host["verdict"]["score"]},
+        "engine": {
+            "row_verdict": engine_row["row_verdict"],
+            "score": engine_row["verdict"]["score"],
+        },
+        "agree": host["row_verdict"] == engine_row["row_verdict"],
+        "host_tps": host["tasks"][0].get("decode_tps"),
+        "engine_tps": engine_row["tasks"][0].get("decode_tps"),
+    }
+    host["capability_comparison"] = comparison
+    host["capability_comparison_engine_row"] = engine_row
+    return host
+
+
+def _engine_port_base(engine: dict) -> int:
+    """The subagent pool's port_base (S1.3; the S5.4 endpoint resolver's
+    convention, defaulted to 30101). The 0-pool capability fallback
+    routes to the first pool port."""
+    inst = engine.get("instances", {})
+    base = inst.get("port_base", 30101)
+    return base if isinstance(base, int) and not isinstance(base, bool) else 30101
+
+
+def _capability_live(
+    sid: str,
+    cfg: dict,
+    engine: dict,
+    harness: dict,
+    n_pool: int,
+    mode: str,
+    deadline_s: float,
+) -> dict:
+    """One capability task in ONE mode through the REAL harness tool loop
+    (``bench.capability.run_mode`` — cmd_spawn + the Popen'd
+    bonsai2-taskworker). The instance port is the pool's first (S5.2
+    M9/M10: 1 instance); a 0-pool falls back to the engine's port_base
+    (the S2.4 main-only convention: the loop still needs an instance port
+    to route to, so the first pool port stands in)."""
+    eps = endpoints.resolve_for_scenario(sid, engine, harness, n_pool)
+    if eps and eps[0].get("kind") == "subagent":
+        port = eps[0]["port"]
+        main_ep = endpoints.main_endpoint(harness)["url"]
+    else:
+        port = _engine_port_base(engine)
+        main_ep = None
+    return bcap.run_mode(
+        sid,
+        mode,
+        root=_goldens_root(cfg),
+        deadline_s=deadline_s,
+        instance_port=port,
+        main_endpoint=main_ep,
+        engine_yaml=os.environ.get("BONSAI2_ENGINE_YAML"),
+    )
+
+
 def _run_scenario(
     sid: str,
     cfg: dict,
@@ -523,6 +730,7 @@ def _run_scenario(
     harness: dict,
     n_pool: int,
     mock,
+    mock_cap,
     deadline_s: float,
     max_tokens: int | None,
     m6_baseline: float | None,
@@ -531,8 +739,13 @@ def _run_scenario(
     concurrency column), score (the S5.3 rubric), build the row (with the
     S5.2 box-state snapshot). A scenario-level failure is a row verdict
     (fail), not an error (the S5.4 "exit 0 even on scenario-level
-    failures" rule)."""
+    failures" rule). M9/M10 take the capability path (the S5.2 dual
+    tool_execution modes, MAP 4.9)."""
     snap = boxstate.snapshot()
+    if sid in scenarios.CAPABILITY:
+        return _run_capability(
+            sid, cfg, engine, harness, n_pool, mock_cap, deadline_s, snap
+        )
     if sid == "M6":
         return _run_m6_control(cfg, harness, mock, deadline_s, snap)
     if sid == "M8":
@@ -564,23 +777,7 @@ def _run_scenario(
         return exec_one(prompt, ep_by_prompt[prompt])
 
     tasks, _agg = bexec.run_concurrent(prompts, conc, exec_prompt)
-    if sid in _PENDING_CAPABILITY:
-        # MAP 4.9 lands the capability scorers; until then the row runs
-        # its task(s) (t/s + box state recorded) with a named pending
-        # verdict (the S5.4 "failure is data" rule).
-        verdict = bscore._common.verdict(
-            False,
-            0.0,
-            f"{sid}: task ran; rubric scorer lands in MAP 4.9 "
-            f"(main-side re-run); row recorded pending",
-            {
-                "pending": "4.9",
-                "n_tasks": len(tasks),
-                "n_ok": sum(1 for t in tasks if t.ok),
-            },
-        )
-    else:
-        verdict = _score_shape(sid, tasks, cfg)
+    verdict = _score_shape(sid, tasks, cfg)
     row = report.build_row(sid, tasks, verdict, snap, cfg, None, box_root=_REPO_ROOT)
     row["concurrency"] = conc
     row["n_tasks"] = len(tasks)
@@ -711,6 +908,11 @@ def main(argv: list[str] | None = None) -> int:
         help="the S5.8 mock-endpoint executor (hermetic; fn(prompt,endpoint)->TaskResult)",
     )
     ap.add_argument(
+        "--mock-cap",
+        metavar="MODULE:FN",
+        help="the S5.8/4.9 canned capability result (hermetic M9/M10; fn(sid,tool_execution,root=None)->dict)",
+    )
+    ap.add_argument(
         "--config",
         default=None,
         help="bench.yaml path (default: the tracked template, or $BONSAI2_BENCH_CONFIG)",
@@ -759,6 +961,7 @@ def main(argv: list[str] | None = None) -> int:
             quick=args.quick,
             scenario=args.scenario,
             mock_spec=args.mock,
+            mock_cap_spec=args.mock_cap,
             deadline_s=args.deadline_s,
             max_tokens=args.max_tokens,
             spotcheck=args.spotcheck,

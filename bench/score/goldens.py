@@ -95,3 +95,42 @@ def m5_qa(root: str | Path | None = None) -> dict:
     """The M5 QA golden: {"doc": str, "questions": [q, ...],
     "answers": [a, ...]} (5 pairs, binary-scored)."""
     return load_json("m5", "qa.json", root)
+
+
+def m9_spec(root: str | Path | None = None) -> dict:
+    """The M9 spec-chunk fixture (the S5.2 'small library spec with 3
+    functions + a 3-case suite'). Returns the golden spec dict
+    (module_name, suite_file, run_command, spec_functions, spec)."""
+    return load_json("m9", "m9spec.json", root)
+
+
+def m9_module_source(root: str | Path | None = None) -> str:
+    """The M9 golden solution module source (the reference the S5.8 mock
+    tool-loop writes into the workdir)."""
+    return load_text("m9", "textkit.py", root)
+
+
+def m9_suite_source(root: str | Path | None = None) -> str:
+    """The M9 golden 3-case test suite source (the reference the S5.8
+    mock tool-loop writes into the workdir and the runner re-runs)."""
+    return load_text("m9", "test_textkit.py", root)
+
+
+def m10_expected_report(root: str | Path | None = None) -> dict:
+    """The M10 golden 10-file test-batch report (the S5.2 'report JSON
+    parseable + 10/10 files covered' shape; 8 pass, 2 seeded fails)."""
+    return load_json("m10", "expected_report.json", root)
+
+
+def m10_batch_sources(
+    root: str | Path | None = None,
+) -> dict[str, str]:
+    """The M10 golden 10-file batch: {filename: source}. The files are
+    ``files_000.py`` .. ``files_009.py``; files_003 and files_007 are the
+    seeded FAIL modules (the S5.3 rubric's main-side re-run re-runs these
+    and must OBSERVE the fail)."""
+    out: dict[str, str] = {}
+    for i in range(10):
+        name = f"files_{i:03d}.py"
+        out[name] = load_text("m10", name, root)
+    return out

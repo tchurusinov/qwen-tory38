@@ -49,6 +49,7 @@ BENCH_CONFIG_DEFAULTS: dict = {
     "results_dir": "/run/bonsai2/bench",
     "goldens_dir": "bench/goldens",
     "main_guardrail_pct": 5,  # mirrors harness.yaml main_tps_guardrail_pct
+    "rebench_baseline": "bench-results/rebench-baseline.json",  # S5.5/4.11: the last-accepted quick-bench baseline
 }
 
 _DEFAULT_TEMPLATE = os.path.join(

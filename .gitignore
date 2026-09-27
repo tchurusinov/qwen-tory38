@@ -1,3 +1,6 @@
 scr.txt
 test-logs/
 __pycache__/
+
+# bench run output (local; the 4.10 live run files are force-tracked, see commit notes)
+bench-results/

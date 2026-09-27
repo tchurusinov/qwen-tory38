@@ -1,0 +1,26 @@
+{
+  "scenario": "M9",
+  "rubric": "M9",
+  "description": "Golden M9 spec-chunk: a small library spec with 3 functions + a 3-case suite (the S5.2 M9 fixture: 'implement a bounded spec chunk (fixture: a small library spec with 3 functions + a 3-case suite)'). The subagent's tool loop is asked to implement the 3 spec functions in a module, write the 3-case suite, and RUN the suite (bash, exit 0). The M9 scorer (bench.score.m9) is the S5.9 #5 'main-side re-run' rubric: (a) the suite the subagent claims to have passed actually passes when MAIN re-runs it (exit 0); (b) the tool_log shows the test run with exit 0; (c) the spec's 3 functions exist in the workdir.",
+  "module_name": "textkit",
+  "suite_file": "test_textkit.py",
+  "run_command": "python -m unittest test_textkit",
+  "spec_functions": ["slugify", "title_case", "truncate"],
+  "spec": [
+    {
+      "function": "slugify",
+      "signature": "slugify(text: str) -> str",
+      "behavior": "Return a lowercase, hyphen-joined slug of `text`: keep only alphanumeric characters, replace runs of spaces and non-alphanumeric characters with a single hyphen, and strip leading/trailing hyphens. Empty / all-non-alphanumeric input -> ''."
+    },
+    {
+      "function": "title_case",
+      "signature": "title_case(text: str) -> str",
+      "behavior": "Return `text` with the first alphabetic character of each whitespace-delimited word upper-cased and the remaining characters lower-cased (case-preserving words stay as-is when they have no letters). Empty input -> ''."
+    },
+    {
+      "function": "truncate",
+      "signature": "truncate(text: str, max_len: int) -> str",
+      "behavior": "Return `text` unchanged when len(text) <= max_len. When len(text) > max_len and max_len >= 3, return the first (max_len - 3) characters followed by the ellipsis '...' (the result is exactly max_len characters long). When max_len < 3, return ''."
+    }
+  ]
+}
