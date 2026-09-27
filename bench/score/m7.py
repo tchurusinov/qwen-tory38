@@ -61,9 +61,15 @@ def score(payload: dict, root=None) -> dict:
     if not isinstance(agg, dict):
         return verdict(False, 0.0, "M7: no concurrency aggregate in payload")
     # H9 (post-live-run): the headline "t/s at the ceiling" is the BATCH
-    # WALL figure. Prefer the explicit wall key; fall back to the legacy
-    # ``aggregate_tps`` (which pre-amendment was the serial sum — recorded
-    # in the run JSON that predates the amendment).
+    # WALL figure. Prefer the explicit wall key. G3c round-2 P2: the
+    # fallback to ``aggregate_tps`` only fires for PRE-AMENDMENT rows,
+    # whose aggregate predates the wall measurement and carries ONLY the
+    # serial sum (``aggregate_tps`` == ``aggregate_tps_serial`` there).
+    # So a legacy row is scored on the serial figure not by mistake but
+    # because the wall figure was never measured for it — the best
+    # available denominator, not a wrong one. Post-amendment rows always
+    # carry ``aggregate_tps_wall`` (and ``aggregate_tps`` aliases it), so
+    # the fallback is dead code for them.
     tps = agg.get("aggregate_tps_wall")
     if not isinstance(tps, (int, float)):
         tps = agg.get("aggregate_tps")

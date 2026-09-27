@@ -56,6 +56,15 @@ _WS_RE = re.compile(r"\s+")
 # Matched as whole words only (a value like "an80" keeps its "an" — the
 # _NORM_RE already bounds tokens by punctuation/word characters).
 _STOP = frozenset({"and", "or", "the", "a", "an"})
+# G3c round-2 P2 (H8 hardening): token extraction for the H8 tolerant
+# half. The normalized string keeps commas ("m1, m2, m7"), and a naive
+# split() would leave the comma attached to the token ("m1," != "m1"),
+# so the token-set half only matched when the answer used the EXACT
+# same comma placement — the live regression was saved only because the
+# conjunction was "and" and the tokens happened to align. Extracting the
+# alnum/underscore runs treats commas as word boundaries, so
+# "M1, M2, M7" and "M1 M2 M7" tokenize identically.
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
 
 def _normalize(s: str) -> str:
@@ -66,7 +75,12 @@ def _normalize(s: str) -> str:
 
 
 def _tokens(s: str) -> set[str]:
-    return {t for t in s.split() if t not in _STOP}
+    # G3c round-2 P2: extract the alnum/underscore runs (commas and the
+    # remaining punctuation are word boundaries), then drop the stop
+    # particles. A naive s.split() would keep the comma attached to the
+    # token ("m1," != "m1"), so the token-set half only matched when the
+    # answer used the exact same comma placement.
+    return {t for t in _TOKEN_RE.findall(s) if t not in _STOP}
 
 
 def _match(answer: str, golden: str) -> bool:

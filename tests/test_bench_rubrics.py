@@ -160,6 +160,23 @@ class M5RubricTest(unittest.TestCase):
         v = m5.score({"answers": answers})
         self.assertTrue(v["pass"], v)
 
+    def test_comma_tokenization_is_comma_placement_independent(self):
+        # G3c round-2 P2 (H8 hardening): the golden "M1, M2, M7" used to
+        # tokenize with the comma attached ("m1," / "m2," / "m7"), so the
+        # token-set half only matched when the answer used the EXACT same
+        # comma placement. The live regression was saved only because the
+        # conjunction was "and" and the tokens happened to align. Now the
+        # H8 half extracts alnum/underscore runs, so a comma-FREE or
+        # differently-punctuated answer still matches, and a genuinely
+        # missing fact still fails.
+        golden = "M1, M2, M7"
+        self.assertTrue(m5._match("M1 M2 M7", golden), "comma-free variant")
+        self.assertTrue(m5._match("M1, M2, and M7", golden), "conjunction")
+        self.assertTrue(
+            m5._match("the quick bench is M1, M2, and M7", golden), "padded"
+        )
+        self.assertFalse(m5._match("M1, M2", golden), "a missing fact fails")
+
     def test_mis_sized_golden_fails_named(self):
         # the S5.2 "5 QA questions" rubric contract: a golden with a
         # different question count fails NAMED instead of the rubric

@@ -520,14 +520,21 @@ def run(
         ordered_sids = _order_for_m6(sids)
         for n, sid in enumerate(ordered_sids):
             if release_between and n > 0:
-                release_between_records.append(
-                    _pool_release(
-                        "between",
-                        unload_bin,
-                        reload_bin,
-                        mock is not None,
-                    )
+                # G3c round-2 P2: tag the boundary record with the
+                # scenario it precedes + follows, so a multi-scenario run
+                # can attribute WHICH boundary fired / failed (the record
+                # itself carries no sid).
+                prev_sid = ordered_sids[n - 1]
+                rec = _pool_release(
+                    "between",
+                    unload_bin,
+                    reload_bin,
+                    mock is not None,
+                    engine=engine,
                 )
+                rec["precedes"] = sid
+                rec["follows"] = prev_sid
+                release_between_records.append(rec)
             row = _run_scenario(
                 sid,
                 cfg,
@@ -572,7 +579,7 @@ def run(
         out["box_state_post_run"] = boxstate.snapshot()
         if release_after:
             out["release_after"] = _pool_release(
-                "after", unload_bin, reload_bin, mock is not None
+                "after", unload_bin, reload_bin, mock is not None, engine=engine
             )
         if release_between:
             out["release_between"] = release_between_records
@@ -758,6 +765,17 @@ def _run_capability(
             # honestly (the main re-run still runs the golden suite; the
             # empty workdir / empty tool_log fail their halves), and the
             # row carries the error + the last state in its detail.
+            # G3c round-2 P2: `state` is "crashed" — a RUNNER-LEVEL marker,
+            # NOT an S3.1 task state. The S3.1 closed set
+            # (queued|running|done|failed|timeout|engine_retried) describes
+            # a task RECORD's lifecycle; in this path the task record never
+            # reached an S3.1 terminal state (the driver raised
+            # CapabilityError while polling, so there is no terminal record
+            # to copy from). "crashed" names the driver-level failure that
+            # the S3.1 states can't express; the scorer keys only on
+            # state=="done" (ok=False here, as for any non-done value), so
+            # the out-of-set value is recorded data, not a state-machine
+            # input.
             degraded = {
                 "task_id": None,
                 "tool_execution": mode,
@@ -1005,6 +1023,7 @@ def _pool_release(
     unload_bin: str | None,
     reload_bin: str | None,
     mock: bool,
+    engine: dict | None = None,
 ) -> dict:
     """One tier-2 pool release (S4.2 "stateless branch: unload between
     each M"; S4.3 "tier 2 = model + KV"). Manager-mediated through the
@@ -1132,14 +1151,14 @@ def _pool_release(
         # has already resolved them for this run; the hermetic/mock path
         # never reaches here, so the real HTTP is the only transport.
         w0 = time.monotonic()
-        warmup_ok = _warmup_instances()
+        warmup_ok = _warmup_instances(engine)
         rec["warmup_s"] = round(time.monotonic() - w0, 3)
         rec["warmup_ok"] = warmup_ok
     rec["note"] = rec.get("note", "done")
     return rec
 
 
-def _warmup_instances() -> bool:
+def _warmup_instances(engine: dict | None = None) -> bool:
     """The 16-token warmup completion per reloaded instance (H13). The
     subagent pool's endpoints come from the engine yaml (the S1.6
     ports); the warmup is a DISCARDED completion (its tokens are not
@@ -1147,18 +1166,28 @@ def _warmup_instances() -> bool:
     path so the next scenario's first task does not pay a cold-start
     inside the measured window. Any non-2xx per instance is a named
     WARN (data, not a gate): a warmup miss must not fail the bench.
-    Returns True when every instance's warmup completed 2xx."""
-    import requests  # lazy: the warmup is I/O (the S5.4 dep surface)
+    Returns True when every instance's warmup completed 2xx.
 
+    ``engine`` (G3c round-2 P1): the runner's ALREADY-RESOLVED engine
+    identity for this run. The warmup primes the SAME ports the
+    scenarios ran against, so it must not re-read the
+    BONSAI2_ENGINE_YAML/default identity — that could diverge from the
+    run's resolved engine and warm the wrong ports. None (a direct /
+    hermetic call) falls back to the re-read."""
     from bench import endpoints
 
-    try:
-        engine = endpoints.load_engine_identity()
-    except (OSError, ValueError, FileNotFoundError):
-        return False
+    if engine is None:
+        try:
+            engine = endpoints.load_engine_identity()
+        except (OSError, ValueError, FileNotFoundError):
+            return False
     n, eps = endpoints.subagent_ports(engine)
     if n == 0:
         return True  # main-only: nothing to warm
+    import requests  # lazy: the warmup is I/O (the S5.4 dep surface);
+    # only needed when there are instances to prime (main-only returns
+    # above without it).
+
     ok_all = True
     for ep in eps:
         try:
