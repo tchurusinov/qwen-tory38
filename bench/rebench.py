@@ -276,11 +276,19 @@ def quick_gate(
     if base_c is not None and cur_c is not None and base_c != cur_c:
         comparable = False
         tps_info["comparable"] = False
+        # G3c round-3 P2: name that the t/s half was SKIPPED, not
+        # "checked and passed". A reader seeing regression: false with
+        # comparable: false could misread it as "t/s checked, no
+        # regression"; the explicit skipped marker removes that ambiguity
+        # (regression is only meaningful when comparable — it is left
+        # absent here so its .get(..., False) default is the read).
+        tps_info["skipped"] = True
         tps_info["baseline_comparability"] = base_c
         tps_info["current_comparability"] = cur_c
         reasons.append(
             "M7 t/s not comparable (load triple differs: "
-            f"baseline {base_c} vs current {cur_c}) — recorded, not silently compared"
+            f"baseline {base_c} vs current {cur_c}) — t/s half SKIPPED, "
+            "recorded, not silently compared"
         )
     if (
         comparable

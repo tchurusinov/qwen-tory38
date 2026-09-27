@@ -20,12 +20,20 @@ Scoring (auto, per-question binary — S5.3 "machine-scored"):
     sides, and the rule is ordered containment OR every golden token
     present in the answer's token set. A missing fact still fails (the
     token-set half is strict on missing tokens).
-  * normalization: case-fold, drop the conjunction/word-boundary
-    particles, keep only alphanumerics + underscores + commas + spaces
-    collapsed (the golden answers are short tokens: "PTQ_1_0", "80",
-    "M1, M2, M7" — the normalization is tolerant of case, surrounding
-    punctuation, extra whitespace, and "and"-phrasing, but NOT of a
-    different value).
+  * normalization (``_normalize``): case-fold, keep only alphanumerics +
+    underscores + commas + spaces (everything else collapses to a space).
+    It does NOT strip stop-words / conjunctions — that is the token-set
+    half's job: the token-set scorer (``_tokens`` + ``_match``) case-folds
+    and drops the conjunction/word-boundary particles via the S5.2
+    normalization contract (``STOP_WORDS``: "and", "or", "a", "an", "the",
+    "with") so "M1 and M2" matches the golden "M1, M2, M7". ``_normalize``
+    alone is therefore tolerant of case, surrounding punctuation, and extra
+    whitespace, but NOT of "and"-phrasing (that tolerance is the
+    token-set half).
+  * the golden answers are short tokens: "PTQ_1_0", "80", "M1, M2, M7" —
+    the scoring is tolerant of case, surrounding punctuation, extra
+    whitespace, and "and"-phrasing (token-set half), but NOT of a
+    different value.
   * ``pass`` = all 5 questions correct (the S5.2 "5 QA questions, each
     binary-scored" rubric: the long-context read is right when all 5 of
     the scattered facts are retrieved).

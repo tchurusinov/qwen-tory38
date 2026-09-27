@@ -434,7 +434,7 @@ run's data trustworthy and repeatable.
   `reasoning_content` and emits 1 content token; the M1 rubric (binary
   compile+suite) measured the reasoning monologue and failed 0/3. This will
   recur on any "emit structured output" row.
-- **What (decision — surface both, default the recommended):**
+- **What (decision — A only, per admin §0.1 "1a"; B recorded as fallback, not implemented):**
   - Option A (recommended): **prompt-side** — the M1/M2-style task prompt
     explicitly says "your final answer must be EXACTLY the fenced blocks, no
     prose and no reasoning in the answer," and the runner's M1 payload keeps
@@ -443,19 +443,26 @@ run's data trustworthy and repeatable.
   - Option B: **rubric-side** — the M1 rubric tolerates reasoning-only output
     when the content is < 2 tokens and the reasoning carries a parseable
     fence. Looser, risks rewarding non-artifacts.
-  - Implement A as the default, gate B behind a config flag
-    (`m1_allow_reasoning_only: false` in `bench.yaml`), each with its own
-    hermetic test (the uncertainty rule: implement the top 2 behind a flag,
-    report both results, user decides).
-- **Where:** `bench/run.py:100-108` (M1 prompt), `bench/run.py:379-381`
-  (M1 payload builder), `bench/score/m1.py` (rubric), `bench/scenarios.py`
-  (M1 shape), `etc/bench.yaml` (the flag).
-- **How:** (A) tighten the M1 prompt to "answer = exactly two ```python
-  fences"; keep the `t.answer or t.reasoning` fallback. (B) add
-  `m1_allow_reasoning_only` to the config + a branch in `bench/score/m1.py`
-  that, when the flag is set and `n_content_chunks < 2`, parses the fence out
-  of `reasoning` instead of failing. Hermetic: a reasoning-only M1 payload
-  with a clean fence -> pass under the flag, fail without it.
+  - **A only** (the admin decision, §0.1 "1a"): A is what is implemented in
+    this PR — the content-only prompt, the rubric stays strict, **no config
+    flag**. B is recorded as the FALLBACK (the uncertainty rule: both
+    surfaced so the user decides against observed results) but is **NOT
+    implemented** — no `m1_allow_reasoning_only` flag in `bench.yaml` /
+    `bench/score/m1.py` ships in this diff. If the live re-run shows the
+    content-only prompt under-delivers, B is the follow-up lever.
+- **Where (A, as implemented):** `bench/run.py:100-108` (M1 prompt),
+  `bench/run.py:379-381` (M1 payload builder keeps the
+  prefer-content-then-reasoning fallback as a last resort),
+  `bench/scenarios.py` (M1 shape note). B (fallback, NOT implemented)
+  would be: `etc/bench.yaml` (the flag) + `bench/score/m1.py` (a branch
+  that, when the flag is set and `n_content_chunks < 2`, parses the fence
+  out of `reasoning` instead of failing).
+- **How (A):** tighten the M1 prompt to "answer = exactly two ```python
+  fences"; keep the `t.answer or t.reasoning` fallback. Hermetic: a
+  reasoning-only M1 payload still fails the strict rubric when content is
+  empty (documents A's behavior); a content-carried fence pair passes
+  (the existing golden). (B, if taken as the follow-up, would add its own
+  hermetic test.)
 - **Spec:** S5.2 M1 — record the seam: at the pinned engine the model's
   answer lands in `reasoning_content`; the rubric measures the content
   artifact; the M1 prompt forces content-only. Before/after note if the
@@ -661,8 +668,10 @@ Per the spec-amendment rule (spec follows code; the live run is canonical):
    main is key-walled. *Now:* the hook exists.
 2. **S5.2 M1** — at the pinned engine the model's answer lands in
    `reasoning_content`; the M1 rubric measures the content artifact; the M1
-   prompt forces a content-only fenced answer (or `m1_allow_reasoning_only`
-   relaxes it, default off). *Expected:* the answer is in `content`. *Real:*
+   prompt forces a content-only fenced answer (Option A only, per admin
+   §0.1 — the rubric-side Option B, a `m1_allow_reasoning_only` relax
+   flag, is recorded as the fallback but NOT implemented in this PR).
+   *Expected:* the answer is in `content`. *Real:*
    it is in `reasoning_content`, 1 content token. *Now:* seam documented.
 3. **S5.3 M3** — the spot-check is a live main-agent input; an undriven seam
    is recorded `unjudged`, not silently 0.0. *Expected:* the seam is driven

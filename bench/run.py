@@ -785,7 +785,15 @@ def _run_capability(
                 "reasoning": "",
                 "usage": {},
                 "tool_log": [],
-                "steps": None,
+                # G3c round-3 P1 (S3.1 typed shape): steps / the timing
+                # token count are typed fields (integer / numeric) in the
+                # S3.1 result-file shape + the capability success path
+                # (mock: steps=3, timing.completion_tokens=120); a null
+                # would be out-of-contract. A crashed row reports "zero
+                # steps / zero completion tokens measured", not "unknown"
+                # (None) — 0 is the honest typed value for a driver that
+                # never reached a terminal record.
+                "steps": 0,
                 # G3c round-1 P2 (degraded workdir): the real staged dir was
                 # already rmtree'd in the driver's finally, so pointing at
                 # the shared tempdir (which still holds OTHER tasks' debris)
@@ -794,10 +802,16 @@ def _run_capability(
                 # workdir was cleaned; the scorer's file-check half fails
                 # against it by construction.
                 "workdir": "<staged-workdir: cleaned>",
+                # G3c round-3 P1 (S3.1 typed shape): the timing's token
+                # count is numeric (0.0 when nothing was measured), not a
+                # null — matching the S3.1/capability-success typed shape.
+                # (decode_tps stays None: no elapsed + no tokens, so there
+                # is no t/s to compute — a derived absence, not a typed
+                # field the S3.1 result-file requires.)
                 "timing": {
                     "ok": False,
                     "elapsed_ms": 0.0,
-                    "completion_tokens": None,
+                    "completion_tokens": 0.0,
                     "decode_tps": None,
                 },
             }
