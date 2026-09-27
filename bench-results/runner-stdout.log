@@ -1,0 +1,6 @@
+[bench] WARN ERR_CONFIG: results_dir: '/run/bonsai2/bench' does not exist yet (will be created at run time)
+bonsai2: worker started for t-20260927-0001-c70e (pid 2188613, i=0)
+bonsai2: task t-20260927-0001-c70e running on i=0
+[bench] runner error: CapabilityError: M9/host: task t-20260927-0001-c70e not terminal within 120.0s (last state: running)
+{"status": "crash", "error": "CapabilityError: M9/host: task t-20260927-0001-c70e not terminal within 120.0s (last state: running)"}
+bench exit=0

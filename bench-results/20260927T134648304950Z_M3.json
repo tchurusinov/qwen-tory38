@@ -1,0 +1,145 @@
+{
+  "scenario": "M3",
+  "generated_ts": "20260927T134648Z",
+  "commit": "7303854",
+  "config_path": "/home/blckwll/prod/qwen-tory38/etc/bench.yaml",
+  "repetitions": 3,
+  "tasks": [
+    {
+      "ok": true,
+      "answer": "{\n  \"summary\": \"No document section 0 content was provided, so the available basis for analysis is limited to the absence of source text. This response therefore cannot extract substantive factual claims about a specific document, and the following claims are limited to describing that absence and its consequence for analysis.\",\n  \"claims\": [\n    \"Claim 1: No section 0 text was supplied for analysis.\",\n    \"Claim 2: No substantive document-specific facts can be extracted.\",\n    \"Claim 3: The only determinable observation is the missing source content.\"\n  ]\n}",
+      "reasoning": "We need answer user's request. User says: \"[M3 section 0] Analyze document section 0 and return ONE JSON object: {\"summary\": <at most 300 tokens>, \"claims\": <exactly 3 named claims, each a string>}.\"\n\nWe need produce JSON only likely. But no document provided. Need handle? We need maybe infer \"document section 0\" absent. Must return one JSON object. Need summary at most 300 tokens, claims exactly 3 named claims each string. Since no document content, maybe state no document provided? But claims exactly 3 named claims. Could make generic claims about section 0? Need satisfy format. Maybe summary: \"No document section 0 was provided, so this analysis is based on absence of content.\" claims: [\"Section 0 is not provided\", \"No content can be analyzed\", \"No specific claims can be extracted\"]? Named claims? \"named claims\" maybe each string should name a claim. Could be \"No document content is supplied.\" etc.\n\nNeed ensure one JSON object. No markdown. Ensure valid JSON. summary <=300 tokens. claims exactly 3 strings.\n\nNeed maybe include claim names? \"claims\": [\"Claim 1: ...\", \"Claim 2: ...\", \"Claim 3: ...\"]? They said named claims, each a string. Named claims might mean claim identifiers? We can use \"Claim 1: ...\". But if claims are extracted from document, names maybe subject? Without document, use generic.\n\nFinal JSON only.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 141,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 141,
+      "time_to_first_token_ms": 0.016256002709269524,
+      "elapsed_ms": 40662.69851400284,
+      "n_content_chunks": 122,
+      "decode_tps": 12.87766215695848,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "{\"summary\":\"Insufficient input: no document section 1 was supplied. Therefore, no document-specific summary or claims can be derived.\",\"claims\":[\"Claim 1: Section 1 is not present in the supplied input.\",\"Claim 2: No document facts are available to analyze.\",\"Claim 3: The output is limited to acknowledging the missing section.\"]}",
+      "reasoning": "We need to respond to user: \"[M3 section 1] Analyze document section 1 and return ONE JSON object: {\"summary\": <at most 300 tokens>, \"claims\": <exactly 3 named claims, each a string>}.\"\n\nWe have no document content. Need probably infer? Maybe section 1 not provided. Need produce valid JSON only? The instruction says return ONE JSON object. Need likely summarize \"document section 1\" but absent. Maybe M3 section 1 refers to some known context? We need handle missing input? But must return JSON. Could state unable? But summary at most 300 tokens, claims exactly 3 named claims each string. Need likely produce generic? The user says analyze document section 1; no document included. Could be an evaluation where we must output JSON with placeholder? Need satisfy format. Could make claims about inability? \"document section 1 is not provided\"? But exactly 3 named claims. Named claims maybe strings like \"Claim 1: ...\". Need one JSON object.\n\nNeed ensure valid JSON, no markdown. Summary maybe \"No document section 1 was provided, so analysis cannot be performed; no substantive claims can be extracted.\" claims exactly 3 named claims. But if no document, maybe claims: \"Section 1 is absent from the provided input\", \"No content was available for summarization\", \"No specific document claims can be extracted\". Are these named claims? Could be strings. Need \"named claims\" maybe each a string named? It says exactly 3 named claims, each a string. Maybe want claims as strings like \"claim1: ...\". We'll do that.\n\nNeed think about possible hidden expected: Maybe \"M3 section 1\" means model's section? There may be no doc; we need output JSON only. Could be test for instruction following. We must not mention missing? But we can. The summary at most 300 tokens, easy.\n\nPotential JSON:\n{\"summary\":\"No document section 1 was provided in the prompt, so there is no text to summarize or analyze. This response records the absence of source content rather than extracting document-specific material.\",\"claims\":[\"Claim 1: The provided prompt contains no document section 1.\",\"Claim 2: No summary of section 1 content can be produced from the missing source.\",\"Claim 3: The available basis is only the user\u2019s request to analyze section 1.\"]}\n\nIs that okay? Exactly 3. Named claims? yes. But maybe they expect claims from actual section 1. If we fabricate, bad. But missing input means we can only state absence. Need maybe no summary? But must include summary. We can say \"Missing document section 1\".\n\nNeed ensure JSON one object. final only JSON.\n\nDouble-check tokens. summary: maybe <100. claims: three strings. Valid JSON. No trailing commas.\n\nCould also produce: {\"summary\":\"Insufficient input: no document section 1 was supplied. Therefore, no document-specific summary or claims can be derived.\",\"claims\":[\"Claim 1: Section 1 is not present in the supplied input.\",\"Claim 2: No document facts are available to analyze.\",\"Claim 3: The output is limited to acknowledging the missing section.\"]}\n\nThis is more concise. \"named claims\" maybe they want named entity claims? But likely not.\n\nNeed final JSON only. Ensure no code block.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 82,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 82,
+      "time_to_first_token_ms": 0.010384013876318932,
+      "elapsed_ms": 69158.02882000571,
+      "n_content_chunks": 71,
+      "decode_tps": 13.302639478468786,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "{\n  \"summary\": \"No document section 2 was provided in the prompt, so no substantive content is available for analysis. Consequently, the summary and claims are limited to noting the missing input and the inability to extract section-specific assertions.\",\n  \"claims\": [\n    \"Claim 1: No document section 2 was provided.\",\n    \"Claim 2: No section-specific content is available for analysis.\",\n    \"Claim 3: A valid document is required to identify meaningful claims.\"\n  ]\n}",
+      "reasoning": "We need answer user's request. User: \"[M3 section 2] Analyze document section 2 and return ONE JSON object: {\"summary\": <at most 300 tokens>, \"claims\": <exactly 3 named claims, each a string>}.\"\n\nBut no document provided. Need probably respond with JSON object? Must analyze document section 2, but absent. Need maybe assume no document? They require one JSON object. Could produce summary that says no section 2 provided, claims maybe three? But claims exactly 3 named claims, each string. Need valid JSON only. Since no document, cannot infer claims. But request expects one JSON. We can return placeholder claims? Need satisfy. Could summary: \"No document section 2 was provided, so no substantive claims can be identified.\" claims: [\"Claim 1: No document section 2 was provided.\", \"Claim 2: Therefore, no factual assertions could be extracted.\", \"Claim 3: A document is required to generate valid named claims.\"] Are these claims? Named claims each string. It says exactly 3 named claims. Could be okay.\n\nNeed ensure one JSON object, summary at most 300 tokens. Claims exactly 3. Maybe avoid markdown. Final only JSON.\n\nDouble-check if they expect [M3 section 2] from some hidden context? There is no section. In benchmark maybe they will test format only? We should output JSON with summary and claims. Use valid JSON.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 118,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 118,
+      "time_to_first_token_ms": 0.026991008780896664,
+      "elapsed_ms": 36453.00037501147,
+      "n_content_chunks": 108,
+      "decode_tps": 13.186603428252658,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "{\n  \"summary\": \"No text for section 3 was supplied in the prompt, so a substantive analysis cannot be performed. The section's content, key points, and implications are unavailable. This placeholder satisfies the required JSON format while indicating that the source material is missing.\",\n  \"claims\": [\n    \"Claim 1: The document section 3 text was not provided in the prompt.\",\n    \"Claim 2: Without the section text, no specific claims can be extracted.\",\n    \"Claim 3: A valid analysis requires the user to supply section 3 content.\"\n  ]\n}",
+      "reasoning": "We need to respond to user: \"[M3 section 3] Analyze document section 3 and return ONE JSON object: {\"summary\": <at most 300 tokens>, \"claims\": <exactly 3 named claims, each a string>}.\n\nWe have no document section 3 content. Need perhaps infer? User asks analyze document section 3. We don't have context. Need maybe return JSON only. Need exactly 3 named claims each string. Could be placeholder? But likely expected from some hidden document? We must handle missing document. Need produce valid JSON object only. Summary at most 300 tokens. Claims exactly 3 named claims. Since no section provided, maybe summarize as unavailable? But must analyze section 3. Could say no section 3 text provided. But claims named? Maybe \"claim_1\", \"claim_2\", \"claim_3\". Need maybe not hallucinate. But user likely expects output for a task where document section 3 is known in previous context? There is no prior. We need answer with one JSON object. We can include summary that section 3 is not available, claims: [\"No section 3 content was provided for analysis.\" ...]. Exactly 3 strings. Ensure valid JSON. Need maybe token count under 300.\n\nNeed consider \"named claims\" might mean each claim should have a name? It says claims: exactly 3 named claims, each a string. Could be strings like \"Claim 1: ...\". Do that.\n\nNeed final only JSON object. Ensure no markdown. Summary maybe: \"No text for section 3 was supplied in the prompt, so a substantive analysis cannot be performed; the section's content, key points, and implications are unavailable. To satisfy the required format, this placeholder states that the source material is missing.\" Claims: \"Claim 1: The document section 3 text was not provided in the prompt.\", \"Claim 2: Without the section text, no specific claims can be extracted.\", \"Claim 3: A valid analysis requires the user to supply section 3 content.\" That's 3.\n\nNeed ensure summary at most 300 tokens. Fine.\n\nCould there be expectation to analyze [M3 section 3] maybe from a document not shown? Could be benchmark requiring answer based on hidden section? But only prompt. We can't access. We must be truthful. Return JSON.\n\nNeed maybe \"claims\" exactly 3 named claims each string. Use keys claim_1 etc? But claims array of strings. \"named claims\" perhaps each string includes name. Good.\n\nDouble-check valid JSON: {\"summary\":\"...\",\"claims\":[\"Claim 1: ...\",\"Claim 2: ...\",\"Claim 3: ...\"]}\n\nNo trailing. final.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 135,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 135,
+      "time_to_first_token_ms": 0.02662400947883725,
+      "elapsed_ms": 62067.32912699226,
+      "n_content_chunks": 126,
+      "decode_tps": 12.174476665046056,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "{\n  \"summary\": \"The request asks for analysis of document section 4, but no document or section 4 text was provided. Consequently, a factual analysis cannot be produced. This response therefore states the missing-information limitation and provides three placeholder named claims reflecting that limitation.\",\n  \"claims\": [\n    \"Claim 1: The input does not include document section 4, so it cannot be analyzed.\",\n    \"Claim 2: Any substantive summary or claims would require the section 4 text or a supplied source document.\",\n    \"Claim 3: The only verifiable claim is that the current response is constrained to a JSON object with a summary and three named claim strings.\"\n  ]\n}",
+      "reasoning": "We need answer user's request: \"[M3 section 4] Analyze document section 4 and return ONE JSON object: {\"summary\": <at most 300 tokens>, \"claims\": <exactly 3 named claims, each a string>}.\"\n\nWe have no actual document provided. Need respond likely with valid JSON only. Need maybe infer? User says analyze document section 4, but no document attached. We need produce one JSON object. Could produce generic placeholder? But likely expected to output JSON. Need exactly 3 named claims, each a string. Summary at most 300 tokens. We can say insufficient document? But must return JSON. Could summary: \"Document section 4 was not provided, so it cannot be analyzed. The response contains placeholder claims.\" Claims: e.g. \"No section 4 content was supplied for analysis.\" But exactly 3 named claims: maybe strings are claims. \"Claim 1: ...\" \"Claim 2: ...\" \"Claim 3: ...\". Need valid JSON only. Ensure no markdown.\n\nNeed maybe \"named claims\" means each claim has name? But each a string. Could be \"Claim A: ...\". Exactly 3.\n\nPotential issue: If we state no document provided, is that a claim? It's factual about prompt. Good.\n\nNeed summary at most 300 tokens. Simple.\n\nFinal JSON:\n{\n  \"summary\": \"The request asks for analysis of document section 4, but no document or section 4 text was provided. Consequently, a factual analysis cannot be produced. This response therefore states the missing-information limitation and provides three placeholder named claims reflecting that limitation.\",\n  \"claims\": [\n    \"Claim 1: The input does not include document section 4, so it cannot be analyzed.\",\n    \"Claim 2: Any substantive summary or claims would require the section 4 text or a supplied source document.\",\n    \"Claim 3: The only verifiable claim is that the current response is constrained to a JSON object with a summary and three named claim strings.\"\n  ]\n}\n\nCheck tokens: summary ~37? fine. claims 3 strings. Valid JSON. Ensure one object. No extra text.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 170,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 170,
+      "time_to_first_token_ms": 0.023472006432712078,
+      "elapsed_ms": 53910.63076502178,
+      "n_content_chunks": 147,
+      "decode_tps": 14.23588428717017,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "{\n  \"summary\": \"No document section 5 was provided, so it cannot be analyzed. Please provide the section text for accurate summarization and claim extraction.\",\n  \"claims\": [\n    \"No document section 5 was provided.\",\n    \"The requested analysis cannot be completed.\",\n    \"Additional input is required.\"\n  ]\n}",
+      "reasoning": "We need to respond to user: \"[M3 section 5] Analyze document section 5 and return ONE JSON object: {\"summary\": <at most 300 tokens>, \"claims\": <exactly 3 named claims, each a string>}.\n\nWe need to produce final one JSON object. But we lack document. User references \"document section 5\" but no document provided. Need handle? We must analyze? We cannot fabricate? Could ask for document, but they require ONE JSON object. Maybe we need return JSON with summary and claims based on unknown? Maybe we can state insufficient document. But must be valid JSON. Need exactly 3 claims, each a string. Summary at most 300 tokens. Could be: {\"summary\":\"No document section 5 was provided, so it cannot be analyzed. Please provide the section text.\",\"claims\":[\"No document section 5 was provided.\",\"The requested analysis cannot be completed.\",\"Additional input is required.\"]}\nThis satisfies one JSON object, summary <=300 tokens, claims exactly 3 named claims? \"named claims\" maybe each a string? Yes.\n\nNeed ensure only JSON. final.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 77,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 77,
+      "time_to_first_token_ms": 0.020431994926184416,
+      "elapsed_ms": 11481.131448992528,
+      "n_content_chunks": 74,
+      "decode_tps": 29.995579754165902,
+      "error": null,
+      "detail": null
+    }
+  ],
+  "verdict": {
+    "pass": false,
+    "score": 0.7,
+    "detail": "M3: auto shape 6/6 (1.00), spot-check 0.00 (threshold 0.67), blend 0.70 (fail)",
+    "extra": {
+      "auto": 1.0,
+      "spotcheck": 0.0,
+      "blend": 0.7,
+      "n_sections": 6,
+      "n_shape_ok": 6,
+      "auto_weight": 0.7,
+      "spotcheck_weight": 0.3,
+      "spotcheck_threshold": 0.6666666666666666
+    }
+  },
+  "row_verdict": "fail",
+  "box_state": {
+    "nvidia_smi": "580.159.03, [N/A]",
+    "docker_stats": "bonsai2-bench-i1 4.839GiB / 14.78GiB\nbonsai2-bench-i0 5.447GiB / 14.78GiB\nqwen38-sglang 1.427GiB / 100GiB\nsenior-architect 185.7MiB / 121.6GiB\nunderstory 125.1MiB / 121.6GiB\ngitea 3.822GiB / 121.6GiB\nsearxng 10.21MiB / 121.6GiB\nopen-webui 34.03MiB / 121.6GiB\nsearxng-valkey 7.457MiB / 121.6GiB",
+    "meminfo": "MemTotal=127535152 kB MemAvailable=13588224 kB",
+    "driver": "580.159.03",
+    "date": "2026-09-27T13:44:22Z",
+    "epoch": 1790516662
+  },
+  "concurrency": 2,
+  "n_tasks": 6,
+  "ctx_cap": 1024,
+  "tool_execution": "off"
+}
