@@ -1343,6 +1343,19 @@ same exit-code contract.
   switches, or when a S4.2 row flips. Output feeds the doctrine audit
   (S4.6) in the same PR.
 
+> **MAP 4.11 delta (2026-09-27):** the S5.5 gate is now a NAMED tool —
+> `bench/rebench.py` — distinct from the S5.4 bench runner, with its own
+> exit-code contract: `gate` (0 unblocked / 2 bad input / 3 = a regression
+> found, the pin-bump PR is BLOCKED), `due` (0 not-due / 2 bad / 3 = full
+> bench DUE), `save-baseline` (0 written / 2 bad). It compares the just-
+> completed `--quick` run's M7 t/s against the last-ACCEPTED baseline at
+> `rebench_baseline` (S5.7; default `bench-results/rebench-baseline.json`)
+> and gates on `> regression_tps_pct` t/s drop OR a quick auto-rubric
+> pass→fail flip. `save-baseline` records a known-good run as the new
+> baseline (the acceptance step a passing PR performs). The policy itself
+> (quick set, thresholds, full-bench triggers) is UNCHANGED — only the
+> enforcement is now concrete.
+
 ### 5.6 Standard workload set (used by S4.6's fresh-session test)
 
 M1 (code-gen), M2 (test batch), M3 (fan-out), plus one M4-style diff
@@ -1365,12 +1378,24 @@ regression_tps_pct: 10
 results_dir: /run/bonsai2/bench
 goldens_dir: bench/goldens
 main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
+rebench_baseline: bench-results/rebench-baseline.json   # MAP 4.11: the last-accepted quick-bench baseline (bench/rebench.py owns it)
 ```
 
 > S5.5 unchanged in policy: quick = M1+M2+M7 (the engine-regression
 > gate); full = M1-M10 (capability + doctrine input). M9/M10 are
 > full-bench-only in v1 (their rubrics need main-side re-runs, which
 > the quick bench's time budget does not carry).
+>
+> **MAP 4.9/4.11 delta (2026-09-27):** two key-set additions —
+> `rebench_baseline` (the S5.5 gate's baseline file, S5.7 is now the
+> single source for both the runner's and the gate's paths) and, in the
+> runner, M9/M10 no longer need main-side re-runs in the QUICK bench's
+> time budget: they run through the S5.2 capability layer (S5.9 #5) in
+> both tool_execution modes. The quick set stays M1+M2+M7 (locked — the
+> regression gate is a THROUGHPUT gate); M9/M10 remain full-bench rows
+> but are no longer "pending" — `bench/run.py` runs and scores them
+> (the `--mock-cap` hermetic seam is the S5.8 convention for the
+> canned capability result).
 
 ### 5.8 Testing
 

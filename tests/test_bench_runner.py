@@ -47,6 +47,7 @@ from bench.rotate import BenchLock
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 MOCK_SPEC = "tests.fixtures.bench_mock:mock_exec"
+MOCK_CAP_SPEC = "tests.fixtures.bench_mock:mock_cap"
 
 
 def _write_bench_yaml(tmp: Path, scenarios: list[str], results_dir: Path) -> str:
@@ -242,25 +243,78 @@ class M6ControlTest(MockRunTestBase):
         self.assertEqual(set(row["per_shape"]), {"M1", "M2", "M3", "M4", "M5"})
 
 
-class M9M10PendingTest(MockRunTestBase):
-    def test_m9_m10_rows_run_with_pending_verdict(self):
-        """MAP 4.9 lands the capability scorers; until then a selected
-        M9/M10 row still RUNS its task (the t/s + box state are
-        recorded) with a named pending verdict (the S5.4 'failure is
-        data' rule)."""
+class M9M10CapabilityTest(MockRunTestBase):
+    """MAP 4.9: the M9/M10 capability rows run through the S5.8 canned
+    capability seam (``mock_cap``) in BOTH tool_execution modes, score
+    via the S5.9 #5 main-side re-runs, and record the host-vs-engine
+    comparison + the box-state snapshot (the S5.2 dual-mode contract)."""
+
+    def test_m9_m10_capability_rows_both_modes_pass(self):
         env = _env(self.tmp)
         cfg = _write_bench_yaml(self.tmp, ["M9", "M10"], self.results)
-        rc, stdout = self._run_main(["--mock", MOCK_SPEC], cfg, env)
+        rc, stdout = self._run_main(
+            ["--mock", MOCK_SPEC, "--mock-cap", MOCK_CAP_SPEC], cfg, env
+        )
         self.assertEqual(rc, 0, stdout)
+        summary = json.loads(stdout)
+        self.assertEqual(summary["verdicts"], {"M9": "pass", "M10": "pass"}, summary)
         for sid in ("M9", "M10"):
             rows = _rows_for(self.results, sid)
             self.assertEqual(len(rows), 1, sid)
             row = rows[0]
-            self.assertEqual(row["row_verdict"], "fail")  # pending, not an error
-            self.assertEqual(row["verdict"]["extra"]["pending"], "4.9")
-            self.assertGreater(len(row["tasks"]), 0)
-            self.assertTrue(row["tasks"][0]["ok"])
-            self.assertIn("box_state", row)
+            # the S5.2 "the run records the mode in the row" half:
+            self.assertEqual(row["tool_execution_mode"], "host", row)
+            self.assertEqual(row["tool_execution"], "on")
+            # the S5.3 rubric verdict passes (canned capability results
+            # are rubric-correct by construction).
+            self.assertEqual(row["row_verdict"], "pass", row["verdict"])
+            self.assertEqual(row["verdict"]["score"], 1.0, row["verdict"])
+            # the S5.2 box-state snapshot: every row carries it (S5.9 #1).
+            for key in (
+                "nvidia_smi",
+                "docker_stats",
+                "meminfo",
+                "driver",
+                "date",
+                "epoch",
+            ):
+                self.assertIn(key, row["box_state"], f"{sid} row missing {key}")
+            # the S5.2 t/s column: the capability task's decode t/s.
+            self.assertIsNotNone(row["tasks"][0]["decode_tps"])
+            self.assertGreater(row["tasks"][0]["decode_tps"], 0.0)
+            # the S5.9 #5 host-vs-engine comparison is recorded in the run
+            # JSON: both mode verdicts + agreement + per-mode t/s.
+            comp = row["capability_comparison"]
+            self.assertEqual(comp["host"]["row_verdict"], "pass")
+            self.assertEqual(comp["engine"]["row_verdict"], "pass")
+            self.assertTrue(comp["agree"])
+            self.assertIsNotNone(comp["host_tps"])
+            self.assertIsNotNone(comp["engine_tps"])
+            # the engine-mode row is written to disk as a sibling
+            # (the <ts>_<sid>_engine.json) — the comparison lives on
+            # disk, not only inline.
+            eng_rows = [p for p in self.results.glob(f"*_{sid}_engine.json")]
+            self.assertEqual(len(eng_rows), 1, f"{sid} engine row missing")
+            eng_row = json.loads(eng_rows[0].read_text())
+            self.assertEqual(eng_row["tool_execution_mode"], "engine")
+            self.assertEqual(eng_row["row_verdict"], "pass")
+
+    def test_m10_report_covers_10_files(self):
+        """The M10 canned report is the golden 10-file report: the rubric's
+        coverage half scores 10/10 + the 2/10 re-run agrees."""
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M10"], self.results)
+        rc, stdout = self._run_main(
+            ["--mock", MOCK_SPEC, "--mock-cap", MOCK_CAP_SPEC], cfg, env
+        )
+        self.assertEqual(rc, 0, stdout)
+        row = _rows_for(self.results, "M10")[0]
+        self.assertEqual(
+            row["verdict"]["extra"]["coverage"]["n_files"],
+            10,
+            row["verdict"],
+        )
+        self.assertEqual(row["verdict"]["extra"]["rerun"]["n_agree"], 2, row["verdict"])
 
 
 class RunnerExitCodeTest(MockRunTestBase):

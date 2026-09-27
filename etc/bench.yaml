@@ -9,6 +9,7 @@ scenarios: [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10]   # S5.2 matrix (v1 = M1-M1
 quick: [M1, M2, M7]                           # S5.5 quick bench (the text-only regression gate; M9/M10 are full-bench-only in v1 — their rubrics need main-side re-runs the quick bench's time budget does not carry)
 repetitions: 3
 regression_tps_pct: 10                        # S5.5: > 10% t/s regression blocks a pin-bump PR
+rebench_baseline: bench-results/rebench-baseline.json   # S5.5/4.11: the last-accepted quick-bench baseline JSON (bench/rebench.py owns it)
 results_dir: /run/bonsai2/bench
 goldens_dir: bench/goldens                    # repo-relative at test time; /opt/bonsai2/share/bench/goldens at install
 main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
