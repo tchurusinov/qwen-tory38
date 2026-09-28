@@ -491,6 +491,76 @@ class RebenchError(Exception):
 # --------------------------------------------------------------------------
 # the CLI (the S5.5 gate: a named tool distinct from the S5.4 bench runner)
 # --------------------------------------------------------------------------
+def _load_bench_yaml(cfg_path: str | None) -> tuple[bool, dict | None, str | None]:
+    """Single load-parse-validate pass for the CLI's bench.yaml config.
+
+    Returns ``(present, data, error)``:
+      - ``present=False``: no config (falsy path OR file not there) — the
+        caller uses its defaults; no error.
+      - ``present=True, data=None, error=<msg>``: a present file that
+        FAILED to parse into a dict (the H10 "bad input" cases:
+        unparseable, non-mapping top level, or an empty/whitespace file
+        which parses to None — G3c round-13 P1#1 extended the strict
+        path to name this). The caller raises ``RebenchError`` (exit 2
+        "bad input").
+      - ``present=True, data=<dict>, error=None``: a present mapping; the
+        caller pulls its keys out of it.
+
+    The G3c round-13 P2 (double-parse) fix: this is the single pass the
+    CLI uses for BOTH S5.7 keys it reads (``rebench_baseline`` /
+    ``regression_tps_pct``), so the file is parsed ONCE, not once per
+    key. ``_config_value`` (the documented H10 interface) delegates its
+    load-parse-validate to this helper, so the CLI path and the per-key
+    helper share one source of parse truth and cannot diverge on what
+    counts as a bad input.
+
+    G3c round-9 P2 (empty-string convention, named) still applies: a
+    FALSY ``cfg_path`` — None (the argparse default) OR "" (an
+    explicitly-passed ``--config ""``) — is treated as "no config
+    given" (present=False), consistent with the documented "empty =
+    absent" escape hatch.
+    """
+    if not cfg_path:
+        return False, None, None
+    p = Path(cfg_path)
+    if not p.is_file():
+        return False, None, None
+    try:
+        import yaml
+    except ImportError:
+        # No PyYAML in the environment (hermetic / minimal box): the
+        # config file is NOT readable, so behave exactly as the legacy
+        # lenient behavior did — "no usable config data" -> the caller
+        # takes its defaults. Reported as present=False (not a parse
+        # error) so the strict path does not invent a bad-input error
+        # out of an environment condition (missing module) rather than
+        # a data condition (malformed file).
+        return False, None, None
+    try:
+        data = yaml.safe_load(p.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        return True, None, f"--config {cfg_path} unparseable: {exc!r}"
+    if data is None:
+        # G3c round-13 P1#1: an empty / whitespace file parses to None.
+        # Previously hidden by ``or {}`` (so it was a silent default);
+        # now normalized to the empty mapping so the caller's key
+        # lookup runs — in the strict path that becomes the named
+        # "has no '<key>' key" bad input, the SAME message as a mapping
+        # that lacks the key (the two are indistinguishable from the
+        # caller's point of view: a present file that yields no value).
+        return True, {}, None
+    if not isinstance(data, dict):
+        # G3c round-13 P1#1: an empty/whitespace file parses to None —
+        # previously hidden by ``or {}`` (so it was a silent default),
+        # now named as the same bad input as any other non-mapping.
+        return (
+            True,
+            None,
+            (f"--config {cfg_path} top level is not a mapping: {type(data).__name__}"),
+        )
+    return True, data, None
+
+
 def _config_value(
     cfg_path: str | None, key: str, default, strict_malformed: bool = False
 ):
@@ -514,30 +584,42 @@ def _config_value(
     half of the contract (the bad-input half applies to a NON-EMPTY path
     naming a present-but-malformed file). A caller wanting "" to be an
     error must check it at the CLI layer; the config layer treats it as
-    absent by design (an empty path names nothing to parse)."""
-    if not cfg_path:
-        return default
-    p = Path(cfg_path)
-    if not p.is_file():
-        return default
-    try:
-        import yaml
-    except ImportError:
-        return default
-    try:
-        data = yaml.safe_load(p.read_text()) or {}
-    except (OSError, yaml.YAMLError) as exc:
+    absent by design (an empty path names nothing to parse).
+
+    G3c round-13 P1 (present-but-incomplete, named — H10 extension,
+    spec-follows-code): under ``strict_malformed=True`` the bad-input
+    half now covers EVERY present file that yields no value for ``key``
+    — an unparseable file, a non-mapping top level, an empty / whitespace
+    file (which parses to None), and a mapping that lacks ``key``. All
+    four were the silent-default behavior before this round; H10 as
+    implemented in round-4 only fired on the first two, so a PRESENT
+    file was "malformed" only when it failed to parse into a dict — the
+    empty-file and key-absent cases silently fell back to the default,
+    indistinguishable from "absent". The lenient (internal caller) path
+    is UNCHANGED: every present-but-valueless file still returns the
+    default there; only the strict CLI path became loud.
+
+    G3c round-13 P2 (single source of parse truth): this now delegates
+    the load-parse-validate to ``_load_bench_yaml`` (the same single
+    pass ``main`` uses for BOTH S5.7 keys), so the CLI path and this
+    helper can never diverge on what counts as a bad input.
+    """
+    present, data, err = _load_bench_yaml(cfg_path)
+    if err:
         if strict_malformed:
-            raise RebenchError(f"--config {cfg_path} unparseable: {exc!r}") from exc
+            raise RebenchError(err)
         return default
-    if not isinstance(data, dict):
-        if strict_malformed:
-            raise RebenchError(
-                f"--config {cfg_path} top level is not a mapping: {type(data).__name__}"
-            )
+    if not present:
         return default
+    data = data or {}
     if key in data:
         return data[key]
+    if strict_malformed:
+        # G3c round-13 P1#1/#2: a PRESENT file that yields no value for
+        # the key (empty/whitespace file -> None -> {}, or a mapping that
+        # lacks the key) is the same bad input as a present file that
+        # fails to parse.
+        raise RebenchError(f"--config {cfg_path} has no '{key}' key")
     return default
 
 
@@ -588,13 +670,43 @@ def main(argv: list[str] | None = None) -> int:
     # H10 (post-live-run): a PRESENT-but-malformed --config is a named
     # bad-input error (exit 2), not a silent default fallback; an ABSENT
     # config keeps the legacy default (the gate still runs).
+    #
+    # G3c round-13 P2 (single pass): the file is parsed ONCE via
+    # _load_bench_yaml and both S5.7 keys are read from that single
+    # result — no double I/O / double parse / divergent error surface for
+    # the two keys. G3c round-13 P1#1/#2: the strict path also errors on
+    # a PRESENT file that yields no value for a key — an empty /
+    # whitespace file (parses to None, previously hidden by `or {}`) and
+    # a mapping that lacks the key — both of which used to silently fall
+    # back to the default, indistinguishable from "absent". The H10
+    # "absent = default" half is preserved: a MISSING file (or a falsy
+    # path) still takes the default; only a PRESENT file that yields no
+    # value is now the named bad input.
     try:
-        baseline_path = args.baseline or _config_value(
-            args.config, "rebench_baseline", DEFAULT_BASELINE, strict_malformed=True
-        )
-        regression_tps_pct = _config_value(
-            args.config, "regression_tps_pct", 10.0, strict_malformed=True
-        )
+        present, data, err = _load_bench_yaml(args.config)
+        if err:
+            raise RebenchError(err)
+        data = data or {}
+        if not present:
+            # no --config (or it names a missing file): H10 default, gate
+            # still runs.
+            baseline_path = args.baseline or DEFAULT_BASELINE
+            regression_tps_pct = 10.0
+        else:
+            # a present config: each S5.7 key it does NOT name is a bad
+            # input (P1), so a partially-filled bench.yaml surfaces its
+            # gap instead of silently mixing present values with default
+            # ones. --baseline still overrides the config's baseline.
+            if "rebench_baseline" not in data:
+                raise RebenchError(
+                    f"--config {args.config} has no 'rebench_baseline' key"
+                )
+            if "regression_tps_pct" not in data:
+                raise RebenchError(
+                    f"--config {args.config} has no 'regression_tps_pct' key"
+                )
+            baseline_path = args.baseline or data["rebench_baseline"]
+            regression_tps_pct = data["regression_tps_pct"]
     except RebenchError as exc:
         _print({"status": "error", "error": str(exc)})
         return EXIT_CONFIG

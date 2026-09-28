@@ -26,6 +26,7 @@ golden in/out pairs (hermetic — no GPU, no network, no yaml, no the real
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -415,6 +416,265 @@ class RowExtractionAndBaselineTest(unittest.TestCase):
             rows = rebench.load_rows(d, scenarios=("M1",))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["scenario"], "M1")
+
+
+class _FakeYamlError(Exception):
+    """A stand-in for ``yaml.YAMLError`` (the real PyYAML is a box dep,
+    not a test dep — the S5.8 hermetic convention: no yaml in the test
+    env). Injected as ``_fake_yaml_module`` below so the rebench CLI
+    config path is testable without PyYAML installed."""
+
+
+def _fake_yaml_module(safe_load_impl):
+    """Build a fake ``yaml`` module whose ``safe_load`` is the given
+    callable (so a test can pin the parsed value OR raise
+    ``_FakeYamlError`` to simulate an unparseable file)."""
+    import types
+
+    m = types.ModuleType("yaml")
+
+    class _YamLError(Exception):
+        pass
+
+    m.YAMLError = _YamLError
+    m.safe_load = safe_load_impl
+    return m
+
+
+class _ConfigValueH10Test(unittest.TestCase):
+    """G3c round-13 P1 + P2: the H10 strict ``--config`` path must name
+    a PRESENT file that yields no value (empty file -> None; a mapping
+    that lacks the key), and the CLI must parse the config ONCE for both
+    S5.7 keys (not once per key)."""
+
+    _BASELINE = rebench.DEFAULT_BASELINE
+    _PCT = 10.0
+
+    def _with_yaml(self, parsed):
+        """Context manager: install a fake ``yaml`` module whose
+        ``safe_load`` returns ``parsed`` for every file read."""
+        import contextlib
+        import sys
+
+        fake = _fake_yaml_module(lambda text: parsed)
+
+        @contextlib.contextmanager
+        def _cm():
+            prev = sys.modules.get("yaml")
+            sys.modules["yaml"] = fake
+            try:
+                yield fake
+            finally:
+                if prev is None:
+                    sys.modules.pop("yaml", None)
+                else:
+                    sys.modules["yaml"] = prev
+
+        return _cm()
+
+    def _write(self, text):
+        import tempfile
+
+        fd, p = tempfile.mkstemp(suffix=".yaml", prefix="rebench-")
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        self.addCleanup(Path(p).unlink, missing_ok=True)
+        return p
+
+    # ---- P1#1: an empty / whitespace PRESENT file is a named bad input ----
+    def test_empty_present_file_strict_is_bad_input(self):
+        p = self._write("")
+        with (
+            self._with_yaml(None),  # yaml.safe_load("") -> None
+            self.assertRaises(rebench.RebenchError) as ctx,
+        ):
+            rebench._config_value(
+                p, "rebench_baseline", self._BASELINE, strict_malformed=True
+            )
+        # the named reason must say the file has no key (NOT that it is
+        # unparseable — an empty file parses fine, to None).
+        self.assertIn("has no 'rebench_baseline' key", str(ctx.exception))
+
+    def test_whitespace_present_file_strict_is_bad_input(self):
+        p = self._write("   \n  \n")
+        with (
+            self._with_yaml(None),  # yaml.safe_load(whitespace) -> None
+            self.assertRaises(rebench.RebenchError) as ctx,
+        ):
+            rebench._config_value(
+                p, "rebench_baseline", self._BASELINE, strict_malformed=True
+            )
+        self.assertIn("has no 'rebench_baseline' key", str(ctx.exception))
+
+    # ---- P1#2: a PRESENT mapping that LACKS the key is a named bad input ----
+    def test_present_mapping_missing_key_strict_is_bad_input(self):
+        p = self._write("regression_tps_pct: 10\n")  # has the OTHER key
+        with (
+            self._with_yaml({"regression_tps_pct": 10}),
+            self.assertRaises(rebench.RebenchError) as ctx,
+        ):
+            rebench._config_value(
+                p, "rebench_baseline", self._BASELINE, strict_malformed=True
+            )
+        self.assertIn("has no 'rebench_baseline' key", str(ctx.exception))
+
+    # ---- the strict path still names the pre-round-13 cases ----
+    def test_unparseable_present_file_strict_is_bad_input(self):
+        p = self._write("rebench_baseline: [")  # unterminated flow seq
+
+        def _raise(_text):
+            raise _FakeYamlError()
+
+        # give the fake module a YAMLError class the code can catch
+        fake = _fake_yaml_module(_raise)
+        fake.YAMLError = _FakeYamlError
+        import sys
+
+        prev = sys.modules.get("yaml")
+        sys.modules["yaml"] = fake
+        try:
+            with self.assertRaises(rebench.RebenchError) as ctx:
+                rebench._config_value(
+                    p, "rebench_baseline", self._BASELINE, strict_malformed=True
+                )
+            self.assertIn("unparseable", str(ctx.exception))
+        finally:  # noqa: keep the manual sys.modules swap (fake has a
+            # custom YAMLError the context-manager helper doesn't know)
+            if prev is None:
+                sys.modules.pop("yaml", None)
+            else:
+                sys.modules["yaml"] = prev
+
+    def test_non_mapping_present_file_strict_is_bad_input(self):
+        p = self._write("- M1\n- M2\n")
+        with (
+            self._with_yaml(["M1", "M2"]),  # top level is a list
+            self.assertRaises(rebench.RebenchError) as ctx,
+        ):
+            rebench._config_value(
+                p, "rebench_baseline", self._BASELINE, strict_malformed=True
+            )
+        self.assertIn("top level is not a mapping", str(ctx.exception))
+
+    # ---- the LENIENT path is unchanged: every present-but-valueless
+    #      case still returns the default (no raise) ----
+    def test_lenient_empty_file_returns_default(self):
+        p = self._write("")
+        with self._with_yaml(None):
+            self.assertEqual(
+                rebench._config_value(
+                    p, "rebench_baseline", self._BASELINE, strict_malformed=False
+                ),
+                self._BASELINE,
+            )
+
+    def test_lenient_missing_key_returns_default(self):
+        p = self._write("regression_tps_pct: 10\n")
+        with self._with_yaml({"regression_tps_pct": 10}):
+            self.assertEqual(
+                rebench._config_value(
+                    p, "rebench_baseline", self._BASELINE, strict_malformed=False
+                ),
+                self._BASELINE,
+            )
+
+    # ---- the H10 "absent = default" half is preserved ----
+    def test_absent_config_returns_default_strict(self):
+        self.assertEqual(
+            rebench._config_value(
+                None, "rebench_baseline", self._BASELINE, strict_malformed=True
+            ),
+            self._BASELINE,
+        )
+
+    def test_empty_string_config_is_absent_convention(self):
+        # G3c round-9 P2: "" is the documented no-config escape hatch.
+        self.assertEqual(
+            rebench._config_value(
+                "", "rebench_baseline", self._BASELINE, strict_malformed=True
+            ),
+            self._BASELINE,
+        )
+
+    # ---- P2 regression: the CLI parses the config ONCE for both keys
+    #      (pin the single-pass behavior; a re-introduced second parse
+    #      would re-read the file and the count would change). ----
+    def test_cli_parses_config_once_for_both_keys(self):
+        import sys
+
+        p = self._write("rebench_baseline: b.json\nregression_tps_pct: 5\n")
+        calls = []
+
+        def _counting_load(text):
+            # count only the BENCH.YAML parse (the engine yaml is a
+            # separate file the `due` command also reads — the P2 claim
+            # is specifically that the CONFIG is parsed once, not that
+            # the whole CLI does one yaml load total).
+            if "rebench_baseline" in text or "regression_tps_pct" in text:
+                calls.append(text)
+            return {"rebench_baseline": "b.json", "regression_tps_pct": 5}
+
+        fake = _fake_yaml_module(_counting_load)
+        prev = sys.modules.get("yaml")
+        sys.modules["yaml"] = fake
+        try:
+            # `due` needs an engine yaml too; use the env hook to point it
+            # at a minimal valid file so the command runs to its due/not
+            # due result WITHOUT a second bench.yaml parse.
+            import tempfile
+
+            td = Path(tempfile.mkdtemp())
+            self.addCleanup(_cleanup_dir, td)
+            eng = td / "engine.yaml"
+            eng.write_text(
+                "engine:\n  pin:\n    commit: abc\n"
+                "model:\n  file: f\n  fallback_file: f\n  revision: '1'\n"
+                "image:\n  pin:\n    sha256: 'x'\n"
+            )
+            rc = rebench.main(["due", "--config", p, "--engine", str(eng)])
+            self.assertIn(rc, (rebench.EXIT_OK, rebench.EXIT_BLOCKED))
+            self.assertEqual(
+                len(calls),
+                1,
+                f"the CLI must parse bench.yaml exactly once for both S5.7 "
+                f"keys; observed {len(calls)} parse calls",
+            )
+        finally:
+            if prev is None:
+                sys.modules.pop("yaml", None)
+            else:
+                sys.modules["yaml"] = prev
+
+    # ---- P2 regression + P1 end-to-end: a present-but-incomplete
+    #      --config is exit 2 "bad input" from the CLI (not a silent
+    #      default that then fails later). ----
+    def test_cli_present_but_incomplete_config_is_exit_2(self):
+        p = self._write("regression_tps_pct: 5\n")  # missing rebench_baseline
+        with self._with_yaml({"regression_tps_pct": 5}):
+            rc = rebench.main(["due", "--config", p, "--engine", "/nonexistent.yaml"])
+        # exit 2 (EXIT_CONFIG) before it ever reaches the engine load
+        self.assertEqual(rc, rebench.EXIT_CONFIG)
+
+    def test_cli_missing_config_still_runs_with_defaults(self):
+        # H10 "absent = default": no --config -> the gate/due path still
+        # runs (it fails later on the missing engine yaml, not on the
+        # config — a different exit-2 message, but the same exit code).
+        import tempfile
+
+        with self._with_yaml(None):
+            td = Path(tempfile.mkdtemp())
+            self.addCleanup(_cleanup_dir, td)
+            rc = rebench.main(["due", "--engine", str(td / "engine.yaml")])
+        # due with no baseline + no config -> not-due (EXIT_OK) OR
+        # missing-engine (EXIT_CONFIG) — both are NOT the config-missing
+        # key error. The point is the config did NOT short-circuit it.
+        self.assertIn(rc, (rebench.EXIT_OK, rebench.EXIT_CONFIG))
+
+
+def _cleanup_dir(p):
+    import shutil
+
+    shutil.rmtree(p, ignore_errors=True)
 
 
 if __name__ == "__main__":
