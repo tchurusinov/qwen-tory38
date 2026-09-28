@@ -11,6 +11,7 @@ repetitions: 3
 regression_tps_pct: 10                        # S5.5: > 10% t/s regression blocks a pin-bump PR
 rebench_baseline: bench-results/rebench-baseline.json   # S5.5/4.11: the last-accepted quick-bench baseline JSON (bench/rebench.py owns it)
 results_dir: /run/bonsai2/bench
+release_timeout_s: 90            # G3c round-9 P1+P2 (H13): HARD cap on each pool-release unload/reload subprocess call. Default 90 s = 3x the S2.8 30 s reload budget (a wedged manager's retry cycle). The S2.8 budget is still a soft WARN on the reload side; this is the worst-case lock hold. Lower it (e.g. to 30) to align the hard cap with the S2.8 budget for a tighter worst-case hold. Must be > 0.
 goldens_dir: bench/goldens                    # repo-relative at test time; /opt/bonsai2/share/bench/goldens at install
 main_guardrail_pct: 5          # mirrors harness.yaml main_tps_guardrail_pct
 main_api_key: ""               # S3.6 / H3 (post-live-run): MIRROR of harness.yaml main_api_key (the M6/M8 main-side Bearer key; empty = keyless). The authoritative source is harness.yaml; this key is documented here so a bench.yaml reader knows the knob exists.

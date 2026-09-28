@@ -148,8 +148,8 @@ def snapshot() -> dict:
       }
     The runner already snapshots PER ROW (one per M row) — the committed
     rows form the run's VRAM time series; the runner adds ONE extra
-    post-run snapshot (the run JSON's ``box_state_post_run``) so the
-    end-of-run state is explicit (H12)."""
+    post-scenarios snapshot (the run JSON's ``box_state_post_scenarios``)
+    so the end-of-scenarios state is explicit (H12)."""
     gpu = nvidia_smi()
     return {
         "nvidia_smi": gpu,

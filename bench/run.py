@@ -499,6 +499,17 @@ def run(
         cfg["_spotcheck"] = spotcheck
     results_dir = Path(cfg["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
+    # G3c round-9 P1 + P2: the H13 pool-release HARD cap (the unload/reload
+    # subprocess timeout, default 90 s). Config-driven via the
+    # ``release_timeout_s`` bench.yaml key so a wedged manager's stall
+    # inside the S3.5 lock is bounded by a tunable worst-case hold, not a
+    # hardcoded 3x the S2.8 30 s budget. A non-positive / non-numeric value
+    # is a named config error (the S5.4 exit-2 path), not a silent default.
+    release_timeout_s = float(cfg.get("release_timeout_s", 90.0))
+    if release_timeout_s <= 0:
+        raise config.ConfigError(
+            f"release_timeout_s must be > 0 (got {cfg.get('release_timeout_s')!r})"
+        )
     # S5.2 rotation + 1 GB cap on start (MAP 4.3: 7-day prune, keep newest).
     rotation_report = rotate_dir(results_dir)
     # S5.4 "flock per S3.5" / MAP 4.3 BONSAI2_BENCH_LOCK (one bench at a
@@ -564,6 +575,7 @@ def run(
                     reload_bin,
                     mock is not None,
                     engine=engine,
+                    timeout_s=release_timeout_s,
                 )
                 rec["precedes"] = sid
                 rec["follows"] = prev_sid
@@ -613,12 +625,18 @@ def run(
             "summary_path": str(summary_path),
             "rotation": rotation_report,
         }
-        # H12 (post-live-run): ONE extra post-run box-state snapshot so
-        # the END-OF-RUN state is explicit (the per-row snapshots are the
-        # run's VRAM time series — this one is the last sample, written
-        # into the run report so a reader never has to hunt the newest
-        # row file for it).
-        out["box_state_post_run"] = boxstate.snapshot()
+        # H12 (post-live-run): ONE extra post-SCENARIOS box-state snapshot
+        # so the END-OF-SCENARIOS state is explicit (the per-row snapshots
+        # are the run's VRAM time series — this one is the last sample,
+        # written into the run report so a reader never has to hunt the
+        # newest row file for it). G3c round-9 P2: the field was named
+        # ``box_state_post_run`` — misleading, because when
+        # ``--release-after`` is set the snapshot is captured BEFORE the
+        # post-run teardown, so it is "post-scenarios, pre-teardown", not
+        # "post-run". Renamed to ``box_state_post_scenarios`` to match the
+        # capture point (the post-teardown snapshot is
+        # ``box_state_after_release`` below).
+        out["box_state_post_scenarios"] = boxstate.snapshot()
         if release_after:
             # G3c round-6 P1 (same as the release_between case): the
             # post-run teardown also runs INSIDE the S3.5 bench lock —
@@ -626,15 +644,20 @@ def run(
             # second bench can acquire it while this one is tearing the
             # pool down.
             out["release_after"] = _pool_release(
-                "after", unload_bin, reload_bin, mock is not None, engine=engine
+                "after",
+                unload_bin,
+                reload_bin,
+                mock is not None,
+                engine=engine,
+                timeout_s=release_timeout_s,
             )
-            # G3c round-8 P2 (snapshot ordering): `box_state_post_run`
+            # G3c round-8 P2 (snapshot ordering): `box_state_post_scenarios`
             # above was captured BEFORE this teardown, so it reflects the
             # pool-LOADED state. A second snapshot is written here, AFTER
             # the release, so a reader sees both: the end-of-scenario pool
             # state and the post-teardown (pool-unloaded, main-only)
             # state. Without the flag the pool is untouched, so there is
-            # only the one snapshot (`box_state_post_run` above).
+            # only the one snapshot (`box_state_post_scenarios` above).
             out["box_state_after_release"] = boxstate.snapshot()
         if release_between:
             out["release_between"] = release_between_records
@@ -1114,6 +1137,7 @@ def _pool_release(
     reload_bin: str | None,
     mock: bool,
     engine: dict | None = None,
+    timeout_s: float = 90.0,
 ) -> dict:
     """One tier-2 pool release (S4.2 "stateless branch: unload between
     each M"; S4.3 "tier 2 = model + KV"). Manager-mediated through the
@@ -1129,6 +1153,15 @@ def _pool_release(
       scenario still runs against whatever pool state exists).
     * reload exit != 0 — ``partial`` (recorded; the warmup still runs
       against the instances that came up).
+
+    ``timeout_s`` (G3c round-9 P1 + P2): the HARD cap on each
+    unload/reload subprocess call (the S2.8 30 s reload budget is a soft
+    WARN — the hard cap is what bounds how long the bench holds the S3.5
+    lock when a manager-mediated release stalls inside the lock). Default
+    90 s (3x the S2.8 budget: enough to absorb a wedged manager's retry
+    cycle without holding the lock forever); the caller may lower it via
+    the ``release_timeout_s`` bench.yaml key to align the hard cap with
+    the S2.8 budget for a tighter worst-case lock hold.
 
     * G3c round-5 P1 (by design): an ``after`` release is UNLOAD-ONLY —
       it does NOT reload. The pool is LEFT in the main-only /
@@ -1179,7 +1212,7 @@ def _pool_release(
             [unload_bin, "--all"],
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=timeout_s,
             check=False,
         )
     except OSError as exc:
@@ -1195,18 +1228,23 @@ def _pool_release(
         )
         return rec
     except subprocess.TimeoutExpired:
-        # G3c round-4 P2: a hung unload that hits the 90 s subprocess cap
-        # is a named skip (the caller has no outer try/except — this would
-        # otherwise propagate and crash the boundary loop). 90 s is the
-        # HARD cap (a hung script must not stall the bench forever); the
-        # S2.8 30 s budget is the soft WARN recorded on the reload side
-        # below (data, not a gate) — a hung unload is recorded, not
-        # enforced.
+        # G3c round-4 P2: a hung unload that hits the hard subprocess cap
+        # (timeout_s, default 90 s) is a named skip (the caller has no
+        # outer try/except — this would otherwise propagate and crash the
+        # boundary loop). The cap is the HARD bound (a hung script must
+        # not stall the bench forever); the S2.8 30 s budget is the soft
+        # WARN recorded on the reload side below (data, not a gate) — a
+        # hung unload is recorded, not enforced. G3c round-9 P1 + P2: the
+        # cap is config-driven (the ``release_timeout_s`` bench.yaml key,
+        # passed in as ``timeout_s``), so a wedged manager's stall inside
+        # the S3.5 lock is bounded by a tunable worst-case hold, not a
+        # hardcoded 3x the S2.8 budget.
         rec.update(
             {
-                "note": "skipped (unload timed out at 90 s)",
+                "note": f"skipped (unload timed out at {timeout_s:g} s)",
                 "unload_exit": None,
                 "unload_timeout": True,
+                "timeout_s": timeout_s,
                 "s": round(time.monotonic() - t0, 3),
             }
         )
@@ -1241,7 +1279,7 @@ def _pool_release(
                 [reload_bin, "--all"],
                 capture_output=True,
                 text=True,
-                timeout=90,
+                timeout=timeout_s,
                 check=False,
             )
         except OSError as exc:
@@ -1257,18 +1295,21 @@ def _pool_release(
             )
             return rec
         except subprocess.TimeoutExpired:
-            # G3c round-4 P2: a hung reload that hits the 90 s subprocess
-            # cap is a named partial (the caller has no outer try/except).
-            # 90 s is the HARD cap; the S2.8 30 s reload budget is the
-            # soft WARN (data, not a gate) — a hung reload is recorded,
-            # not enforced.
+            # G3c round-4 P2: a hung reload that hits the hard subprocess
+            # cap (timeout_s, default 90 s) is a named partial (the caller
+            # has no outer try/except). The cap is the HARD bound; the
+            # S2.8 30 s reload budget is the soft WARN (data, not a gate)
+            # — a hung reload is recorded, not enforced. G3c round-9 P1 +
+            # P2: the cap is config-driven (the ``release_timeout_s``
+            # bench.yaml key, passed in as ``timeout_s``).
             rec.update(
                 {
-                    "note": "partial (reload timed out at 90 s)",
+                    "note": f"partial (reload timed out at {timeout_s:g} s)",
                     "reload_exit": None,
                     "reload_s": round(time.monotonic() - t0, 3),
                     "reload_budget_s": 30.0,
                     "budget_exceeded": True,
+                    "timeout_s": timeout_s,
                 }
             )
             return rec

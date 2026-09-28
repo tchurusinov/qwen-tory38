@@ -375,8 +375,11 @@ run's data trustworthy and repeatable.
   `bench/run.py:715` (`_capability_live` -> `bcap.run_mode(...)`).
 - **How:** change the `run_mode` signature to derive the wait from the
   deadline: `wait_s: float | None = None` and inside
-  `wait_s = wait_s if wait_s is not None else deadline_s + 60.0` (a 60 s
-  poll margin over the task's own backstop). Remove the 120.0 literal.
+  `wait_s = wait_s if wait_s is not None else deadline_s + TOOL_TIMEOUT_S + 30.0`
+  (a 90 s poll margin = 60 s tool-timeout bound + 30 s slack over the
+  task's own backstop — G3c round-2 P1: the original "60 s" sketch is
+  superseded by the implemented 90 s so the window EXCEEDS the
+  in-flight-step bound). Remove the 120.0 literal.
   `bench/run.py:_capability_live` already passes `deadline_s`, so it will flow
   through. Add a hermetic test: a `mock_cap` that is not terminal by 120 s but
   is by 360 s must PASS the M9/M10 row (not crash). Update

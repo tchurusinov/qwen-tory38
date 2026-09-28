@@ -129,10 +129,25 @@ def main_endpoint(harness: dict) -> dict:
     # this parser extracts it from the url string (the executor's source of
     # truth), so the recorded port matches what the executor actually
     # targets, not a hardcoded default.
-    if ":" in url:
-        _, _, port_s = url.rpartition(":")
-        if port_s.isdigit():
-            port = int(port_s)
+    # G3c round-9 P0: the executor POSTs to endpoint["url"] (exec.py), so a
+    # main URL with NO explicit port ("http://localhost", "http://x") would
+    # record port=30001 but actually target the default HTTP port 80 — the
+    # recorded port and the POST target disagree, and a key-walled main on a
+    # non-standard port 401s / 0-conns. Normalize: when the url has no
+    # explicit port, carry the default 30001 INTO the url so the target and
+    # the recorded port agree. (The subagent pool always builds
+    # http://127.0.0.1:<port> with an explicit port, so this is scoped to
+    # the main endpoint, whose url is operator-supplied and may omit the
+    # port.) urlparse handles the host/port split without a brittle regex.
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.port is not None:
+        port = parsed.port
+    elif parsed.scheme in ("http", "https") and parsed.hostname:
+        # no explicit port in the url -> carry the default into the url so
+        # the recorded port and the POST target agree.
+        url = f"{url.rstrip('/')}:{port}"
     return {
         "kind": "main",
         "port": port,

@@ -57,13 +57,18 @@ main agent's own release lever (H13, two tiers).
   120 s while the task's `--deadline` is 300 s (M9/M10 default) or 600 s
   (launch). Live M9 crash: `not terminal within 120.0s (last state:
   running)` — the taskworker was still running.
-- **What:** the driver's terminal-poll window = task deadline + 60 s poll
-  margin.
+- **What:** the driver's terminal-poll window = task deadline + 90 s poll
+  margin (60 s tool-timeout bound + a 30 s slack so the window EXCEEDS
+  the in-flight-step bound — G3c round-2 P1 spec-follows-code: the plan
+  originally sketched "deadline + 60 s"; the implemented value is
+  `deadline_s + TOOL_TIMEOUT_S + 30.0`).
 - **Where:** `bench/capability.py:312` (signature), the wait loop at
   `:453-465`; call site `bench/run.py:715` already passes `deadline_s`, so
   it flows through.
 - **How:** `wait_s: float | None = None`; inside: `wait_s = wait_s if wait_s
-  is not None else deadline_s + 60.0`. Remove the 120.0 literal. Hermetic
+  is not None else deadline_s + TOOL_TIMEOUT_S + 30.0` (the implemented
+  90 s = 60 s tool bound + 30 s slack, G3c round-2 P1). Remove the 120.0
+  literal. Hermetic
   test: a mock capability task that is not terminal by 120 s but is by
   deadline+margin passes the row; update `tests/test_harness_tools_loop.py`
   + `tests/test_bench_runner.py` for the new default.

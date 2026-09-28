@@ -503,7 +503,18 @@ def _config_value(
     input. ``strict_malformed=True`` (the documented CLI ``--config``
     path) makes that a ``RebenchError`` (the caller maps it to exit 2
     "bad input"); without strictness the legacy lenient behavior is
-    kept for internal callers."""
+    kept for internal callers.
+
+    G3c round-9 P2 (empty-string convention, named): a FALSY ``cfg_path``
+    — None (the argparse default) OR "" (an explicitly-passed
+    ``--config ""``) — is treated as "no config given", NOT as a bad
+    input: the ``if not cfg_path: return default`` short-circuit above is
+    the documented "empty = absent" convention, so ``--config ""`` is a
+    no-config escape hatch, consistent with the H10 "absent = default"
+    half of the contract (the bad-input half applies to a NON-EMPTY path
+    naming a present-but-malformed file). A caller wanting "" to be an
+    error must check it at the CLI layer; the config layer treats it as
+    absent by design (an empty path names nothing to parse)."""
     if not cfg_path:
         return default
     p = Path(cfg_path)
