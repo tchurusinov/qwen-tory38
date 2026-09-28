@@ -543,6 +543,20 @@ def run(
                 # "a bench never runs while another bench is active"
                 # holds for the release path too, not just the scenario
                 # rows.
+                # G3c round-7 P2 (ordering invariant): `precedes` / `follows`
+                # are the scenario ids IMMEDIATELY AROUND this boundary in
+                # `ordered_sids` (the ACTUAL execution order —
+                # `_order_for_m6` has already moved M6 first / M8 last),
+                # so they are always adjacent in execution, never
+                # "logically between two non-adjacent sids": the loop
+                # iterates `ordered_sids` in order and fires exactly one
+                # boundary between consecutive entries. The boundary records
+                # live in their own `release_between_records` list (NOT
+                # interleaved into `rows` — the rows list is scenario-only),
+                # so a reader reconstructing the timeline pairs the
+                # n-th boundary record with the transition between
+                # rows[n-1] and rows[n] (the `follows`/`precedes` ids make
+                # that pairing unambiguous even after the M6/M8 reorder).
                 prev_sid = ordered_sids[n - 1]
                 rec = _pool_release(
                     "between",
@@ -1115,6 +1129,17 @@ def _pool_release(
     record dict the run JSON carries (``release_between`` /
     ``release_after``)."""
     rec: dict = {"kind": kind, "tier": 2}
+    # G3c round-7 P2: an ``after`` record is UNLOAD-ONLY (no reload /
+    # warmup — the pool is intentionally left main-only). Mark it at record
+    # CREATION, not at the end, so a reader that inspects the record
+    # mid-construction (or the --mock / no-bin early-returns above) sees the
+    # shape from the start rather than missing the marker on a partially
+    # built dict. The ``between`` record carries its reload_* keys only if
+    # it actually reached the reload branch (a skipped/partial record
+    # names why via ``note``).
+    if kind == "after":
+        rec["reload"] = False
+        rec["reload_note"] = "absent by design (unload-only at run end)"
     if mock:
         rec.update({"mock": True, "note": "no-op under --mock (H13)"})
         return rec
@@ -1258,16 +1283,11 @@ def _pool_release(
         rec["warmup_s"] = round(time.monotonic() - w0, 3)
         rec["warmup_ok"] = warmup_ok
     rec["note"] = rec.get("note", "done")
-    # G3c round-4 P2: name the record-shape asymmetry explicitly. A
-    # ``between`` record carries the reload_* keys (reload runs at a
-    # boundary); an ``after`` record is UNLOAD-ONLY (S4.2 "at the run's
-    # end: unload only" — there is no reload + warmup at the end of the
-    # run), so the reload_* keys are ABSENT BY DESIGN, not missing. The
-    # explicit ``reload: false`` marker lets a reader infer the JSON
-    # schema without guessing that "no reload_* keys" means "not loaded".
-    if kind == "after":
-        rec["reload"] = False
-        rec["reload_note"] = "absent by design (unload-only at run end)"
+    # G3c round-4 P2 (moved to record creation, G3c round-7 P2): the
+    # ``reload: false`` marker for an ``after`` record is set at the top of
+    # this function (see the ``rec = {"kind": kind, "tier": 2}`` block) so a
+    # mid-construction reader sees the unload-only shape from the start.
+    # Nothing to do here; the marker is already on ``rec``.
     return rec
 
 

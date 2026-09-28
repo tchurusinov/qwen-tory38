@@ -192,6 +192,21 @@ class M5RubricTest(unittest.TestCase):
         )
         self.assertFalse(m5._match("M1 M7", golden), "missing middle fact fails")
 
+    def test_bare_stop_word_golden_matches_whole_word_only(self):
+        # G3c round-7 P1: a golden that is itself a single stop word
+        # ("a", "the", "an") has _tokens(g) == {} (the stop word is
+        # filtered), so the pre-fix post-filter token count misrouted it
+        # to the `g in a` substring fast-path and "banana" matched
+        # golden "a". The fix routes on the RAW (pre-filter) token count,
+        # so a single stop-word golden gets the whole-word matcher:
+        # "banana" does NOT match "a", "a cat" does.
+        self.assertFalse(m5._match("banana", "a"), "substring false positive")
+        self.assertTrue(m5._match("a cat", "a"), "word-boundary match")
+        self.assertFalse(m5._match("mother", "the"), "substring false positive")
+        self.assertTrue(m5._match("the cat", "the"), "word-boundary match")
+        self.assertFalse(m5._match("another", "an"), "substring false positive")
+        self.assertTrue(m5._match("an apple", "an"), "word-boundary match")
+
     def test_mis_sized_golden_fails_named(self):
         # the S5.2 "5 QA questions" rubric contract: a golden with a
         # different question count fails NAMED instead of the rubric

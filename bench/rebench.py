@@ -340,6 +340,20 @@ def quick_gate(
     # (unblock on the rubric half, record the skip) is the spec's weaker
     # reading, and the status marker makes that weaker reading VISIBLE
     # rather than silent.
+    # G3c round-7 P2 (make the `blocked`-vs-`status` split airtight): this
+    # holds in BOTH directions of the t/s baseline — (a) base_tps present
+    # but the triple differs -> t/s skipped, and (b) base_tps ABSENT
+    # (a first-run / no-aggregate baseline) AND the triple differs -> the
+    # t/s half is skipped for the same not-comparable reason even though
+    # there was nothing to drop from. In both, `blocked` reflects ONLY the
+    # rubric half; it is the gate DECISION (rubric regression OR a
+    # comparable t/s regression), NOT an "every half was checked" flag.
+    # A reader who keys on `blocked` alone for "did we verify t/s?" must
+    # also read `status` (== "not_comparable" -> the t/s half did not
+    # run) and `tps.skipped` / `tps.comparable`. The S5.5 contract is
+    # satisfied by the recorded `status` + `skipped` fields, and this
+    # comment is the authoritative note that `blocked` is not the whole
+    # story in that case.
     gate_status = "not_comparable" if not comparable else "comparable"
     return {
         "blocked": blocked,

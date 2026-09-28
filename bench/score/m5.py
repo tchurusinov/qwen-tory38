@@ -120,34 +120,35 @@ def _match(answer: str, golden: str) -> bool:
     g = _normalize(golden)
     if not g:
         return False
-    g_tokens = _tokens(g)
-    if len(g_tokens) == 1:
-        # G3c round-5 P2: a SINGLE-VALUE golden (exactly one non-stop token
-        # — "80", "5", "PTQ_1_0") matches as a WHOLE WORD, not a substring
-        # — "80" must not match "800". A multi-value golden ("M1, M2, M7",
-        # the live H8 regression shape "M1, M2, M7" vs "M1, M2, and M7")
-        # has > 1 token and keeps the ordered-containment + token-set path
-        # below (containment, not single-value). No current M5 golden
-        # answer is a bare stop word (g_tokens empty -> containment + the
-        # degenerate whole-word fallback below); this hardens the
-        # single-value containment to word boundaries.
+    # G3c round-7 P1: a SINGLE-VALUE golden — exactly one RAW token, whether
+    # or not that token is itself a stop word ("80", "5", "PTQ_1_0", OR the
+    # bare stop words "a"/"the"/"an") — matches as a WHOLE WORD, not a
+    # substring. The routing MUST use the RAW (pre stop-word-filter) token
+    # count: a bare stop word like "a" has _tokens(g) == {} (the stop word
+    # is dropped), so a post-filter count would misroute it to the `g in a`
+    # substring fast-path below, and "banana" would match golden "a". The
+    # whole-word regex is the correct matcher for BOTH "80" (must not match
+    # "800", G3c round-5 P2) and "a" (must not match "banana", this round).
+    # No current M5 golden is a bare stop word; this hardens the degenerate
+    # path while keeping the round-5 single-value whole-word behavior.
+    if len(_TOKEN_RE.findall(g)) == 1:
         return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
     # exact match or containment (the subagent may pad the answer).
     if a == g or g in a:
         return True
     # H8 tolerant half: conjunctions / word-boundary phrasing. Drop the
     # stop particles and require every golden token in the answer's token
-    # set, IN GOLDEN ORDER (G3c round-6 P1: "tolerant of phrasing" = extra
-    # words / case / punctuation / stop-words between the facts; the facts
-    # keep their golden order, so "M7, M2, M1" does NOT pass "M1, M2, M7").
-    # Ordered containment above remains the strict fast-path special case.
+    # sequence, IN GOLDEN ORDER (G3c round-6 P1: "tolerant of phrasing" =
+    # extra words / case / punctuation / stop-words between the facts; the
+    # facts keep their golden order, so "M7, M2, M1" does NOT pass
+    # "M1, M2, M7"). Ordered containment above remains the strict
+    # fast-path special case.
     g_tokens = _tokens(g)
     if not g_tokens:
-        # a golden that is ALL stop words (e.g. "an") — the token-set half
-        # is vacuous, so fall back to a WHOLE-WORD containment (a bare
-        # stop-word golden must match "an" as a word, not as a substring
-        # of "banana"; G3c round-1 P2). No golden answer is a bare stop
-        # word today, so this only hardens the degenerate path.
+        # a golden that is ALL stop words across 2+ raw tokens (e.g. "a, an"
+        # — no M5 golden today is like this) — the token-set half is
+        # vacuous, so fall back to a WHOLE-WORD containment of the raw
+        # golden string (G3c round-1 P2 degenerate path).
         return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
     return _is_subseq(_token_seq(g), _token_seq(a))
 
