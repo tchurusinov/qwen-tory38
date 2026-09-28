@@ -318,6 +318,28 @@ class M9M10CapabilityTest(MockRunTestBase):
 
 
 class RunnerExitCodeTest(MockRunTestBase):
+    def test_release_timeout_s_non_numeric_is_config_error_not_raw(self):
+        # G3c round-15 P2: the DIRECT run() path (which bypasses
+        # config.load's numeric validation) must name a non-numeric
+        # release_timeout_s as a config.ConfigError (the S5.4 exit-2
+        # path main() maps it to), not leak a raw ValueError (a
+        # non-numeric string) or TypeError (a list) from float().
+        import bench.config as bconfig
+
+        # "90" IS parseable (float("90") == 90.0) — config.load would have
+        # validated it, but the direct run() path accepts it too. The P2 is
+        # the UNPARSEABLE values: a non-numeric string (ValueError) and a
+        # list (TypeError).
+        cfg = {"results_dir": str(self.results), "release_timeout_s": "ninety"}
+        with self.assertRaises(bconfig.ConfigError) as ctx:
+            bench_run.run(cfg, scenario="M1", mock_spec=MOCK_SPEC)
+        self.assertIn("release_timeout_s", str(ctx.exception))
+        # a list is the other non-numeric shape (TypeError, not ValueError)
+        cfg2 = {"results_dir": str(self.results), "release_timeout_s": [90]}
+        with self.assertRaises(bconfig.ConfigError) as ctx2:
+            bench_run.run(cfg2, scenario="M1", mock_spec=MOCK_SPEC)
+        self.assertIn("release_timeout_s", str(ctx2.exception))
+
     def test_bad_config_exit_2(self):
         env = _env(self.tmp)
         p = self.tmp / "bad.yaml"

@@ -84,32 +84,17 @@ def _normalize(s: str) -> str:
     return s
 
 
-def _tokens(s: str) -> list[str]:
-    # G3c round-2 P2: extract the alnum/underscore runs (commas and the
-    # remaining punctuation are word boundaries), then drop the stop
-    # particles. A naive s.split() would keep the comma attached to the
-    # token ("m1," != "m1"), so the token-set half only matched when the
-    # answer used the exact same comma placement. G3c round-14 P2: the
-    # return is a LIST, not a SET — the only use is the empty-check on a
-    # 2+-token golden (order never matters there), so the order-losing
-    # set type was misleading; the ordered matching relies on
-    # _token_seq, and _tokens just mirrors its "any non-stop token?"
-    # question without the set allocation.
-    return [t for t in _TOKEN_RE.findall(s) if t not in _STOP]
-
-
 def _token_seq(s: str) -> list[str]:
-    """The ORDERED non-stop tokens — the same extraction as _tokens, but
-    the ordered sequence that the subsequence match actually consumes.
-    G3c round-6 P1: the multi-value match is an ordered
+    """The ORDERED non-stop tokens (G3c round-2 P2: the alnum/underscore
+    runs, commas / punctuation as word boundaries, stop particles
+    dropped). G3c round-6 P1: the multi-value match is an ordered
     subsequence, not a bare set-subset — a golden "M1, M2, M7" must not
     match an answer that lists the facts out of order ("M7, M2, M1").
     'Tolerant of phrasing' means extra words / case / punctuation / stop
     words may appear BETWEEN the facts; the facts themselves keep their
-    golden order. (G3c round-14 P2: _tokens is now a list too — both
-    share the same filter, _tokens exists only for the empty-check on a
-    2+-token golden.)
-    """
+    golden order. G3c round-15 P2: the round-14 `_tokens` helper (the
+    order-insensitive twin, which after round-14 returned the same
+    list) is retired — this is the single extraction."""
     return [t for t in _TOKEN_RE.findall(s) if t not in _STOP]
 
 
@@ -132,7 +117,7 @@ def _match(answer: str, golden: str) -> bool:
     # or not that token is itself a stop word ("80", "5", "PTQ_1_0", OR the
     # bare stop words "a"/"the"/"an") — matches as a WHOLE WORD, not a
     # substring. The routing MUST use the RAW (pre stop-word-filter) token
-    # count: a bare stop word like "a" has _tokens(g) == [] (the stop word
+    # count: a bare stop word like "a" has _token_seq(g) == [] (the stop word
     # is dropped), so a post-filter count would misroute it to the `g in a`
     # substring fast-path below, and "banana" would match golden "a". The
     # whole-word regex is the correct matcher for BOTH "80" (must not match
@@ -141,36 +126,28 @@ def _match(answer: str, golden: str) -> bool:
     # path while keeping the round-5 single-value whole-word behavior.
     if len(_TOKEN_RE.findall(g)) == 1:
         return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
-    # exact match or containment (the subagent may pad the answer).
-    if a == g or g in a:
-        return True
-    # H8 tolerant half: conjunctions / word-boundary phrasing. Drop the
-    # stop particles and require every golden token in the answer's token
-    # sequence, IN GOLDEN ORDER (G3c round-6 P1: "tolerant of phrasing" =
-    # extra words / case / punctuation / stop-words between the facts; the
-    # facts keep their golden order, so "M7, M2, M1" does NOT pass
-    # "M1, M2, M7"). Ordered containment above remains the strict
-    # fast-path special case.
-    g_tokens = _tokens(g)
-    if not g_tokens:
-        # a golden that is ALL stop words across 2+ raw tokens (e.g. "a, an"
-        # — no M5 golden today is like this). The H8 token-set half is
-        # vacuous (both _token_seq sides are empty, so _is_subseq would
-        # return True for ANY answer — the degenerate the G3c round-8 P2
-        # regression test pins against). G3c round-10 P2 (control-flow
-        # precision, the reviewer's "unreachable branch" note): this line
-        # is ONLY reached when the substring fast-path above (line 137,
-        # `g in a`) ALREADY FAILED — for a 2+-token golden the whole-word
-        # regex of the normalized literal is a STRICT SUBSET of the
-        # substring check (whole-word containment implies substring
-        # containment), so this branch is provably False-when-reached. It
-        # is kept as the named degenerate guard (G3c round-1 P2) rather
-        # than deleted, so a future refactor that reorders the checks
-        # (e.g. moves the substring check below) does not silently change
-        # the multi-stop-word behavior — the round-8 test pins the
-        # observable outcome.
-        return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
-    return _is_subseq(_token_seq(g), _token_seq(a))
+    # G3c round-15 P1 + P2: the round-2 bare `g in a` fast path was over-
+    # permissive — it let the golden be a strict-PREFIX substring of the
+    # answer ("m1, m2" in "m1, m22"), so the last golden token ("m2")
+    # substring-matched a longer answer word ("m22") and the question
+    # falsely passed. The ORDERED whole-token subsequence is the correct
+    # matcher for a normal multi-token golden: every golden content token
+    # must appear as a WHOLE token, IN GOLDEN ORDER ("m1, m2" does NOT
+    # match "m1, m22"; exact-equality is the subsequence's special case;
+    # padded answers / stop-words / comma-placement still pass — the
+    # H8 "tolerant of phrasing" contract, round-6).
+    g_seq = _token_seq(g)
+    if g_seq:
+        # normal multi-token golden (has >= 1 content token).
+        return _is_subseq(g_seq, _token_seq(a))
+    # a golden of 2+ raw tokens that are ALL stop words (e.g. "a, an" —
+    # no M5 golden today is like this): no content token, so the
+    # subsequence is vacuous (empty needle -> _is_subseq True for ANY
+    # answer — the degenerate the G3c round-8 P2 regression test pins
+    # against). The pinned observable behavior (round-8/10) is substring
+    # containment of the literal: "a, an" / "there is a, an error" /
+    # "a, another one" match; "a an error" (no comma) does not.
+    return g in a
 
 
 def score(payload: dict, root=None) -> dict:

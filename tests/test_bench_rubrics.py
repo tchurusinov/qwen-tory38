@@ -192,9 +192,25 @@ class M5RubricTest(unittest.TestCase):
         )
         self.assertFalse(m5._match("M1 M7", golden), "missing middle fact fails")
 
+    def test_multi_token_golden_rejects_prefix_substring(self):
+        # G3c round-15 P1: the round-2 bare `g in a` fast path let the
+        # golden be a strict-PREFIX substring of the answer — "M1, M2"
+        # vs "M1, M22" -> "m1, m2" in "m1, m22" -> the last golden token
+        # ("m2") substring-matched a longer answer word ("m22") and the
+        # question falsely passed. The ordered whole-token subsequence is
+        # the matcher now: the golden's content tokens must each appear
+        # as a WHOLE token, in golden order.
+        golden = "M1, M2"
+        self.assertFalse(m5._match("M1, M22", golden), "prefix-substring fails")
+        self.assertFalse(m5._match("M1 M22", golden), "prefix-substring, no comma")
+        self.assertTrue(m5._match("M1, M2", golden), "exact passes")
+        self.assertTrue(m5._match("M1, M2 exactly", golden), "padded passes")
+        self.assertTrue(m5._match("M1 M2 M77", golden), "extra fact tolerated")
+        self.assertTrue(m5._match("M1 and M2", golden), "stop-word tolerated")
+
     def test_bare_stop_word_golden_matches_whole_word_only(self):
         # G3c round-7 P1: a golden that is itself a single stop word
-        # ("a", "the", "an") has _tokens(g) == {} (the stop word is
+        # ("a", "the", "an") has _token_seq(g) == [] (the stop word is
         # filtered), so the pre-fix post-filter token count misrouted it
         # to the `g in a` substring fast-path and "banana" matched
         # golden "a". The fix routes on the RAW (pre-filter) token count,
@@ -437,13 +453,12 @@ class M9RubricTest(unittest.TestCase):
 
     def test_multi_stop_word_golden_degenerate_path(self):
         # G3c round-8 P2: a golden of 2+ raw tokens that are ALL stop
-        # words (e.g. "a, an") has _tokens(g) == {} (the H8 token-set
-        # half is vacuous), so the ordered-subsequence half cannot match
-        # it; it resolves via the SUBSTRING fast-path (line 137, `g in a`)
-        # before the degenerate whole-word branch (line 152) is reached —
-        # and the degenerate branch is only entered when the substring
-        # check already failed, so it is provably False-when-reached. No
-        # M5 golden today is multi-stop-word, so this path was untested —
+        # words (e.g. "a, an") has no content token (_token_seq(g) == []),
+        # so the ordered-subsequence half is vacuous (empty needle ->
+        # _is_subseq True for ANY answer — the degenerate pinned below).
+        # It resolves via SUBSTRING containment of the literal instead
+        # (the round-15 degenerate branch, `g in a`). No M5 golden today
+        # is multi-stop-word, so this path is untested by the goldens —
         # pin the OBSERVABLE behavior: the literal "a, an" and any answer
         # that SUBSTRING-contains it match; an answer without the literal
         # (even with both stop-words present separately) does not.

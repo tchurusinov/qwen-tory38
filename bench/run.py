@@ -505,7 +505,16 @@ def run(
     # inside the S3.5 lock is bounded by a tunable worst-case hold, not a
     # hardcoded 3x the S2.8 30 s budget. A non-positive / non-numeric value
     # is a named config error (the S5.4 exit-2 path), not a silent default.
-    release_timeout_s = float(cfg.get("release_timeout_s", 90.0))
+    # G3c round-15 P2: the direct-run() path (bypassing config.load's
+    # numeric validation) must not leak a raw TypeError (a list) or
+    # ValueError (a non-numeric string) — name it as a config error, the
+    # same S5.4 exit-2 path a validated load would take.
+    try:
+        release_timeout_s = float(cfg.get("release_timeout_s", 90.0))
+    except (TypeError, ValueError) as exc:
+        raise config.ConfigError(
+            f"release_timeout_s must be a number (got {cfg.get('release_timeout_s')!r})"
+        ) from exc
     if release_timeout_s <= 0:
         raise config.ConfigError(
             f"release_timeout_s must be > 0 (got {cfg.get('release_timeout_s')!r})"

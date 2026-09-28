@@ -145,7 +145,13 @@ def row_comparability(row: dict) -> dict | None:
     8`` cap is constant, but the load varies per M — M2 = 8-wide,
     M7 = 16, M8 = 8 — so comparability is a RECORDED property). Pre-
     amendment rows carry no triple -> None (the gate compares on t/s
-    alone, the legacy behavior)."""
+    alone, the legacy behavior). G3c round-15 P2: the per-key ``c.get``
+    calls are a deliberate 3-KEY PROJECTION, not a redundant re-fetch —
+    it guarantees the returned triple is EXACTLY the S5.5 comparability
+    shape (n_tasks/concurrency/N) even if a row's ``comparability``
+    dict carries extra fields or omits one (an omitted key -> None, the
+    legacy "no triple" sentinel for that axis), so a caller never sees
+    the raw row dict and can rely on the fixed keys."""
     c = row.get("comparability")
     if isinstance(c, dict):
         return {
