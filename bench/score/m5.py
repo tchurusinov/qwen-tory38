@@ -95,6 +95,18 @@ def _match(answer: str, golden: str) -> bool:
     g = _normalize(golden)
     if not g:
         return False
+    g_tokens = _tokens(g)
+    if len(g_tokens) == 1:
+        # G3c round-5 P2: a SINGLE-VALUE golden (exactly one non-stop token
+        # — "80", "5", "PTQ_1_0") matches as a WHOLE WORD, not a substring
+        # — "80" must not match "800". A multi-value golden ("M1, M2, M7",
+        # the live H8 regression shape "M1, M2, M7" vs "M1, M2, and M7")
+        # has > 1 token and keeps the ordered-containment + token-set path
+        # below (containment, not single-value). No current M5 golden
+        # answer is a bare stop word (g_tokens empty -> containment + the
+        # degenerate whole-word fallback below); this hardens the
+        # single-value containment to word boundaries.
+        return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
     # exact match or containment (the subagent may pad the answer).
     if a == g or g in a:
         return True

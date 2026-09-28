@@ -955,6 +955,20 @@ def _run_scenario(
         # silent compare: the engine's --parallel 8 cap is constant, but
         # the load the bench applies varies per M, so comparability is a
         # RECORDED property, not an assumption).
+        # G3c round-5 P2: the triple is M7-ONLY by design, not an
+        # oversight. M7 is the S5.1 "t/s at the ceiling" saturation
+        # figure (the batch WALL-CLOCK aggregate_tps_wall — a
+        # saturation metric that the S5.5 re-bench gate compares
+        # like-with-like across runs). M8 (the other run_concurrent
+        # user) scores a GUARDRAIL (main t/s within main_guardrail_pct
+        # of the M6 control, S5.2) — its verdict is RELATIVE to M6, not
+        # an absolute ceiling, so a load-triple mismatch does not make
+        # it "not comparable" in the S5.5 sense (a guardrail is
+        # self-normalizing: the baseline IS the same run's M6 control).
+        # M8 records m8_main_tps / m6_baseline_tps per-task (not the
+        # batch wall figure), so no triple is needed for it. If a future
+        # S5.5 gate extension adds an M8 absolute-t/s half, THAT is the
+        # point at which the M8 row would carry its own triple.
         row["comparability"] = {
             "n_tasks": len(tasks),
             "concurrency": conc,
@@ -1059,6 +1073,18 @@ def _pool_release(
       scenario still runs against whatever pool state exists).
     * reload exit != 0 — ``partial`` (recorded; the warmup still runs
       against the instances that came up).
+
+    * G3c round-5 P1 (by design): an ``after`` release is UNLOAD-ONLY —
+      it does NOT reload. The pool is LEFT in the main-only /
+      ``user_unloaded`` state (S3.2: a mode the user asked for, not a
+      budget outcome). This is the whole point of ``--release-after``
+      (H13: "a live run leaves no stranded instances" — the operator
+      asked to free the pool at the run's end; the reload happens on
+      re-delegation, the S4.3 tier-2 contract, NOT inside the bench).
+      The bench is a one-shot measurement tool, not a pool controller —
+      it records the state it leaves, it does not restore it. The
+      ``between`` release (a scenario boundary) DOES reload + warmup,
+      because the next scenario still needs the pool.
 
     ``kind`` is ``between`` (a scenario boundary: unload -> reload ->
     warmup) or ``after`` (the run's end: unload only). Returns the

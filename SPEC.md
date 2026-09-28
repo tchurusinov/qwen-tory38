@@ -1009,6 +1009,20 @@ while another bench is active; it may run alongside normal subagent
 traffic (bench traffic is marked `user: "bench"` in instance logs and
 excluded from doctrine stats).
 
+**Bench stdout schema (S3.1 "one JSON object on stdout", bench
+adaptation):** the success object is
+`{"status": "done", "n_scenarios": int, "verdicts": {sid: "pass"|"fail"},
+"rows": [...]}` and MAY additionally carry the two optional H13 keys
+`release_after` (the post-run teardown record: `{"kind": "after",
+"tier": 2, ...}`, or the `--mock` no-op dict) and `release_between`
+(a list of one record per scenario boundary, each
+`{"kind": "between", "precedes": sid, "follows": sid, ...}`). Both
+are present whenever the corresponding flag was passed (including the
+`--mock` no-op record); absent when the flag was not. A crash object
+is `{"status": "crash", "error": "..."}`. (The H13 S4.3 delta — these
+keys extend the S3.1 stdout; consumers that predate them should treat
+unknown keys as data, not errors.)
+
 ### 3.6 Configuration — `harness.yaml`
 
 ```yaml

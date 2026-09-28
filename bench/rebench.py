@@ -320,8 +320,23 @@ def quick_gate(
             reasons.append(f"{sid} auto-rubric regressed: pass -> {cur_v}")
 
     blocked = tps_regression or bool(rubric_regressions)
+    # G3c round-5 P1: name the "unblocked-but-tps-skipped" case distinctly
+    # at the GATE-OUTPUT level (not just inside tps_info). The S5.5 gate
+    # is "blocked = t/s regression OR rubric regression" — when the t/s
+    # half is not comparable (the load triple differs) and no rubric
+    # regressed, the gate unblocks on the rubric half alone with the t/s
+    # half SKIPPED. A reader seeing only `blocked: false` could not tell
+    # "t/s checked and passed" from "t/s skipped, rubric passed". The
+    # explicit gate-level `status: "not_comparable"` (alongside
+    # `blocked: false`) names it. The S5.5 spec requires RECORDING the
+    # not-comparable case, not unblocking on it; the current behavior
+    # (unblock on the rubric half, record the skip) is the spec's weaker
+    # reading, and the status marker makes that weaker reading VISIBLE
+    # rather than silent.
+    gate_status = "not_comparable" if not comparable else "comparable"
     return {
         "blocked": blocked,
+        "status": gate_status,
         "tps": tps_info,
         "rubrics": rubric_info,
         "regression_tps_pct": regression_tps_pct,

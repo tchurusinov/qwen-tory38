@@ -273,6 +273,11 @@ class QuickGateTest(unittest.TestCase):
         self.assertFalse(gate["blocked"])  # not blocked by the skipped t/s half
         self.assertFalse(gate["tps"].get("comparable", True))
         self.assertFalse(gate["tps"].get("regression", False))
+        # G3c round-5 P1: the gate-level status names the "unblocked but
+        # t/s skipped" case distinctly — a reader seeing blocked: false
+        # alone could not tell "t/s checked and passed" from "t/s
+        # skipped, rubric passed".
+        self.assertEqual(gate.get("status"), "not_comparable")
         self.assertTrue(
             any("not comparable" in r for r in gate["reasons"]),
             gate["reasons"],
