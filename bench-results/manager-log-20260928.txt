@@ -1,0 +1,13 @@
+[2026-09-28T14:50:04] bonsai2-manager: S2.3: total 127.54 GB, main 1.36 GB (live cgroup), os-reserved 8.0 GB, N=2, budget 14.78 GB
+[2026-09-28T14:50:04] bonsai2-manager: S2.3: free 118.17 GB -> N'=2
+[2026-09-28T14:50:04] bonsai2-manager: S1.4 allocation tier need: 15.08 GB (max(footprint 14.08 + 1.0 GB margin, cap 14.78 GB); kv_cache=q4_0)
+[2026-09-28T14:50:04] bonsai2-manager: S2.1: main endpoint http://localhost:30001 healthy=True (recorded in health.json; the pool is an independent engine, Wants= not Requires=)
+[2026-09-28T14:50:04] bonsai2-manager: i=0 S1.4 allocation tier: free 52.90 GB >= need 15.08 GB (max(footprint + 1.0 GB margin, per-instance cap))
+[2026-09-28T14:50:15] bonsai2-manager: i=0 healthy=True (S2.5: wait before next)
+[2026-09-28T14:50:15] bonsai2-manager: i=1 S1.4 allocation tier: free 38.20 GB >= need 15.08 GB (max(footprint + 1.0 GB margin, per-instance cap))
+[2026-09-28T14:50:20] bonsai2-manager: i=1 healthy=True (S2.5: wait before next)
+[2026-09-28T14:50:20] bonsai2-manager: full load: 2 instance(s) spawned
+[2026-09-28T14:50:21] bonsai2-manager: S2.6: measured boot 17.2 s -> boot_target_s=17 written to serving.yaml
+[2026-09-28T15:51:17] bonsai2-manager: S3.2 unload: i=0 stopped, port-down=True
+[2026-09-28T15:51:18] bonsai2-manager: S3.2 unload: i=1 stopped, port-down=True
+[2026-09-28T15:51:18] bonsai2-manager: control: unload [0, 1] -> ok (ack e4dca795177a4c7e8aa3abbd67663e9a)

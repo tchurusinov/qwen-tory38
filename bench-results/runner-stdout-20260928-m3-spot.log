@@ -1,0 +1,2 @@
+[bench] WARN ERR_CONFIG: results_dir: '/run/bonsai2/bench' does not exist yet (will be created at run time) (override with --results-dir; see the pre-install convention in bench-results/README.md)
+{"status": "done", "n_scenarios": 1, "verdicts": {"M3": "pass"}, "summary": "/home/blckwll/prod/qwen-tory38/bench-results/2026-09-28_b2cbe98.md"}

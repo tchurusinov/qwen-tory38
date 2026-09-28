@@ -1,0 +1,180 @@
+{
+  "scenario": "M8",
+  "generated_ts": "20260928T124604Z",
+  "commit": "b2cbe98",
+  "config_path": "/home/blckwll/prod/qwen-tory38/etc/bench.yaml",
+  "repetitions": 3,
+  "tasks": [
+    {
+      "ok": true,
+      "answer": "The bench task shape is a short completion that asks for a one-sentence summary.",
+      "reasoning": "We need to respond to user: \"[M8 task 0] Short completion: summarize the bench task shape in one sentence.\" Need likely produce one sentence. Need infer what \"bench task shape\" means? Maybe some context? M8 task 0? Short completion. We need summarize bench task shape in one sentence. Could be from a benchmark? Maybe asks to summarize the shape of bench task? We need answer likely one sentence only. Need maybe \"The bench task shape is a single short completion that summarizes the given prompt in one sentence.\" But user asks: \"[M8 task 0] Short completion: summarize the bench task shape in one sentence.\" They want output: summarize the bench task shape in one sentence. Maybe they are testing formatting? Need comply: one sentence.\n\nNeed consider if \"bench task shape\" refers to \"task shape\" in M8? Could be a meta-task: short completion: summarize the bench task shape in one sentence. Maybe \"bench task shape\" is a concept from some evaluation? Could be they want \"The task shape is: [M8 task 0] Short completion: summarize the bench task shape in one sentence.\" Hmm.\n\nLet's parse: User message: \"[M8 task 0] Short completion: summarize the bench task shape in one sentence.\" This might be a prompt from a task set. They ask to \"Short completion: summarize the bench task shape in one sentence.\" Could mean produce a short completion that summarizes the \"bench task shape\". The bracketed [M8 task 0] maybe task identifier. \"bench task shape\" maybe the shape of a benchmark task? Need answer one sentence.\n\nNeed maybe: \"The bench task shape is a single-sentence summary of a short-completion prompt.\" But that's weird.\n\nCould be in context of \"M8 task 0\" from some dataset where tasks are labeled, and \"Short completion\" is type. They ask to summarize the bench task shape in one sentence. Maybe \"bench task\" is like a bench? shape? Hmm.\n\nMaybe there is hidden expected answer? \"The bench task shape is a short completion that asks for a one-sentence summary of the bench task shape.\" That's tautological but safe.\n\nNeed ensure one sentence. Could say: \"The bench task shape is a one-sentence summary request for a short-completion prompt.\" That's one sentence.\n\nBut maybe user wants exactly: \"The bench task shape is a short completion asking for a one-sentence summary.\" Good.\n\nNeed final only one sentence. Ensure no extra.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 20,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 20,
+      "time_to_first_token_ms": 0.0957879819907248,
+      "elapsed_ms": 114155.37080599461,
+      "n_content_chunks": 17,
+      "decode_tps": 7.5927167944527465,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "It is a short-form completion task that asks for a one-sentence summary of the given topic or input.",
+      "reasoning": "We need to respond to user: \"[M8 task 1] Short completion: summarize the bench task shape in one sentence.\" We need infer what \"bench task shape\" refers to. Likely from some previous context? We only have this message. Need answer maybe a one-sentence summary of task shape? Could be from M8 task 1? Maybe a benchmark? \"bench task shape\" perhaps \"bench task shape\" is a phrase from some dataset? User asks: Short completion: summarize the bench task shape in one sentence.\n\nWe need produce final one sentence. Need be safe. Could be asking to summarize \"the bench task shape\" maybe in a lab? Without context, maybe they expect a concise template? We need maybe say \"The bench task shape is a short completion that asks for a one-sentence summary.\" But that's meta.\n\nLet's parse: [M8 task 1] Short completion: summarize the bench task shape in one sentence.\nThis may be from a prompt injection? M8? Maybe tasks in some benchmark? \"bench task shape\" maybe \"bench\" as in \"benchmarks\" and \"task shape\" refers to the structure of a benchmark task? Could ask to summarize the shape: a short completion task that asks for one sentence. We can answer: \"It is a short-form completion task that asks the model to provide a one-sentence summary of the specified content.\" That seems plausible.\n\nNeed only one sentence. Ensure final one sentence.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 25,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 25,
+      "time_to_first_token_ms": 0.02502300776541233,
+      "elapsed_ms": 101221.56418598024,
+      "n_content_chunks": 22,
+      "decode_tps": 3.498369775962685,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "The task is a one-sentence summary of the bench task.",
+      "reasoning": "We need to respond to user: \"[M8 task 2] Short completion: summarize the bench task shape in one sentence.\" Need infer what \"bench task shape\" means? Likely a task from some context? Maybe \"bench task shape\" refers to summarizing \"bench\" task? We have no prior context. Need produce one sentence short completion. Maybe they expect answer: \"The bench task shape is a short completion prompt asking for a one-sentence summary.\" But \"bench task shape\" maybe in M8 task 2? Could be from a dataset where \"bench task shape\" means \"summarize the bench task shape in one sentence.\" Could be they want a completion: one sentence describing shape of a bench task. Maybe \"bench task\" is a benchmark task? \"shape\" as in task shape? Need be safe: concise one-sentence summary: \"It is a single-sentence summary task that asks the model to compress a given scenario into one concise sentence.\" But user specifically: \"[M8 task 2] Short completion: summarize the bench task shape in one sentence.\" Maybe they are issuing a prompt: \"Short completion: summarize the bench task shape in one sentence.\" They want us to complete? Need maybe output just one sentence. Let's craft a generic sentence: \"The bench task shape is a one-sentence summary of a given bench task\u2019s required output format.\" Hmm.\n\nMaybe \"bench task shape\" is an object: a bench (furniture) task? \"bench task\" in robotics? Shape? Could be from \"M8 task 2\" maybe a set of tasks for evaluating model? The instruction: \"Short completion: summarize the bench task shape in one sentence.\" Could be asking to summarize \"the bench task shape\" (the shape of a bench task) in one sentence. Maybe answer: \"A bench task has a fixed format: it asks for a short completion of a prompt in exactly one sentence.\" That seems plausible.\n\nNeed final only one sentence? User requests one sentence. Ensure one sentence. Could say: \"The bench task shape is a brief, one-sentence completion prompt asking the model to summarize the required task output.\" That is one sentence. Maybe too meta.\n\nNeed maybe no extra. final one sentence. Ensure not two. \"It asks for a one-sentence summary of the bench task\u2019s required output shape.\" That's one sentence. But \"bench task shape\" maybe the shape is \"a short completion summarizing the bench task in one sentence.\" Could be self-referential.\n\nLet's final: \"It is a short completion task requiring a single-sentence summary of the bench task\u2019s required output format.\" One sentence. But if they want \"bench task shape\" as \"bench task\" not \"bench task\u2019s required output format\". Maybe: \"The task is a one-sentence summary of a bench task.\" Simple.\n\nGiven ambiguity, choose concise.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 13,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 13,
+      "time_to_first_token_ms": 0.028654991183429956,
+      "elapsed_ms": 127386.6953959805,
+      "n_content_chunks": 13,
+      "decode_tps": 7.3799692409541,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "The bench task is a short-completion prompt that asks for a single-sentence summary of the task\u2019s shape.",
+      "reasoning": "We need to answer user's request: \"[M8 task 3] Short completion: summarize the bench task shape in one sentence.\" Need infer context? M8 task 3 maybe from some benchmark? Need provide one sentence summary of bench task shape. We don't have more context. Need likely answer concise. Need maybe \"The bench task shape is a single concise sentence that summarizes the task.\" But maybe they ask to summarize the bench task shape in one sentence. Could be meta: \"The task is to summarize the bench task shape in one sentence.\" Hmm.\n\nNeed think. \"M8 task 3\" perhaps from some evaluation where tasks are numbered. User: \"[M8 task 3] Short completion: summarize the bench task shape in one sentence.\" They want output only short completion. We need satisfy: one sentence summarizing bench task shape. What is \"bench task shape\"? Maybe in benchmark design, \"bench task shape\" refers to the shape/format of the benchmark task? Could be asking: \"summarize the bench task shape in one sentence.\" We need produce a sentence that summarizes it. Without context, can say \"The bench task asks for a one-sentence summary of the task shape itself.\" That's self-referential. But maybe \"bench task shape\" means the shape of the task (input/output). We can say \"It is a short-completion task requiring a single-sentence summary of the benchmark task\u2019s shape.\" That likely matches.\n\nNeed final one sentence only. Ensure no extra.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 26,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 26,
+      "time_to_first_token_ms": 0.026446999981999397,
+      "elapsed_ms": 103353.26538200025,
+      "n_content_chunks": 23,
+      "decode_tps": 3.79418762586735,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "The bench task shape is a single, concise sentence that captures the overall structure and goal of the task.",
+      "reasoning": "We need to respond to user: \"[M8 task 4] Short completion: summarize the bench task shape in one sentence.\" Need infer context? M8 task 4? \"bench task shape\" maybe a benchmark task? They ask short completion: summarize the bench task shape in one sentence. Need likely produce one sentence. Need maybe \"bench task shape\" means shape of the task? Could be from some dataset? We need answer succinctly. Maybe \"The bench task shape is a single-sentence summary of the task's structure.\" But maybe they expect summary of \"bench task shape\" from some hidden context? Let's analyze.\n\nUser: \"[M8 task 4] Short completion: summarize the bench task shape in one sentence.\"\nThis resembles a prompt in a benchmark: M8 task 4, short completion. They want one sentence summarizing \"bench task shape\". Could be asking to summarize \"the bench task shape\" not \"the bench task\"? Maybe \"bench task shape\" is a term: shape of the bench task? Could be from a task where previous context defined a bench? We only have this. Need produce a plausible one-sentence answer. Maybe \"The bench task shape is a compact, single-sentence description of the task's overall form and required output.\" That's safe.\n\nNeed ensure one sentence. Final only one sentence.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 27,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 27,
+      "time_to_first_token_ms": 0.2679579774849117,
+      "elapsed_ms": 67779.06475000782,
+      "n_content_chunks": 21,
+      "decode_tps": 5.5875550614302325,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "",
+      "reasoning": "We need to respond to user: \"[M8 task 5] Short completion: summarize the bench task shape in one sentence.\"\n\nWe need infer what \"bench task shape\" means? Maybe from some benchmark? \"M8 task 5\" maybe from a dataset where tasks are short completions. Need summarize the bench task shape in one sentence. Could be asking for a one-sentence summary of the shape of the bench task? We don't have context. Need likely answer a sentence: \"The bench task involves a participant completing a short task and summarizing it in one sentence.\" But need be careful.\n\nLet's analyze possibilities. The user says: [M8 task 5] Short completion: summarize the bench task shape in one sentence.\nThis looks like a prompt from a set of tasks: M8 maybe \"Meta-Model 8\"? task 5: Short completion. They want us to output a short completion, specifically summarize the bench task shape in one sentence. Maybe \"bench task shape\" refers to a \"bench\" in some UI? Shape of a bench? Could be \"the bench task shape is a horizontal rectangular surface with a backrest and two armrests\"? Hmm.\n\nMaybe \"bench task\" is a task in a game/VR: a bench, and shape? \"summarize the bench task shape in one sentence.\" Could be about \"bench task\" in robotics? The shape of the task? Need one sentence.\n\nMaybe the phrase \"bench task shape\" is generated from a \"Short completion\" task where they ask to complete a sentence? Maybe [M8 task 5] indicates some internal task ID. The desired answer is one sentence summarizing \"the bench task shape\". Without context, safest is to say we need more context? But user asks for short completion, likely expects just one sentence.\n\nNeed satisfy. Could craft: \"The bench task is a simple, flat horizontal work surface where an object is placed, inspected, or moved as a standalone test case.\" Is that a summary? Hmm.\n\nMaybe \"bench task shape\" in ML benchmark: \"bench\" = benchmark. \"task shape\" = shape of task? Summarize: \"It is a minimal, self-contained evaluation instance that tests the model's ability to produce a concise completion from a short prompt.\" This could be likely if M8 task 5 Short completion: summarize the bench task shape. The bench task shape might be the shape of a benchmark task: short prompt, short completion. They ask to summarize in one sentence. So answer: \"The benchmark task is a compact prompt-to-short-answer format requiring a concise one-sentence completion.\" That seems plausible.\n\nLet's inspect wording: \"[M8 task 5] Short completion: summarize the bench task shape in one sentence.\" \"bench task shape\" maybe typo for \"bench task\" shape? They want a \"Short completion\" meaning complete the prompt. Maybe M8 task 5 from some eval: \"Short completion: summarize the bench task shape in one sentence.\" The phrase \"bench task shape\" could be an object in a scene: a bench with a shape? If it's from a visual question answering? \"Summarize the bench task shape in one sentence.\" Maybe they ask to \"summarize the bench task shape\" as if a bench is a task? Huh.\n\nCould be from \"M8 task 5\" in some benchmark of \"short completion\" where each task has a hidden instruction? We need output only one sentence.\n\nNeed maybe not over-explain. Final one sentence. Need maybe mention if lacking context: \"Without additional details, the bench task shape can be summarized as a simple flat surface used for placing or manipulating items.\" But user likely wants exactly one sentence. We can say: \"The bench task shape is a simple horizontal flat surface that supports the task items.\" That is one sentence. But if wrong context, maybe less.\n\nWhat is \"bench task shape\"? Could be \"bench task\" as in \"bench\" in a programming benchmark? \"Shape\" as data shape? In ML, \"bench task shape\" could mean tensor shape for a benchmark task. Summarize in one sentence: \"The bench task data are expected to have a fixed two-dimensional input shape.\" Not enough.\n\nLet's think of \"M8\" maybe from \"MathM8\"? Or \"M8 task 5\" could be an item in \"M8\" dataset: tasks are short completions. The instruction: \"Short completion: summarize the bench task shape in one sentence.\" Maybe \"bench task shape\" is a phrase to be summarized. They might expect: \"The bench task is shaped like a rectangular table with a flat top and two vertical supports.\" If it's a \"bench\" object, shape description. In scene graph: bench shape? In CLEVR? \"bench\" isn't a CLEVR object. In 3D shape recognition, \"bench\" might be a composite",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 1,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 1,
+      "time_to_first_token_ms": 0.643017003312707,
+      "elapsed_ms": 206645.9389340016,
+      "n_content_chunks": 0,
+      "decode_tps": null,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "The bench task shape is a brief one-sentence summary of the task.",
+      "reasoning": "We need answer user: \"[M8 task 6] Short completion: summarize the bench task shape in one sentence.\" Need infer? We need produce one sentence summarizing bench task shape. Context? M8 task 6? Could be from some benchmark? Need likely answer only one sentence. We have no other context. Need maybe \"bench task shape\" refers to some task in M8? We need guess. Need be careful. Maybe M8 task 6 is from a dataset? Could be a prompt asking to summarize the bench task shape in one sentence. We don't have task details. Need maybe ask for clarification? But user requests short completion one sentence. Need satisfy. Maybe \"The bench task shape is a short completion that asks to summarize a bench task in a single sentence.\" But that's tautological. Could be meta: M8 task 6: summarize the bench task shape in one sentence. So answer: \"It is a one-sentence summary of the bench task.\" Need one sentence.\n\nNeed final one sentence only. Ensure not extra. Maybe: \"The bench task shape is a brief one-sentence summary of the task.\" That likely acceptable.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 16,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 16,
+      "time_to_first_token_ms": 0.15540304593741894,
+      "elapsed_ms": 56306.73306505196,
+      "n_content_chunks": 15,
+      "decode_tps": 6.097431472593004,
+      "error": null,
+      "detail": null
+    },
+    {
+      "ok": true,
+      "answer": "This is a short-completion benchmark item that asks the model to state the task\u2019s structure in a single sentence.",
+      "reasoning": "We need answer user's request: \"[M8 task 7] Short completion: summarize the bench task shape in one sentence.\" Need likely produce one sentence. Need infer what \"bench task shape\" means? Maybe from some dataset? M8 task 7? Could be a prompt asking summarize bench task shape in one sentence. Need maybe concise. We need final one sentence. Need maybe \"The bench task shape is a single-sentence summary of the benchmark task.\" But what exactly? Let's analyze.\n\nUser: \"[M8 task 7] Short completion: summarize the bench task shape in one sentence.\" Could be from some internal benchmark? \"bench task shape\" maybe they want a short completion summarizing the shape of the bench task. Maybe \"bench\" as in \"bench task\" from \"M8\"? Could be a task ID? Maybe they ask to summarize the bench task shape in one sentence. We don't have context. Need answer generically: \"The bench task has a single-sentence shape: a concise summary of its goal, inputs, and expected output.\" But they want summarize the bench task shape in one sentence, maybe the answer itself should be one sentence. Could say: \"The bench task shape is a compact one-sentence specification describing the input, required action, and expected output.\" That seems safe.\n\nNeed ensure only one sentence. Final: \"The bench task shape is a single-sentence specification that captures the goal, inputs, and expected output of the task.\" That's one sentence. But if \"bench task shape\" means in code? Could be \"It is a short completion prompt asking for a one-sentence summary.\" Hmm.\n\nMaybe they are testing \"Short completion\" from M8 task 7: \"summarize the bench task shape in one sentence.\" Could be a meta-task: The bench task shape maybe the prompt shape itself: bracketed label, task, instruction. Summarize in one sentence. Could answer: \"The task is a short-completion prompt that asks for a one-sentence summary of a benchmark task\u2019s structure.\" One sentence.\n\nNeed decide. The phrase \"bench task shape\" likely refers to the shape/structure of the benchmark task: e.g., it is a short completion task. They want one sentence summary. We can answer generically. Need not overdo.\n\nFinal one sentence: \"This is a short-completion benchmark item that asks the model to state the task\u2019s structure in a single sentence.\" Good.\n",
+      "usage": {
+        "prompt_tokens": null,
+        "completion_tokens": 28,
+        "estimated": true
+      },
+      "prompt_tokens": null,
+      "completion_tokens": 28,
+      "time_to_first_token_ms": 0.017487036529928446,
+      "elapsed_ms": 151760.27900900226,
+      "n_content_chunks": 23,
+      "decode_tps": 6.017156112524851,
+      "error": null,
+      "detail": null
+    }
+  ],
+  "verdict": {
+    "pass": false,
+    "score": 0.0,
+    "detail": "M8: main t/s 0.00 vs M6 control 8.52 (100.0% drop, guardrail 5%): FAIL \u2014 guardrail breach",
+    "extra": {
+      "m6_tps": 8.52310173531571,
+      "m8_main_tps": 0.0,
+      "pct_drop": 100.0,
+      "main_guardrail_pct": 5.0,
+      "verdict": "fail"
+    }
+  },
+  "row_verdict": "fail",
+  "box_state": {
+    "nvidia_smi": "580.159.03, [N/A]",
+    "docker_stats": "bonsai2-server-1 11.92GiB / 14.78GiB\nbonsai2-server-0 11.99GiB / 14.78GiB\nqwen38-sglang 963MiB / 100GiB\nsenior-architect 28.87MiB / 121.6GiB\nunderstory 109.4MiB / 121.6GiB\ngitea 90.77MiB / 121.6GiB\nsearxng 2.32MiB / 121.6GiB\nopen-webui 46.2MiB / 121.6GiB\nsearxng-valkey 4.539MiB / 121.6GiB",
+    "meminfo": "MemTotal=127535152 kB MemAvailable=2551744 kB MemFree=1395516 kB Cached=3142140 kB Shmem=1296396 kB SReclaimable=440468 kB",
+    "driver": "580.159.03",
+    "date": "2026-09-28T12:42:35Z",
+    "epoch": 1790599355
+  },
+  "m8_main_tps": 0.0,
+  "m6_baseline_tps": 8.52310173531571,
+  "n_tasks": 8,
+  "concurrency": 8,
+  "ctx_cap": 1024,
+  "tool_execution": "off"
+}
