@@ -385,10 +385,17 @@ def _aggregate_tps(tasks, wall_time: float | None = None) -> dict:
         agg["aggregate_tps"] = total_tokens / wall_time
     else:
         # a legacy call site without a measured batch wall keeps the
-        # pre-amendment shape (the serial figure).
+        # pre-amendment shape (the serial figure). G3c round-16 P1: record
+        # aggregate_tps_wall = None EXPLICITLY (key present, value None)
+        # rather than omitting the key — the legacy aggregate is now
+        # self-documenting ("no wall measured") instead of relying on
+        # key-absence. The M7 scorer (m7.py) treats None the same as an
+        # absent key (isinstance check), so it still routes the headline to
+        # the serial alias and names it tps_source="serial".
         agg["aggregate_tps"] = (
             total_tokens / total_elapsed if total_elapsed > 0 else 0.0
         )
+        agg["aggregate_tps_wall"] = None
     return agg
 
 
@@ -453,11 +460,15 @@ def _score_shape(
         # that pre-dates the H9 wall measurement); in that case the
         # serial figure is recomputed from the per-task results, and the
         # M7 scorer's fallback (aggregate_tps_wall absent -> aggregate_tps)
-        # scores the serial figure. This is the documented legacy shape —
-        # a pre-amendment M7 row is scored on the serial figure, NOT
-        # silently compared to a post-amendment wall figure (the S5.5
-        # comparability triple + the re-bench gate's not-comparable path
-        # are what prevent a silent cross-amendment compare).
+        # scores the serial figure. G3c round-16 P1 + P2: the scorer now
+        # records that explicitly — extra["aggregate_tps_wall"] is None
+        # for the legacy row (the wall was NOT measured, not mislabeled)
+        # and extra["tps_source"] names the denominator ("serial"). This
+        # is the documented legacy shape — a pre-amendment M7 row is
+        # scored on the serial figure, NOT silently compared to a
+        # post-amendment wall figure (the S5.5 comparability triple + the
+        # re-bench gate's not-comparable path are what prevent a silent
+        # cross-amendment compare).
         if agg is None:
             agg = _aggregate_tps(tasks)
         return bscore.m7.score({"agg": agg, "results": tasks})

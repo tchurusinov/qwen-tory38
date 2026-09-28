@@ -282,6 +282,45 @@ class M7RubricTest(unittest.TestCase):
         # half still holds.
         self.assertTrue(v["pass"])
 
+    def test_legacy_agg_records_wall_none_and_serial_source(self):
+        # G3c round-16 P1 + P2: a pre-amendment aggregate (no measured
+        # wall — no aggregate_tps_wall key) must record
+        # aggregate_tps_wall = None (the wall was NOT measured), NOT the
+        # serial figure masquerading as a wall value; tps_source names
+        # the serial denominator; the headline + pass/score are unchanged
+        # (the serial alias, the pre-amendment behavior).
+        results = [TaskResult(ok=True, completion_tokens=100) for _ in range(8)]
+        v = m7.score({"agg": self._agg(30.0), "results": results})
+        self.assertTrue(v["pass"], v)
+        self.assertEqual(v["extra"]["aggregate_tps"], 30.0)
+        self.assertIsNone(v["extra"]["aggregate_tps_wall"])
+        self.assertEqual(v["extra"]["tps_source"], "serial")
+        self.assertIn("(serial)", v["detail"])
+
+    def test_wall_agg_records_wall_figure_and_wall_source(self):
+        # the post-amendment shape: aggregate_tps_wall is present and is
+        # the headline (the S5.1 "t/s at the ceiling" saturation figure);
+        # tps_source = "wall"; the serial figure is recorded alongside.
+        results = [TaskResult(ok=True, completion_tokens=100) for _ in range(8)]
+        agg = {
+            "n_tasks": 8,
+            "n_ok": 8,
+            "n_errors": 0,
+            "total_completion_tokens": 800,
+            "total_elapsed_s": 40.0,
+            "aggregate_tps_serial": 800 / 40.0,
+            "total_wall_s": 200.0,
+            "aggregate_tps_wall": 800 / 200.0,
+            "aggregate_tps": 800 / 200.0,
+        }
+        v = m7.score({"agg": agg, "results": results})
+        self.assertTrue(v["pass"], v)
+        self.assertEqual(v["extra"]["aggregate_tps"], 800 / 200.0)
+        self.assertEqual(v["extra"]["aggregate_tps_wall"], 800 / 200.0)
+        self.assertEqual(v["extra"]["aggregate_tps_serial"], 800 / 40.0)
+        self.assertEqual(v["extra"]["tps_source"], "wall")
+        self.assertIn("(wall)", v["detail"])
+
     def test_zero_tps_fails(self):
         v = m7.score({"agg": self._agg(0.0), "results": []})
         self.assertFalse(v["pass"])

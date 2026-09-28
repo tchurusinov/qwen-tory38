@@ -23,6 +23,15 @@ Input (the runner's saturation payload for one M7 task, the
     counts; a ctx/parse task failure is NOT a 5xx — it is the request
     shape, not the engine).
 
+Extra fields (G3c round-16 P1 + P2): ``aggregate_tps`` is the headline
+the verdict scores; ``aggregate_tps_wall`` records the measured WALL
+figure, and is None for a legacy aggregate that predates the wall
+measurement (the pre-amendment shape, which carries only the serial
+alias — the wall was NOT measured for it, not mislabeled). ``tps_source``
+names which denominator the headline used ("wall" / "serial"), so a
+legacy M7 row scored on the serial figure is explicit, not a silent
+fall-through.
+
 Scoring (auto, binary — S5.3 "machine-scored"):
   * ``zero_5xx`` = no task failed with an engine/5xx-class error
     (``results`` all ok, or the failures are ctx/parse only).
@@ -66,19 +75,26 @@ def score(payload: dict, root=None) -> dict:
     if not isinstance(agg, dict):
         return verdict(False, 0.0, "M7: no concurrency aggregate in payload")
     # H9 (post-live-run): the headline "t/s at the ceiling" is the BATCH
-    # WALL figure. Prefer the explicit wall key. G3c round-2 P2: the
-    # fallback to ``aggregate_tps`` only fires for PRE-AMENDMENT rows,
-    # whose aggregate predates the wall measurement and carries ONLY the
-    # serial sum (``aggregate_tps`` == ``aggregate_tps_serial`` there).
-    # So a legacy row is scored on the serial figure not by mistake but
-    # because the wall figure was never measured for it — the best
-    # available denominator, not a wrong one. Post-amendment rows always
-    # carry ``aggregate_tps_wall`` (and ``aggregate_tps`` aliases it), so
-    # the fallback is dead code for them.
-    tps = agg.get("aggregate_tps_wall")
-    if not isinstance(tps, (int, float)):
+    # WALL figure. G3c round-16 P1 + P2: resolve the wall figure
+    # SEPARATELY from the headline so the recorded extra stays honest. A
+    # legacy row (no measured wall — the pre-amendment _aggregate_tps
+    # shape that omits aggregate_tps_wall) records
+    # aggregate_tps_wall = None (the wall was NOT measured), NOT the
+    # serial figure; the headline aggregate_tps aliases the serial figure
+    # for that row (the pre-amendment behavior), and tps_source NAMES
+    # which denominator the headline used, so the legacy M7 score is
+    # explicitly "serial", not a silent mislabel of "wall". Post-amendment
+    # rows always carry a real aggregate_tps_wall (== aggregate_tps), so
+    # tps_source = "wall" for them and the headline is unchanged.
+    wall_tps = agg.get("aggregate_tps_wall")
+    if isinstance(wall_tps, (int, float)):
+        tps = float(wall_tps)
+        tps_source = "wall"
+    else:
+        # legacy / no measured wall: the pre-amendment serial alias.
         tps = agg.get("aggregate_tps")
-    tps = tps if isinstance(tps, (int, float)) else 0.0
+        tps = float(tps) if isinstance(tps, (int, float)) else 0.0
+        tps_source = "serial"
     tps_serial = agg.get("aggregate_tps_serial")
     tps_serial = tps_serial if isinstance(tps_serial, (int, float)) else None
     n_errors = agg.get("n_errors", 0)
@@ -92,12 +108,16 @@ def score(payload: dict, root=None) -> dict:
     return verdict(
         ok,
         1.0 if ok else 0.0,
-        f"M7: t/s at ceiling {tps:.2f}, {'zero' if zero_5xx else f'{n_5xx}'} 5xx "
+        f"M7: t/s at ceiling {tps:.2f} ({tps_source}), "
+        f"{'zero' if zero_5xx else f'{n_5xx}'} 5xx "
         f"({'pass' if ok else 'fail'})",
         {
             "aggregate_tps": tps,
-            "aggregate_tps_wall": tps,
+            "aggregate_tps_wall": wall_tps
+            if isinstance(wall_tps, (int, float))
+            else None,
             "aggregate_tps_serial": tps_serial,
+            "tps_source": tps_source,
             "n_5xx": n_5xx,
             "n_errors_agg": n_errors,
             "n_tasks": agg.get("n_tasks", 0),
