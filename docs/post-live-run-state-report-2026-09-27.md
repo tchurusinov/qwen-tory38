@@ -748,8 +748,11 @@ Per the spec-amendment rule (spec follows code; the live run is canonical):
 
 1. **H4 default:** is the M1/M2-style "answer must be content-only" (Option
    A) acceptable, or should the rubric tolerate reasoning-only (Option B,
-   behind a flag)? Both are implemented + tested in the hotfix; the default
-   is A.
+   behind a flag)? A is implemented + tested in the hotfix; B is recorded
+   as the fallback (SPEC S5.2 "M1 prompt forces content-only") and NOT
+   implemented (the plan §0.1 "A only" decision is authoritative; G3c
+   round-3 P1: the original "Both are implemented + tested" line was a
+   misreading of that decision). The default is A.
 2. **H9 baseline:** is the S5.5 re-bench baseline the batch-WALL t/s
    (recommended, "ceiling") or the serial-sum t/s? The live M7 figure moves
    from 0.25 (serial) to ~2.3 (wall).

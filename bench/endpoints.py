@@ -57,8 +57,13 @@ def subagent_ports(engine: dict) -> tuple[int, list[dict]]:
     """The S1.6 pool: (N, [endpoint per instance]). N = instances.count
     (the S1.4 clamp 0..8); ports from instances.port_base + i with the
     optional per-instance ``ports`` override (same map the S1.7 validator
-    checks). Each endpoint carries the S1.3 alias + api_key (the wire
-    identity) + its index. An N=0 pool (main-only) returns ([], N)."""
+    checks). Each endpoint dict carries the full executor shape:
+    ``{"kind": "subagent", "port": int, "url": "http://127.0.0.1:<port>",
+    "alias": <S1.3 alias>, "api_key": <wire key>, "index": i}`` — the
+    ``url`` is built here (always an explicit-port 127.0.0.1 authority;
+    the S1.6 pool is local-only), so consumers (the bench executor, the
+    H13 warmup) may POST to ``ep["url"]`` directly. An N=0 pool
+    (main-only) returns ``(0, [])``."""
     inst = engine.get("instances", {})
     count = inst.get("count", 0)
     if not isinstance(count, int) or isinstance(count, bool):
