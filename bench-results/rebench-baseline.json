@@ -1,0 +1,36 @@
+{
+  "engine": {
+    "engine_commit": "9a9394a895b96003ca842a6041cb28ac49a108f7",
+    "model_revision": "main",
+    "model_sha": "3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1",
+    "quant": "bonsai-2-27b-gguf-PQ2_0.gguf",
+    "quant_fallback": "bonsai-2-27b-gguf-PTQ1_0.gguf",
+    "image_sha": "sha256:6b4cd79f492d12ed72661022d8803fe91cf2bc94fb0963b05a6bdafac969ea53"
+  },
+  "generated_ts": "2026-09-28T13:26:31Z",
+  "commit": "b2cbe98",
+  "scenarios": {
+    "M1": {
+      "verdict": "fail",
+      "score": 0.0,
+      "tps": null,
+      "comparability": null
+    },
+    "M2": {
+      "verdict": "pass",
+      "score": 1.0,
+      "tps": null,
+      "comparability": null
+    },
+    "M7": {
+      "verdict": "pass",
+      "score": 1.0,
+      "tps": 2.0794198810159608,
+      "comparability": {
+        "n_tasks": 16,
+        "concurrency": 16,
+        "N": 2
+      }
+    }
+  }
+}
