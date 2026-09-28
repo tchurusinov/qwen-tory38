@@ -42,7 +42,9 @@ The only box-specific section. A different box updates this section only.
   reasoning format. Per-slot context = ctx/parallel = 32,768 tokens.
 - **Calibrated t/s constants (2026-09-28, post-hotfix run @ commit
   b2cbe98, this pin):** see the cost doctrine section — single-task
-  decode 44.7–61.9 t/s, 16-wide contention 3.7–19.3 per-task, tool-loop
+  decode 44.7–61.9 t/s (MAP 1.8 @gpu live runs 2026-09-22; the S1.8 #3
+  load-band floor is 26.2 = 0.9 × 29.16 community baseline), 16-wide
+  contention 3.7–19.3 per-task, tool-loop
   M9 413 s / 5 steps, M10 108 s / 10 steps, main idle 8.52 t/s,
   main-under-load planning number = halved (user observation 30 → 15;
   the M8 bench 0.00 is a timing artifact).
@@ -171,12 +173,12 @@ bench row; the verdict is data, not a verdict on the allocation.
 | Single-file code-gen chunk (new function / test file / boilerplate) | **subagent** | [M1] | fail 0/3 at the pin: reasoning-only output (the H4 content-forcing prompt landed; the rubric seam is open). The shape itself is verify-by-compile; recipe R1 forces content-only |
 | Per-file / per-section analysis (review notes, doc summaries, data transforms) | **fan-out N** (N = min(files, instances×slots)) | [M3] | pass 0.88 (auto 5/6 + spot-check 1.00). Independent units work; the spot-check is main's job (recipe R5 drives it) |
 | Diff review of a PR-sized diff | **subagent draft → main verifies** | [M4] | pass 10/10 seeded bugs. The subagent finds bugs reliably; the draft is still a self-report — main verifies the claim |
-| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | [M5] | pass 5/5 at 64k ctx. M5 proves the 64k-ctx subagent works; the row stays main because main's 262K ctx is free (already loaded) and a subagent at the 8k default loses the tail. Subagent is viable for QA on long docs at `--ctx 65536` (recipe R6) |
+| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | [M5] | pass 5/5 at 64k ctx. M5 proves the subagent works; the row stays main because main's 262K ctx is free (already loaded) and a subagent at the 8k default loses the tail. Subagent is viable for QA on long docs (`--ctx 65536` is the pre-submission gate value, S3.4 — the real cap is the per-slot 32,768; ctx sizing per recipe R6) |
 | Test execution / lint / build-check | **subagent** | [M2] | pass 10/10 coverage. Mechanical, parallelizable, output is a report not a decision |
 | Draft writing (docs, summaries, commit messages at scale) | **subagent** | [M3] | pass 0.88. Quality bar is lower-verification; main edits the draft |
 | Anything requiring live tool feedback loops (iterative debugging, interactive exploration) | **main** | — (main by construction) | feedback latency; fire-and-collect gives no mid-task steering value here |
 | Verification of a subagent's claimed success (file exists? test passed? diff applies?) | **main, always** | — (the self-report rule below) | never trust on the word |
-| Spec-chunk implementation (bounded, self-contained, with a test suite to run) | **subagent, --tools on** | [M9] | fail 2/3 sub-conditions: main re-run passed (exit 0) + tool_log shows the suite run — but the workdir check fails systematically (driver cleanup-ordering defect, H6: the workdir is rmtree'd before the scorer looks). Capability layer works; recipe R4 makes main's own-copy re-run the authoritative check |
+| Spec-chunk implementation (bounded, self-contained, with a test suite to run) | **subagent, --tools on** | [M9] | fail (2/3 sub-conditions met): main re-run passed (exit 0) + tool_log shows the suite run — but the workdir file check fails systematically (driver cleanup-ordering defect, H6: the workdir is rmtree'd before the scorer looks). Capability layer works; recipe R4 makes main's own-copy re-run the authoritative check |
 | Test execution batch with a report (run N tests, structure the results) | **subagent, --tools on** | [M10] | fail 0/2 spot verdicts agree: the batch ran correctly (10/10 covered) but the report's per-file `status` did not mirror the exit code (status semantics defect). Recipe R2 pins the report schema |
 | Anything that must see a rendered page / browser state (camoufox) | **main, or subagent --tools on via the python tool** | — (no S5.2 row yet; the template is provisional) | the venv is host-side; a subagent drives it through the python/bash tools; a multi-step interactive session with state main must keep = main |
 
@@ -613,8 +615,8 @@ If no bugs: "No bugs found. I reviewed N files, M hunks."
 - **Task shape:** implement a bounded spec chunk (a small library with
   N functions + an N-case test suite) — the S4.2 "spec-chunk
   implementation" row, `--tools on`.
-- **Bench:** [M9] — fail 2/3 sub-conditions: main re-run passed (exit 0)
-  + tool_log shows the suite run — but the workdir check fails
+- **Bench:** [M9] — fail (2/3 sub-conditions met): main re-run passed (exit 0)
+  + tool_log shows the suite run — but the workdir file check fails
   systematically in live runs (the driver's cleanup-ordering defect,
   H6: the workdir is rmtree'd before the scorer looks for the files).
 - **Prompt template:** T1, with the spec JSON + run command filled.
@@ -671,9 +673,18 @@ Final answer contract:
 - **Task shape:** answer QA questions about a long document
   (≥ ~30K tokens). The S4.2 row says **main** (main's 262K ctx is free,
   already loaded; a subagent at the 8k default loses the tail) — M5
-  proves the subagent works at 64k ctx, so this recipe offers both:
-  main by default; subagent at `--ctx 65536` when main's window is too
-  small to hold the document + the questions.
+  proves the subagent works, so this recipe offers both: main by
+  default; the subagent alternative when main's window is too small to
+  hold the document + the questions. **Ctx sizing (this box's launch
+  shape):** `--ctx N` is a pre-submission gate on the REQUESTED ctx
+  only (S3.4) — it does not grant a bigger window. The real constraint
+  is the per-slot cap = ctx_size/parallel = 262144/8 = 32,768 tokens:
+  the doc + questions + margin must fit under THAT, or the task's
+  sequence overruns the slot mid-run and fails `ERR_CTX_TOO_LONG`
+  (exit 21). So a "60K-token" doc does NOT fit one 32,768 slot on this
+  box — split it (one section per unit, R5-style) or run it on main.
+  Use `--ctx 65536` only as the gate value that lets a ≤32,768-token
+  request through; it is not the window size.
 - **Bench:** [M5] — pass 5/5 QA at 64k ctx (the 2026-09-28 matcher fix
   made the rubric tolerant of conjunctions; the pre-fix row had lost 1/5
   to "M1, M2, M7" vs "M1, M2, and M7").
