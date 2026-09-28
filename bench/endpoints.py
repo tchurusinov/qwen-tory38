@@ -33,6 +33,7 @@ wrapper over the S3.6/S1.6 conventions (PyYAML at the edge, the box dep).
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -107,9 +108,17 @@ def main_endpoint(harness: dict) -> dict:
         # rather than raise — main-PROBE tolerates a keyless main (the
         # health probe is 401-tolerant) and the completions endpoint may
         # genuinely be keyless — but a MIS-TYPED key (e.g. a bare number
-        # instead of a string) is silently dropped here. Naming it in a
-        # comment (rather than raising) keeps the hermetic / no-key path
-        # working while flagging the case a reader should check.
+        # instead of a string) is silently dropped here. G3c round-8 P2:
+        # name it at RUNTIME (not just in this comment) so a numeric-key
+        # typo in harness.yaml is diagnosed where it is read — a single
+        # stderr WARN, not an exception (the hermetic / no-key path keeps
+        # working; the bench stdout JSON stays one-object-per-run).
+        print(
+            f"bench: WARN main_api_key is {type(api_key).__name__!r}, not str — "
+            "coercing to keyless (''); a mis-typed key in harness.yaml should "
+            "be a string",
+            file=sys.stderr,
+        )
         api_key = ""
     port = 30001
     # parse the port out of the url for the record (best-effort; the url is

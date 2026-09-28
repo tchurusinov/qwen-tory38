@@ -567,6 +567,15 @@ def run(
                 )
                 rec["precedes"] = sid
                 rec["follows"] = prev_sid
+                # G3c round-8 P1 (spec-follows-code amendment): the plan's
+                # §13.3 sketched `release_between: {scenario, ...}` (an
+                # object with a single `scenario` key). The implemented
+                # shape is a LIST of per-boundary records, each with
+                # `precedes`/`follows` — a boundary sits BETWEEN two
+                # scenarios, so a single `scenario` key would be ambiguous
+                # (which side?), and `precedes`/`follows` name both. The
+                # plan + SPEC S4.3 + the S3.5 bench-stdout schema are
+                # amended to the implemented shape (this commit).
                 release_between_records.append(rec)
             row = _run_scenario(
                 sid,
@@ -619,6 +628,14 @@ def run(
             out["release_after"] = _pool_release(
                 "after", unload_bin, reload_bin, mock is not None, engine=engine
             )
+            # G3c round-8 P2 (snapshot ordering): `box_state_post_run`
+            # above was captured BEFORE this teardown, so it reflects the
+            # pool-LOADED state. A second snapshot is written here, AFTER
+            # the release, so a reader sees both: the end-of-scenario pool
+            # state and the post-teardown (pool-unloaded, main-only)
+            # state. Without the flag the pool is untouched, so there is
+            # only the one snapshot (`box_state_post_run` above).
+            out["box_state_after_release"] = boxstate.snapshot()
         if release_between:
             out["release_between"] = release_between_records
         return out
@@ -686,6 +703,7 @@ def _capability_payload(sid: str, res: dict, root: str | None) -> dict:
     if sid == "M9":
         return {
             "workdir": str(res.get("workdir")),
+            "state": res.get("state"),
             "tool_log": res.get("tool_log") or [],
             "answer": res.get("answer") or "",
             "module_name": "textkit",

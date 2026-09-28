@@ -293,9 +293,14 @@ builds):
   unload --all` → `bonsai2-reload` (the S3.2 pair; wait budget = the S2.8
   30 s reload budget, polled on health) → a 16-token warmup completion per
   reloaded instance (discarded, same pattern as the MAP 1.7 bring-up check —
-  prevents cold-prefill poisoning M7's timing) → next scenario. Records
-  `release_between: {scenario, unload_exit, reload_exit, reload_s, warmup_s}`
-  per boundary in the run JSON.
+  prevents cold-prefill poisoning M7's timing) → next scenario. Records a
+  LIST of per-boundary records in the run JSON — one entry per boundary,
+  each `{kind: "between", precedes: <next sid>, follows: <prev sid>,
+  unload_exit, reload_exit, reload_s, warmup_s, ...}` (G3c round-8
+  spec-follows-code amendment: this sketched `{scenario, ...}`; the
+  implemented shape uses `precedes`/`follows` because a boundary sits
+  BETWEEN two scenarios, so a single `scenario` key would be ambiguous —
+  the SPEC S4.3 / S3.5 stdout schema carry the implemented shape).
 - Honest failure path: unload/reload are manager-mediated; if the manager is
   down (S3.2 exit 84) the flag logs `release: skipped (84)` in the row and
   the run CONTINUES (release is an optimization, not a correctness gate).

@@ -280,6 +280,19 @@ def quick_gate(
     # same load, so the t/s half is recorded, not silently compared. A
     # reader wanting to know WHY can look at the recorded
     # baseline_comparability / current_comparability above.
+    #
+    # G3c round-8 P2 (asymmetric case, named): when ONLY ONE side carries
+    # a triple (base_c is None but cur_c is not, or vice versa — e.g. a
+    # legacy baseline with no M7 row, or a pre-amendment baseline vs a
+    # post-amendment run), `comparable` stays True and the t/s half is
+    # compared on t/s ALONE (the legacy pre-triple behavior). This is the
+    # intended "pre-amendment" reading, NOT a silent skip: the triple is
+    # only a comparability GATE when BOTH sides have it; one side missing
+    # it means the baseline predates the triple, so we fall back to the
+    # t/s-only comparison that always worked. The gate-level
+    # `status: "not_comparable"` marker is set ONLY in the BOTH-sides-
+    # differ case above (the `comparable = False` branch); the asymmetric
+    # case is the legacy "compare on t/s" path and is not not-comparable.
     if base_c is not None and cur_c is not None and base_c != cur_c:
         comparable = False
         tps_info["comparable"] = False

@@ -1342,7 +1342,12 @@ row. **S5.2 delta (2026-09-27, H12):** the runner additionally writes
 ONE extra post-run box-state snapshot (`box_state_post_run`) into the
 run JSON so the end-of-run state is explicit (the per-row snapshots are
 the VRAM time series; this is the last sample, no need to hunt the
-newest row file). Scenario ctx (the `ctx` column) is a runner-enforced token
+newest row file). **G3c round-8 P2 delta:** when `--release-after` is
+on, the runner writes a SECOND snapshot (`box_state_after_release`)
+AFTER the post-run teardown, so a reader sees both the end-of-scenario
+(pool-loaded) state and the post-teardown (pool-unloaded, main-only)
+state; without the flag there is only `box_state_post_run`. Scenario ctx
+(the `ctx` column) is a runner-enforced token
 budget, not a server setting: the runner keeps each scenario's input
 + output within the column's tokens (prompt shaping + a completion
 cap), records actual tokens used in the row, and the engine serves at

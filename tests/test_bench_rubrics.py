@@ -421,6 +421,42 @@ class M9RubricTest(unittest.TestCase):
         self.assertTrue(v["extra"]["tool_log"]["pass"], v)
         self.assertTrue(v["extra"]["functions"]["pass"], v)
 
+    def test_crashed_state_skips_functions_sub_check(self):
+        # G3c round-8 P1: when the driver raises (state != "done"), the
+        # staged workdir was already rmtree'd — the functions sub-check
+        # must be SKIPPED (not scored against a cleaned path), and the
+        # sub-condition records skipped: true + a named reason.
+        p = self._payload("/nonexistent/cleaned-workdir", [self._suite_run_entry()])
+        p["state"] = "crashed"
+        v = m9.score(p)
+        self.assertFalse(v["pass"], v)
+        self.assertFalse(v["extra"]["functions"]["pass"], v)
+        self.assertTrue(v["extra"]["functions"]["skipped"], v)
+        self.assertIn("SKIPPED", v["extra"]["functions"]["detail"], v)
+        self.assertIn("state 'crashed'", v["extra"]["functions"]["detail"], v)
+
+    def test_multi_stop_word_golden_degenerate_path(self):
+        # G3c round-8 P2: a golden of 2+ raw tokens that are ALL stop
+        # words (e.g. "a, an") has _tokens(g) == {} (the H8 token-set
+        # half is vacuous), so the ordered-subsequence half cannot match
+        # it; it resolves via the SUBSTRING fast-path (line 137, `g in a`)
+        # before the degenerate whole-word branch (line 152) is reached —
+        # and the degenerate branch is only entered when the substring
+        # check already failed, so it is provably False-when-reached. No
+        # M5 golden today is multi-stop-word, so this path was untested —
+        # pin the OBSERVABLE behavior: the literal "a, an" and any answer
+        # that SUBSTRING-contains it match; an answer without the literal
+        # (even with both stop-words present separately) does not.
+        self.assertTrue(m5._match("a, an", "a, an"), "exact literal")
+        self.assertTrue(m5._match("there is a, an error", "a, an"), "substring-padded")
+        self.assertFalse(
+            m5._match("a an error", "a, an"), "comma-less differs (no literal)"
+        )
+        self.assertTrue(
+            m5._match("a, another one", "a, an"),
+            "substring 'a, an' present in 'a, another one' -> True",
+        )
+
     def test_missing_suite_run_in_tool_log_scores_2_3(self):
         import tempfile
         from pathlib import Path

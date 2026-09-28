@@ -192,9 +192,30 @@ def score(payload: dict, root=None, python_bin: str | None = None) -> dict:
     # 2) the tool_log shows the subagent's test run with exit 0.
     log_ok, log_detail = _tool_log_shows_test_run(tool_log)
     # 3) the spec's 3 functions exist in the workdir (the file check).
-    funcs_ok, funcs_detail, n_present = _functions_in_workdir(
-        workdir, module_name, funcs
-    )
+    #    G3c round-8 P1: when the task did not reach a terminal "done"
+    #    state (the runner's runner-level "crashed" marker — the driver
+    #    raised CapabilityError while polling, so the staged workdir was
+    #    already rmtree'd in the driver's finally), the file check is
+    #    SKIPPED, not scored against a cleaned path: the subagent's
+    #    functions never existed anywhere the scorer could verify them,
+    #    and "module not found" would be a misleading partial score (the
+    #    honest-fail is the row verdict + the driver error, not a
+    #    0/3-functions sub-fail). The sub-condition records
+    #    skipped: true + a named reason so the score (still the fraction
+    #    met — 1/3 here) is not read as "file check ran and failed".
+    state = payload.get("state")
+    if state is not None and state != "done":
+        funcs_ok = False
+        funcs_detail = (
+            f"M9: workdir functions check SKIPPED (task state {state!r}: "
+            "the staged workdir was cleaned before scoring; the driver "
+            "error is the honest-fail, not a 0/3 sub-fail)"
+        )
+        n_present = 0
+    else:
+        funcs_ok, funcs_detail, n_present = _functions_in_workdir(
+            workdir, module_name, funcs
+        )
 
     met = sum((rerun_ok, log_ok, funcs_ok))
     n = 3
@@ -212,6 +233,7 @@ def score(payload: dict, root=None, python_bin: str | None = None) -> dict:
                 "detail": funcs_detail,
                 "n_present": n_present,
                 "n_expected": len(funcs),
+                "skipped": state is not None and state != "done",
             },
         },
     )

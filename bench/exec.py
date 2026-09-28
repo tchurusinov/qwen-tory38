@@ -353,11 +353,19 @@ def run_concurrent(
     # join is near-instant. The wall therefore measures "from first task
     # submit to last task complete + pool teardown" — effectively the
     # batch WALL-clock at the scenario's concurrency, as SPEC S5.1 H9
-    # describes. If a future implementation pre-allocates the pool or
-    # adds post-pool work (e.g. a result aggregation step), the wall
-    # would grow to include that; the S5.5 baseline capture is a snapshot
-    # of THIS measurement, so like-with-like comparison holds as long as
-    # the executor path is unchanged.
+    # describes. G3c round-8 P2 (ceiling precision, named): the ceiling
+    # is "last task complete + the slowest worker's post-future teardown"
+    # — NOT exactly "last task complete". The as_completed loop finishes
+    # when every future's RESULT is ready, but __exit__'s join additionally
+    # waits for each worker to return from _wrapped (close its finally /
+    # any post-result bookkeeping). On a 16-wide M7 with one slow task the
+    # join adds the slowest worker's teardown tail, which is typically
+    # microseconds (the futures are already result-ready) but can be the
+    # slowest worker's full cleanup in a degenerate case. The S5.5
+    # baseline capture is a snapshot of THIS measurement, so like-with-
+    # like comparison holds as long as the executor path (and _wrapped's
+    # teardown) is unchanged; a pre-allocated pool or post-pool work would
+    # shift the wall and must be re-baselined (the S5.5 due-detection).
     batch_wall_s = time.monotonic() - batch_start
 
     out: list[TaskResult] = [r for r in results if r is not None]
