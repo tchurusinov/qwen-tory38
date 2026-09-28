@@ -84,23 +84,31 @@ def _normalize(s: str) -> str:
     return s
 
 
-def _tokens(s: str) -> set[str]:
+def _tokens(s: str) -> list[str]:
     # G3c round-2 P2: extract the alnum/underscore runs (commas and the
     # remaining punctuation are word boundaries), then drop the stop
     # particles. A naive s.split() would keep the comma attached to the
     # token ("m1," != "m1"), so the token-set half only matched when the
-    # answer used the exact same comma placement.
-    return {t for t in _TOKEN_RE.findall(s) if t not in _STOP}
+    # answer used the exact same comma placement. G3c round-14 P2: the
+    # return is a LIST, not a SET — the only use is the empty-check on a
+    # 2+-token golden (order never matters there), so the order-losing
+    # set type was misleading; the ordered matching relies on
+    # _token_seq, and _tokens just mirrors its "any non-stop token?"
+    # question without the set allocation.
+    return [t for t in _TOKEN_RE.findall(s) if t not in _STOP]
 
 
 def _token_seq(s: str) -> list[str]:
-    """The ORDERED non-stop tokens (the order-insensitive _tokens's
-    ordered twin). G3c round-6 P1: the multi-value match is an ordered
+    """The ORDERED non-stop tokens — the same extraction as _tokens, but
+    the ordered sequence that the subsequence match actually consumes.
+    G3c round-6 P1: the multi-value match is an ordered
     subsequence, not a bare set-subset — a golden "M1, M2, M7" must not
     match an answer that lists the facts out of order ("M7, M2, M1").
     'Tolerant of phrasing' means extra words / case / punctuation / stop
     words may appear BETWEEN the facts; the facts themselves keep their
-    golden order.
+    golden order. (G3c round-14 P2: _tokens is now a list too — both
+    share the same filter, _tokens exists only for the empty-check on a
+    2+-token golden.)
     """
     return [t for t in _TOKEN_RE.findall(s) if t not in _STOP]
 
@@ -124,7 +132,7 @@ def _match(answer: str, golden: str) -> bool:
     # or not that token is itself a stop word ("80", "5", "PTQ_1_0", OR the
     # bare stop words "a"/"the"/"an") — matches as a WHOLE WORD, not a
     # substring. The routing MUST use the RAW (pre stop-word-filter) token
-    # count: a bare stop word like "a" has _tokens(g) == {} (the stop word
+    # count: a bare stop word like "a" has _tokens(g) == [] (the stop word
     # is dropped), so a post-filter count would misroute it to the `g in a`
     # substring fast-path below, and "banana" would match golden "a". The
     # whole-word regex is the correct matcher for BOTH "80" (must not match

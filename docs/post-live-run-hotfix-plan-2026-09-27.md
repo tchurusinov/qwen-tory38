@@ -201,11 +201,34 @@ main agent's own release lever (H13, two tiers).
 
 - **Why:** `bench/rebench.py:394-409` falls back to defaults on a bad
   `--config`, hiding the documented exit-2 "bad input" path.
-- **How:** "file absent" → default (as today); "file present but
-  unparseable" → exit-2 bad input. Hermetic test: malformed `--config` →
-  exit 2.
+- **How (round-13, as shipped):** "file absent" → default (as today);
+  "file present but unparseable" → exit-2 bad input; "file present but
+  a mapping lacking the key" → exit-2 (the strict reading of "don't
+  swallow"). Hermetic tests: malformed `--config` → exit 2.
+- **How (round-14 re-amendment, G3c round-14 P1 — spec follows code):**
+  the round-13 strict path OVER-TIGHTENED the contract: a present
+  bench.yaml that is INCOMPLETE (empty file → `{}`, or a mapping that
+  omits either of the two S5.7 keys) is valid to the RUNNER —
+  `bench/config.py` normalizes an empty file to `{}` and fills missing
+  S5.7 keys from `BENCH_CONFIG_DEFAULTS` — so the gate rejecting it was
+  stricter than the runner on the same file, and the documented
+  pre-install convention (`--config` + a bench.yaml that may omit one
+  of the two keys, H11) no longer worked. The implemented contract:
+  - ABSENT `--config` → default (unchanged).
+  - PRESENT but INCOMPLETE (empty / whitespace → `{}`, or a mapping
+    lacking the key) → the S5.7 default is filled and the run RUNS;
+    the fill is NAMED in the run output's `config_note` (so the
+    "silently indistinguishable from absent" concern is addressed by
+    naming, not by rejection).
+  - PRESENT but MALFORMED (unparseable, or a non-mapping top level)
+    → exit-2 bad input (the H10 letter, unchanged).
+  - The CLI parses bench.yaml ONCE for both keys (the round-13 P2
+    single-pass fix, kept).
+  Hermetic tests: malformed → exit 2; incomplete → default + named
+  `config_note`; absent → default; single parse count.
 - **Spec:** S5.7/S5.5 — a present-but-malformed bench.yaml is a named
-  bad-input error.
+  bad-input error; a present-but-incomplete one fills the S5.7 default
+  (named in the run output), matching the runner.
 
 ## 11. H11 — bench pre-install usability (P2, docs + WARN clarity)
 

@@ -612,6 +612,23 @@ def run(
                 report.write_row(cap_row, results_dir, f"{sid}_engine")
             if sid == "M6":
                 m6_baseline = row.get("main_tps")
+        # H12 (post-live-run): ONE extra post-SCENARIOS box-state snapshot
+        # so the END-OF-SCENARIOS state is explicit (the per-row snapshots
+        # are the run's VRAM time series — this one is the last sample,
+        # written into the run report so a reader never has to hunt the
+        # newest row file for it). G3c round-9 P2: the field was named
+        # ``box_state_post_run`` — misleading, because when
+        # ``--release-after`` is set the snapshot is captured BEFORE the
+        # post-run teardown, so it is "post-scenarios, pre-teardown", not
+        # "post-run". Renamed to ``box_state_post_scenarios`` to match the
+        # capture point (the post-teardown snapshot is
+        # ``box_state_after_release`` below). G3c round-14 P1: the capture
+        # is moved to IMMEDIATELY AFTER the last scenario row is written
+        # (before the ``write_summary`` bookkeeping + any
+        # ``--release-after`` teardown), so the name "post_scenarios" is
+        # literally true — the state is sampled at end-of-scenarios, with
+        # the summary write and the release teardown both AFTER it.
+        box_state_post_scenarios = boxstate.snapshot()
         summary_path = report.write_summary(
             rows,
             cfg.get("_summary_dir", "bench-results"),
@@ -625,18 +642,11 @@ def run(
             "summary_path": str(summary_path),
             "rotation": rotation_report,
         }
-        # H12 (post-live-run): ONE extra post-SCENARIOS box-state snapshot
-        # so the END-OF-SCENARIOS state is explicit (the per-row snapshots
-        # are the run's VRAM time series — this one is the last sample,
-        # written into the run report so a reader never has to hunt the
-        # newest row file for it). G3c round-9 P2: the field was named
-        # ``box_state_post_run`` — misleading, because when
-        # ``--release-after`` is set the snapshot is captured BEFORE the
-        # post-run teardown, so it is "post-scenarios, pre-teardown", not
-        # "post-run". Renamed to ``box_state_post_scenarios`` to match the
-        # capture point (the post-teardown snapshot is
-        # ``box_state_after_release`` below).
-        out["box_state_post_scenarios"] = boxstate.snapshot()
+        # the capture happens before `write_summary` (see the H12 comment
+        # block after the scenario loop) — `out` only CARRIES it here so
+        # the summary the reader pairs with this snapshot already exists
+        # on disk when `out` is returned (G3c round-14 P1).
+        out["box_state_post_scenarios"] = box_state_post_scenarios
         if release_after:
             # G3c round-6 P1 (same as the release_between case): the
             # post-run teardown also runs INSIDE the S3.5 bench lock —
@@ -1376,9 +1386,13 @@ def _warmup_instances(engine: dict | None = None) -> bool:
     n, eps = endpoints.subagent_ports(engine)
     if n == 0:
         return True  # main-only: nothing to warm
-    import requests  # lazy: the warmup is I/O (the S5.4 dep surface);
-    # only needed when there are instances to prime (main-only returns
-    # above without it).
+    # G3c round-14 P2 (documented deviation from the module-top import
+    # convention): requests is imported HERE, after the N=0 early return,
+    # so a MAIN-ONLY run (no subagent pool) never imports the S5.4 I/O
+    # dep at all — the lazy import is the point, not an inconsistency.
+    # (exec.py / capability.py import requests at module top because they
+    # ALWAYS make network calls; _warmup_instances may make zero.)
+    import requests
 
     ok_all = True
     for ep in eps:

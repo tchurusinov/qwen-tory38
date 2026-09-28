@@ -577,6 +577,14 @@ run's data trustworthy and repeatable.
   "bad input"). Add a hermetic test: a malformed `--config` -> exit 2.
 - **Spec:** S5.7/S5.5 — a present-but-malformed bench.yaml is a named bad-input
   error, not a silent default.
+- **Round-14 delta (G3c round-14 P1, spec follows code):** the strict path
+  shipped in round 13 was over-tightened — a PRESENT but INCOMPLETE
+  bench.yaml (empty → `{}`, or a mapping omitting either S5.7 key) is valid
+  to the runner (which fills the missing key from the S5.7 default), so the
+  gate now fills the default + NAMES it in the run output's `config_note`
+  instead of rejecting; only a MALFORMED file (unparseable / non-mapping
+  top level) is exit 2. See the hotfix plan's H10 section (the authoritative
+  amendment).
 
 ### H11 — bench `results_dir` pre-install usability (P2)
 

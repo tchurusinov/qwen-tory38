@@ -586,18 +586,20 @@ def _config_value(
     error must check it at the CLI layer; the config layer treats it as
     absent by design (an empty path names nothing to parse).
 
-    G3c round-13 P1 (present-but-incomplete, named — H10 extension,
-    spec-follows-code): under ``strict_malformed=True`` the bad-input
-    half now covers EVERY present file that yields no value for ``key``
-    — an unparseable file, a non-mapping top level, an empty / whitespace
-    file (which parses to None), and a mapping that lacks ``key``. All
-    four were the silent-default behavior before this round; H10 as
-    implemented in round-4 only fired on the first two, so a PRESENT
-    file was "malformed" only when it failed to parse into a dict — the
-    empty-file and key-absent cases silently fell back to the default,
-    indistinguishable from "absent". The lenient (internal caller) path
-    is UNCHANGED: every present-but-valueless file still returns the
-    default there; only the strict CLI path became loud.
+    G3c round-13 P1, re-amended at round-14 P1 (runner alignment, H10
+    letter): the strict path fires on a PRESENT file that is MALFORMED —
+    unparseable, or a non-mapping top level that is NOT empty. A present
+    file that PARSES to a mapping but LACKS the key (including an
+    empty/whitespace file, which the runner normalizes to {} at
+    bench/config.py:253-254) is INCOMPLETE, not malformed: the runner
+    fills that key from BENCH_CONFIG_DEFAULTS (bench/config.py:266-269),
+    so the gate does the same and returns the default here (named in the
+    CLI's config_note by main; this accessor returns the bare default).
+    The round-13 "hard-fail a present-but-incomplete file" over-tightened
+    the contract relative to the runner; round-14 restores runner parity
+    while keeping the malformed half (H10) intact. The lenient (internal
+    caller) path is UNCHANGED: it returns the default for every
+    present-but-valueless file, strict or not.
 
     G3c round-13 P2 (single source of parse truth): this now delegates
     the load-parse-validate to ``_load_bench_yaml`` (the same single
@@ -614,12 +616,10 @@ def _config_value(
     data = data or {}
     if key in data:
         return data[key]
-    if strict_malformed:
-        # G3c round-13 P1#1/#2: a PRESENT file that yields no value for
-        # the key (empty/whitespace file -> None -> {}, or a mapping that
-        # lacks the key) is the same bad input as a present file that
-        # fails to parse.
-        raise RebenchError(f"--config {cfg_path} has no '{key}' key")
+    # G3c round-14 P1: a present mapping that lacks the key is INCOMPLETE
+    # (the runner fills it from the S5.7 default), not MALFORMED — so it
+    # is the default here, whether strict or lenient. Only a genuinely
+    # malformed file (the err case above) is the strict bad input.
     return default
 
 
@@ -674,39 +674,50 @@ def main(argv: list[str] | None = None) -> int:
     # G3c round-13 P2 (single pass): the file is parsed ONCE via
     # _load_bench_yaml and both S5.7 keys are read from that single
     # result — no double I/O / double parse / divergent error surface for
-    # the two keys. G3c round-13 P1#1/#2: the strict path also errors on
-    # a PRESENT file that yields no value for a key — an empty /
-    # whitespace file (parses to None, previously hidden by `or {}`) and
-    # a mapping that lacks the key — both of which used to silently fall
-    # back to the default, indistinguishable from "absent". The H10
-    # "absent = default" half is preserved: a MISSING file (or a falsy
-    # path) still takes the default; only a PRESENT file that yields no
-    # value is now the named bad input.
+    # the two keys.
+    #
+    # G3c round-14 P1 (runner alignment, H10 letter): a present bench.yaml
+    # that PARSES to a mapping (including an empty/whitespace file, which
+    # the runner normalizes to {} at bench/config.py:253-254) but LACKS
+    # one of the two S5.7 keys is NOT a bad input — the runner fills that
+    # key from BENCH_CONFIG_DEFAULTS (bench/config.py:266-269), so the
+    # gate must do the same (same file, same semantics; H10 only required
+    # "present-but-malformed -> exit 2"). The gate now fills a missing
+    # key from the SAME S5.7 defaults the runner uses, and records the
+    # fill (config_note) in the gate output so a reader can see the value
+    # came from the default, not the file — the round-13 concern ("silent
+    # default, indistinguishable from absent") is answered by the named
+    # fill, not by hard-failing a file the runner accepts. Only a
+    # genuinely malformed file (unparseable, or a non-mapping top level
+    # that is NOT empty) is the exit-2 bad input.
     try:
         present, data, err = _load_bench_yaml(args.config)
         if err:
             raise RebenchError(err)
         data = data or {}
+        config_note = None
         if not present:
             # no --config (or it names a missing file): H10 default, gate
             # still runs.
             baseline_path = args.baseline or DEFAULT_BASELINE
             regression_tps_pct = 10.0
         else:
-            # a present config: each S5.7 key it does NOT name is a bad
-            # input (P1), so a partially-filled bench.yaml surfaces its
-            # gap instead of silently mixing present values with default
-            # ones. --baseline still overrides the config's baseline.
-            if "rebench_baseline" not in data:
-                raise RebenchError(
-                    f"--config {args.config} has no 'rebench_baseline' key"
-                )
-            if "regression_tps_pct" not in data:
-                raise RebenchError(
-                    f"--config {args.config} has no 'regression_tps_pct' key"
-                )
-            baseline_path = args.baseline or data["rebench_baseline"]
-            regression_tps_pct = data["regression_tps_pct"]
+            # a present mapping: take each S5.7 key from the file, fill a
+            # missing one from the S5.7 default (the runner's behavior,
+            # bench/config.py BENCH_CONFIG_DEFAULTS), and name the fill.
+            fills = []
+            if "rebench_baseline" in data:
+                baseline_path = args.baseline or data["rebench_baseline"]
+            else:
+                baseline_path = args.baseline or DEFAULT_BASELINE
+                fills.append(f"rebench_baseline <- S5.7 default ({DEFAULT_BASELINE})")
+            if "regression_tps_pct" in data:
+                regression_tps_pct = data["regression_tps_pct"]
+            else:
+                regression_tps_pct = 10.0
+                fills.append("regression_tps_pct <- S5.7 default (10)")
+            if fills:
+                config_note = "; ".join(fills)
     except RebenchError as exc:
         _print({"status": "error", "error": str(exc)})
         return EXIT_CONFIG
@@ -720,19 +731,23 @@ def main(argv: list[str] | None = None) -> int:
             current = rows_summary(rows)
             baseline = load_baseline(baseline_path)
             gate = quick_gate(baseline, current, regression_tps_pct)
-            _print(
-                {
-                    "status": "blocked" if gate["blocked"] else "unblocked",
-                    "gate": gate,
-                }
-            )
+            out_gate = {
+                "status": "blocked" if gate["blocked"] else "unblocked",
+                "gate": gate,
+            }
+            if config_note:
+                out_gate["config_note"] = config_note
+            _print(out_gate)
             return EXIT_BLOCKED if gate["blocked"] else EXIT_OK
 
         if args.command == "due":
             engine = load_engine_yaml(args.engine)
             baseline = load_baseline(baseline_path)
             due = full_bench_due(baseline, engine_identity(engine), args.s42_flip)
-            _print({"status": "due" if due["due"] else "not-due", "due": due})
+            out_due = {"status": "due" if due["due"] else "not-due", "due": due}
+            if config_note:
+                out_due["config_note"] = config_note
+            _print(out_due)
             return EXIT_BLOCKED if due["due"] else EXIT_OK
 
         # save-baseline
@@ -743,13 +758,14 @@ def main(argv: list[str] | None = None) -> int:
         engine = load_engine_yaml(args.engine)
         commit = _git_commit()
         p = save_baseline(baseline_path, engine, rows, commit)
-        _print(
-            {
-                "status": "saved",
-                "baseline": str(p),
-                "scenarios": sorted(rows_summary(rows)),
-            }
-        )
+        out_save = {
+            "status": "saved",
+            "baseline": str(p),
+            "scenarios": sorted(rows_summary(rows)),
+        }
+        if config_note:
+            out_save["config_note"] = config_note
+        _print(out_save)
         return EXIT_OK
     except RebenchError as exc:
         _print({"status": "error", "error": str(exc)})

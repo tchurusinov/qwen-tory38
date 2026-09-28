@@ -481,42 +481,44 @@ class _ConfigValueH10Test(unittest.TestCase):
         self.addCleanup(Path(p).unlink, missing_ok=True)
         return p
 
-    # ---- P1#1: an empty / whitespace PRESENT file is a named bad input ----
-    def test_empty_present_file_strict_is_bad_input(self):
+    # ---- P1#1 (round-13 -> round-14 re-amendment): an empty /
+    #      whitespace PRESENT file is INCOMPLETE, not malformed — the
+    #      runner normalizes it to {} and fills the key from the S5.7
+    #      default, so the gate returns the default (NOT a bad input).
+    def test_empty_present_file_strict_fills_default(self):
         p = self._write("")
-        with (
-            self._with_yaml(None),  # yaml.safe_load("") -> None
-            self.assertRaises(rebench.RebenchError) as ctx,
-        ):
-            rebench._config_value(
-                p, "rebench_baseline", self._BASELINE, strict_malformed=True
+        with self._with_yaml(None):  # yaml.safe_load("") -> None -> {}
+            self.assertEqual(
+                rebench._config_value(
+                    p, "rebench_baseline", self._BASELINE, strict_malformed=True
+                ),
+                self._BASELINE,
             )
-        # the named reason must say the file has no key (NOT that it is
-        # unparseable — an empty file parses fine, to None).
-        self.assertIn("has no 'rebench_baseline' key", str(ctx.exception))
 
-    def test_whitespace_present_file_strict_is_bad_input(self):
+    def test_whitespace_present_file_strict_fills_default(self):
         p = self._write("   \n  \n")
-        with (
-            self._with_yaml(None),  # yaml.safe_load(whitespace) -> None
-            self.assertRaises(rebench.RebenchError) as ctx,
-        ):
-            rebench._config_value(
-                p, "rebench_baseline", self._BASELINE, strict_malformed=True
+        with self._with_yaml(None):  # yaml.safe_load(whitespace) -> None -> {}
+            self.assertEqual(
+                rebench._config_value(
+                    p, "rebench_baseline", self._BASELINE, strict_malformed=True
+                ),
+                self._BASELINE,
             )
-        self.assertIn("has no 'rebench_baseline' key", str(ctx.exception))
 
-    # ---- P1#2: a PRESENT mapping that LACKS the key is a named bad input ----
-    def test_present_mapping_missing_key_strict_is_bad_input(self):
+    # ---- P1#2 (round-13 -> round-14 re-amendment): a PRESENT mapping
+    #      that LACKS the key is INCOMPLETE, not malformed — the runner
+    #      fills it from the S5.7 default, so the gate returns the
+    #      default (NOT a bad input). This is the round-14 P1 fix: the
+    #      gate no longer over-tightens the contract vs the runner.
+    def test_present_mapping_missing_key_strict_fills_default(self):
         p = self._write("regression_tps_pct: 10\n")  # has the OTHER key
-        with (
-            self._with_yaml({"regression_tps_pct": 10}),
-            self.assertRaises(rebench.RebenchError) as ctx,
-        ):
-            rebench._config_value(
-                p, "rebench_baseline", self._BASELINE, strict_malformed=True
+        with self._with_yaml({"regression_tps_pct": 10}):
+            self.assertEqual(
+                rebench._config_value(
+                    p, "rebench_baseline", self._BASELINE, strict_malformed=True
+                ),
+                self._BASELINE,
             )
-        self.assertIn("has no 'rebench_baseline' key", str(ctx.exception))
 
     # ---- the strict path still names the pre-round-13 cases ----
     def test_unparseable_present_file_strict_is_bad_input(self):
@@ -538,8 +540,9 @@ class _ConfigValueH10Test(unittest.TestCase):
                     p, "rebench_baseline", self._BASELINE, strict_malformed=True
                 )
             self.assertIn("unparseable", str(ctx.exception))
-        finally:  # noqa: keep the manual sys.modules swap (fake has a
-            # custom YAMLError the context-manager helper doesn't know)
+        # keep the manual sys.modules swap (fake has a custom YAMLError the
+        # context-manager helper doesn't know)
+        finally:
             if prev is None:
                 sys.modules.pop("yaml", None)
             else:
@@ -645,15 +648,41 @@ class _ConfigValueH10Test(unittest.TestCase):
             else:
                 sys.modules["yaml"] = prev
 
-    # ---- P2 regression + P1 end-to-end: a present-but-incomplete
-    #      --config is exit 2 "bad input" from the CLI (not a silent
-    #      default that then fails later). ----
-    def test_cli_present_but_incomplete_config_is_exit_2(self):
+    # ---- P1 end-to-end (round-14): a present-but-incomplete --config
+    #      is NOT exit 2 (the runner fills the missing key from the
+    #      S5.7 default); the gate runs and NAMES the fill in the
+    #      output's config_note. ----
+    def test_cli_present_but_incomplete_config_fills_default_and_names_it(self):
+        import contextlib
+        import io
+        import json as _json
+        import tempfile
+
         p = self._write("regression_tps_pct: 5\n")  # missing rebench_baseline
+        td = Path(tempfile.mkdtemp())
+        self.addCleanup(_cleanup_dir, td)
+        eng = td / "engine.yaml"
+        eng.write_text(
+            "engine:\n  pin:\n    commit: abc\n"
+            "model:\n  file: f\n  fallback_file: f\n  revision: '1'\n"
+            "image:\n  pin:\n    sha256: 'x'\n"
+        )
         with self._with_yaml({"regression_tps_pct": 5}):
-            rc = rebench.main(["due", "--config", p, "--engine", "/nonexistent.yaml"])
-        # exit 2 (EXIT_CONFIG) before it ever reaches the engine load
-        self.assertEqual(rc, rebench.EXIT_CONFIG)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = rebench.main(["due", "--config", p, "--engine", str(eng)])
+        out = _json.loads(buf.getvalue().strip().splitlines()[-1])
+        # the gate RAN (not the exit-2 bad-input path): due with no
+        # baseline -> not-due -> EXIT_OK.
+        self.assertEqual(rc, rebench.EXIT_OK)
+        # the missing key was filled from the S5.7 default AND named.
+        self.assertIn("config_note", out, out)
+        self.assertIn(
+            f"rebench_baseline <- S5.7 default ({rebench.DEFAULT_BASELINE})",
+            out["config_note"],
+        )
+        # the present key was used as-is (no note for it).
+        self.assertNotIn("regression_tps_pct <-", out["config_note"])
 
     def test_cli_missing_config_still_runs_with_defaults(self):
         # H10 "absent = default": no --config -> the gate/due path still
