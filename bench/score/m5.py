@@ -146,9 +146,21 @@ def _match(answer: str, golden: str) -> bool:
     g_tokens = _tokens(g)
     if not g_tokens:
         # a golden that is ALL stop words across 2+ raw tokens (e.g. "a, an"
-        # — no M5 golden today is like this) — the token-set half is
-        # vacuous, so fall back to a WHOLE-WORD containment of the raw
-        # golden string (G3c round-1 P2 degenerate path).
+        # — no M5 golden today is like this). The H8 token-set half is
+        # vacuous (both _token_seq sides are empty, so _is_subseq would
+        # return True for ANY answer — the degenerate the G3c round-8 P2
+        # regression test pins against). G3c round-10 P2 (control-flow
+        # precision, the reviewer's "unreachable branch" note): this line
+        # is ONLY reached when the substring fast-path above (line 137,
+        # `g in a`) ALREADY FAILED — for a 2+-token golden the whole-word
+        # regex of the normalized literal is a STRICT SUBSET of the
+        # substring check (whole-word containment implies substring
+        # containment), so this branch is provably False-when-reached. It
+        # is kept as the named degenerate guard (G3c round-1 P2) rather
+        # than deleted, so a future refactor that reorders the checks
+        # (e.g. moves the substring check below) does not silently change
+        # the multi-stop-word behavior — the round-8 test pins the
+        # observable outcome.
         return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
     return _is_subseq(_token_seq(g), _token_seq(a))
 

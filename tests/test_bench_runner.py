@@ -480,6 +480,79 @@ class ReleaseFlagsTest(MockRunTestBase):
         self.assertEqual(rec["unload_exit"], 0)
         self.assertEqual(rec["note"], "done")
 
+    def test_release_after_is_unload_only_not_reloaded(self):
+        # G3c round-10 P1 (disposition): an "after" release is
+        # UNLOAD-ONLY (S4.3 tier-2 "pool left main-only") — it must NOT
+        # run the reload + warmup path even when a reload bin is present.
+        # The `if kind == "between" and reload_bin:` guard (run.py)
+        # excludes "after"; this regression test pins that by passing
+        # BOTH bins and asserting the record has no reload/warmup keys
+        # and the reload script was never executed. The fake reload
+        # script APPENDS a marker to a log file; if the guard regressed
+        # and the after-release reloaded, the log would be non-empty.
+        log = self.tmp / "reload_log.txt"
+        log.write_text("")
+        unload = self.tmp / "fake_unload.py"
+        unload.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        reload_bin = self.tmp / "fake_reload.py"
+        reload_bin.write_text(
+            "#!/usr/bin/env python3\n"
+            f"open({str(log)!r}, 'a').write('RELOADED\\n')\n"
+            "import sys\nsys.exit(0)\n"
+        )
+        import os as _os
+
+        _os.chmod(str(unload), 0o755)
+        _os.chmod(str(reload_bin), 0o755)
+        rec = bench_run._pool_release("after", str(unload), str(reload_bin), mock=False)
+        # the record is unload-only: no reload_exit / reload_s / warmup_s,
+        # and the reload: false marker is set at record creation.
+        self.assertEqual(rec["unload_exit"], 0)
+        self.assertEqual(rec["reload"], False)
+        self.assertNotIn("reload_exit", rec, "after-release must not reload")
+        self.assertNotIn("reload_s", rec, "after-release must not reload")
+        self.assertNotIn("warmup_s", rec, "after-release must not warmup")
+        self.assertEqual(log.read_text(), "", "the reload script was executed")
+
+    def test_release_between_does_reload(self):
+        # The contrast to test_release_after_is_unload_only_not_reloaded:
+        # a "between" release (a scenario boundary) DOES reload + warmup
+        # (the next scenario still needs the pool). With a fake reload
+        # script that APPENDS a marker, the log must be non-empty after
+        # the call — proving the `kind == "between" and reload_bin` guard
+        # routes the reload path for "between" (and only "between").
+        log = self.tmp / "reload_log_between.txt"
+        log.write_text("")
+        unload = self.tmp / "fake_unload_b.py"
+        unload.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        reload_bin = self.tmp / "fake_reload_b.py"
+        reload_bin.write_text(
+            "#!/usr/bin/env python3\n"
+            f"open({str(log)!r}, 'a').write('RELOADED\\n')\n"
+            "import sys\nsys.exit(0)\n"
+        )
+        import os as _os
+
+        _os.chmod(str(unload), 0o755)
+        _os.chmod(str(reload_bin), 0o755)
+        # monkeypatch the warmup (the hermetic test never wants to hit the
+        # real instance ports for the 16-token warmup).
+        orig_warmup = bench_run._warmup_instances
+        bench_run._warmup_instances = lambda engine=None: True
+        try:
+            rec = bench_run._pool_release(
+                "between", str(unload), str(reload_bin), mock=False
+            )
+        finally:
+            bench_run._warmup_instances = orig_warmup
+        self.assertEqual(rec["unload_exit"], 0)
+        self.assertEqual(rec["reload_exit"], 0)
+        self.assertIn("reload_s", rec, "between-release must reload")
+        self.assertIn("warmup_s", rec, "between-release must warmup")
+        self.assertEqual(
+            log.read_text(), "RELOADED\n", "the reload script was NOT executed"
+        )
+
     def test_pool_release_not_launchable_is_a_named_skip(self):
         # G3c round-1 P1 edge: a present-but-not-launchable script (exec
         # bit stripped) is a named skip, not an abort — the run continues

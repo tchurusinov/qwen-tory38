@@ -138,16 +138,46 @@ def main_endpoint(harness: dict) -> dict:
     # the recorded port agree. (The subagent pool always builds
     # http://127.0.0.1:<port> with an explicit port, so this is scoped to
     # the main endpoint, whose url is operator-supplied and may omit the
-    # port.) urlparse handles the host/port split without a brittle regex.
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if parsed.port is not None:
-        port = parsed.port
-    elif parsed.scheme in ("http", "https") and parsed.hostname:
-        # no explicit port in the url -> carry the default into the url so
-        # the recorded port and the POST target agree.
-        url = f"{url.rstrip('/')}:{port}"
+    # port.)
+    # G3c round-10 P2: the round-9 parse used urlparse, which misreads a
+    # SCHEMELESS url: urlparse("localhost") -> scheme="" / hostname=None,
+    # so the port normalization was skipped and the recorded port
+    # (30001) disagreed with the POST target (:80) on exactly the edge the
+    # P0 claimed to fix. The authority-aware split below is scheme-agnostic
+    # and path-aware: it first strips the scheme (if any) on "://", then
+    # takes the FIRST "/" as the host/path boundary (anything after that is
+    # a path, not a port), and splits the authority on ":" — an explicit
+    # port in either the "scheme://host:port" or the schemeless "host:port"
+    # shape. An authority with no ":" gets the default carried into the
+    # url so the recorded port and the POST target agree.
+    authority = url.split("://", 1)[-1] if "://" in url else url
+    authority = authority.split("/", 1)[0]
+    _, _, port_s = authority.rpartition(":")
+    if port_s.isdigit():
+        # an explicit numeric port after the LAST colon in the authority —
+        # the normal "scheme://host:port" or schemeless "host:port" shape.
+        port = int(port_s)
+    else:
+        # no explicit port in the authority -> carry the default INTO the
+        # authority (not at the end of the url) so the recorded port and
+        # the POST target agree, and a path (if any) stays AFTER the port.
+        # The round-9 naive `f"{url.rstrip('/')}:{port}"` appended the
+        # port at the END of the url — wrong for a portless url WITH a
+        # path ("http://localhost/served" became
+        # "http://localhost/served:30001" instead of
+        # "http://localhost:30001/served"). Split on the first "/" to
+        # keep the path out of the authority.
+        if "://" in url:
+            scheme, rest = url.split("://", 1)
+            auth, _, path = rest.partition("/")
+            url = (
+                f"{scheme}://{auth}:{port}/{path}"
+                if path
+                else f"{scheme}://{auth}:{port}"
+            )
+        else:
+            auth, sep, path = url.partition("/")
+            url = f"{auth}:{port}/{path}" if sep else f"{auth}:{port}"
     return {
         "kind": "main",
         "port": port,
