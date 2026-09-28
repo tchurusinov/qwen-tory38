@@ -302,31 +302,72 @@ hand-edit the deployed files; re-run the installer instead.
 
 ## The harness skill (`bonsai2-harness`)
 
-<!-- PENDING (MAP P5 / SPEC S4): the doctrine skill lands in Phase 5. Until
-     then the locked design:
+<!-- Landed in Phase 5 (MAP 5.1-5.5): the doctrine skill is now in the repo
+     at `skills/bonsai2-harness/` (SKILL.md + claims.json, the
+     machine-readable claims file the S4.6 doctrine audit consumes).
+     Design as built:
 
      - A standard SKILL.md text skill, installable into Hermes / pi / any
        agent runtime that loads text skills and runs bash. Loaded on
        demand, in any session where the main agent may offload work.
+       Harness-agnostic by form (S4.1 delta 2026-09-28): box-specific
+       facts confined to ONE "This box" section; the doctrine, command
+       reference, recipes, and verification protocol are written against
+       the S3.2 surface only — usable by any runtime against any pool
+       exposing S3.2. A different box updates "This box" only.
      - Its command reference is exactly the S3.2 surface (it never
-       invents commands).
+       invents commands), including the closed-set 12 exit codes.
      - Work-allocation doctrine (S4.2): main = multi-step plans,
        architecture, cross-file coherence, long-context reading, live
        tool-feedback loops, and ALL verification of subagent claims.
        Subagents = bounded code-gen, per-file analysis fan-out, test
-       execution, drafts, diff-review drafts. Every doctrine row cites
-       a bench scenario id [M#] — no citation, no claim.
-     - Session economy (S4.3): ≤ 6 of 8 slots busy per instance; batch
+       execution, drafts, diff-review drafts, spec-chunk implementation
+       and test-batch-with-report (--tools on). Every doctrine row cites
+       a bench scenario id [M#] — no citation, no claim. The self-report
+       rule is the amended "unverified claim WITH EVIDENCE": --tools on
+       results carry the tool_log ledger; verification is ledger-first
+       (claimed suite ran with exit 0, claimed files exist in the
+       workdir, then main re-runs the named check on its own side).
+     - Session economy (S4.3): <= 6 of 8 slots busy per instance; batch
        spawns in one turn then one collect loop; short main turns while
        subagents run; steer instead of cancel+respawn past 50 %.
-     - Cost doctrine (S4.4): dispatch iff estimated dispatch cost (
-       prefill + decode + main-side verification) beats the same task
+       Live-run doctrine (S4.3 delta 2026-09-28): main t/s halves under
+       a loaded pool — main sends large clearly-predefined chunks and
+       does the intelligence-critical work in the window; TWO WORKFLOW
+       BRANCHES, stateless DEFAULT (spawn -> collect -> unload -> verify
+       at full t/s -> re-spawn if needed) and stateful (keep loaded +
+       context-retained for multi-step work); VRAM climb = KV growth
+       within the S1.4 tier, release = bonsai2-unload --all when the
+       pool is done; box meters — cache % is reclaimable (judge
+       MemAvailable), CPU 4-20 % / GPU ~96 % is the healthy state.
+     - Cost doctrine (S4.4): dispatch iff estimated dispatch cost
+       (prefill + decode + main-side verification) beats the same task
        on main; two consecutive bench-confirmed losses on a task shape
-       flip that row to main until re-benched.
+       flip that row to main until re-benched. The a-priori 29/4800
+       floors are replaced where the 2026-09-28 post-hotfix run measured
+       (subagent decode 44.7-61.9 t/s single-task, 3.7-19.3 per-task under
+       16-wide contention; tool-loop wall dominated by tool execution —
+       the --tools on dispatch-cost term is steps_est x tool duration +
+       prefill of tool results; main idle 8.52 t/s; main-under-load
+       planning number = halved). The win/lose call uses the
+       contention-adjusted t/s.
      - Failure doctrine (S4.5): one paragraph per S3.2 exit code.
-     - A doctrine-audit script keeps skill claims ↔ bench rows ↔ script
-       exit codes consistent; a failing audit blocks the skill PR.
--->
+     - Prompt templates: one proven template per S4.2 tool-loop row
+       (T1 spec-chunk [M9], T2 test batch + report [M10], T3
+       browser-via-python — provisional, no S5.2 row yet), each with the
+       workdir contract, the definition of done (test command + expected
+       exit code), and the final-answer contract.
+     - Recipes (S4.1 delta 2026-09-28): R1-R7 — worked examples for
+       different coding-work shapes (single-file code-gen, test batch +
+       report, diff review, spec-chunk implementation, fan-out analysis,
+       long-context QA, saturation fan-out), each = task shape + bench
+       citation + filled prompt template + main's verification protocol
+       + observed failure modes (from the 2026-09-27/28 live runs) +
+       workflow branch. A recipe without a bench citation is a review
+       defect.
+     - A doctrine-audit script (S4.6, MAP 5.6) keeps skill claims <->
+       bench rows consistent; a failing audit blocks the skill PR.
+--->
 
 ## Bench framework
 

@@ -1309,6 +1309,22 @@ quality becomes apparent from task success")
   + prefill_of_tool_results)` — the v1 estimate is 6 steps × (10 s +
   0.3 s), replaced by the M9/M10 measured per-step cost at the first
   full bench.
+
+> Delta (2026-09-28, Phase 5): the 2026-09-28 post-hotfix bench run
+> (commit b2cbe98) measured the constants on this pin — expected:
+> a-priori 29/4800; real: subagent decode 44.7–61.9 t/s single-task no
+> contention (MAP 1.8 @gpu live runs 2026-09-22), 3.7–19.3 t/s per-task
+> under 16-wide contention, tool-loop
+> wall dominated by tool execution (M9 413 s / 5 steps = 0.27 effective
+> t/s; M10 108 s / 10 steps = 2.33), main idle 8.52 t/s ([M6]); M8's 0.00
+> is a timing artifact — the planning number is the user's observed
+> 30 → 15 halving. The win/lose call therefore uses the
+> contention-adjusted t/s, and `t/s_prefill` stays a-priori (20 %
+> dispatch-side margin) — the first full bench did not measure prefill.
+> The calibrated constants + the `--tools on` term + the win rule live
+> in the skill's cost section (`skills/bonsai2-harness/SKILL.md`,
+> machine-readable copy in `skills/bonsai2-harness/claims.json`, the
+> S4.6 audit input). No locked acceptance number changed.
 - **Win rule:** dispatch iff `dispatch_cost < est_main_time_s(task)`
   (est_main_time_s = the time the same task would take on main,
   including main's own verification of the outcome) AND the task

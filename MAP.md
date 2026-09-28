@@ -661,7 +661,7 @@ Phase 5 implementation must treat as binding):
   systematically unsatisfied live), M10 report status semantics
   (per-file status must mirror the exit code, not the batch verdict).
 
-- [ ] 5.1 `SKILL.md` skeleton: frontmatter, when-to-use, command
+- [x] 5.1 `SKILL.md` skeleton: frontmatter, when-to-use, command
       reference = exactly S3.2 (the skill never invents commands) (S4.1),
       + the S4.1 prompt templates (one proven template per S4.2
       tool-loop row: workdir contract, definition of done = test
@@ -670,15 +670,19 @@ Phase 5 implementation must treat as binding):
       specific facts confined to ONE "This box" section; doctrine /
       command reference / recipes / verification written against the
       S3.2 surface only — usable by any runtime that loads text skills
-      + bash, against any pool exposing S3.2).
-- [ ] 5.2 Work-allocation table (S4.2): every row carries a `[M#]`
+      + bash, against any pool exposing S3.2). (implemented 2026-09-28
+      on `phase5-harness-skill-design`, PR pending)
+- [x] 5.2 Work-allocation table (S4.2): every row carries a `[M#]`
       citation from the Phase 4 run; self-report rule — amended
       "unverified claim WITH EVIDENCE" (`--tools on` results carry the
       tool_log ledger, S3.1; ledger-first verification: claimed suite
       ran with exit 0, claimed files exist in the workdir, then
       main re-runs the named check); the S4.2 tool-loop rows (spec-chunk
       [M9], test-batch [M10], browser-via-python-tool) included.
-- [ ] 5.3 Session economy (S4.3, incl. the amended steer guidance:
+      (implemented 2026-09-28 on `phase5-harness-skill-design`, PR
+      pending; machine-readable copy in
+      `skills/bonsai2-harness/claims.json`)
+- [x] 5.3 Session economy (S4.3, incl. the amended steer guidance:
       `--tools on` steer injected at the next step boundary; `--tools
       off` steer advisory for the next attempt) + the live-run
       doctrine (S4.3 delta 2026-09-28: main t/s halving under a
@@ -695,9 +699,13 @@ Phase 5 implementation must treat as binding):
       until then, 20% dispatch margin) + the `--tools on` dispatch-cost
       term (steps_est × tool duration + prefill of tool results; the
       M9/M10 live data: tool execution dominates wall time, not
-      decode) ; win rule + two-consecutive-loss flip.
-- [ ] 5.4 Failure doctrine (S4.5): one paragraph per S3.2 exit code.
-- [ ] 5.5 Recipes section (S4.1 delta 2026-09-28; design: analysis
+      decode) ; win rule + two-consecutive-loss flip. (implemented
+      2026-09-28 on `phase5-harness-skill-design`, PR pending; the S4.4
+      delta note records the a-priori → measured constant swap)
+- [x] 5.4 Failure doctrine (S4.5): one paragraph per S3.2 exit code.
+      (implemented 2026-09-28 on `phase5-harness-skill-design`, PR
+      pending)
+- [x] 5.5 Recipes section (S4.1 delta 2026-09-28; design: analysis
       report §4): worked examples for different types of coding work /
       approaches to coding with subagents, derived from (a) the bench +
       live-run lessons (R1 single-file code-gen [M1] + content-
@@ -711,7 +719,9 @@ Phase 5 implementation must treat as binding):
       scaling — source list: report §9). Each recipe = task shape +
       bench citation + filled prompt template + verification
       protocol + failure modes + workflow branch; a recipe without a
-      bench citation is a review defect (S4.1).
+      bench citation is a review defect (S4.1). (implemented 2026-09-28
+      on `phase5-harness-skill-design`, PR pending; recipe citations
+      in `skills/bonsai2-harness/claims.json`)
 - [ ] 5.6 Doctrine audit script: `bench.yaml` scenario rows ↔ S4.2
       citations + win/lose recompute → `doctrine-audit.json`; failing
       audit blocks the skill PR (S4.6). Audit scope includes the
@@ -826,6 +836,38 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-28 — MAP 5.1–5.5: the `bonsai2-harness` skill implemented (branch `phase5-harness-skill-design`, PR pending)
+- agent/model: Hermes qwen3.8-27b (session: Phase 5 implementation on
+  the existing `phase5-harness-skill-design` branch, off the
+  preliminary-analysis commit fe109c8)
+- phase(s): P5 (5.1–5.5; 5.6–5.8 next)
+- items checked: 5.1, 5.2, 5.3, 5.4, 5.5 (checked with the
+  "implemented … PR pending" note — the formal check is the G3/G4
+  review loop, not this entry)
+- machine state: no /opt/bonsai2 install (Phase 6); no GPU load this
+  session (docs + JSON only); the 2026-09-28 post-hotfix bench rows
+  (bench-results/, commit b2cbe98) are the calibration data transcribed
+  into the skill's "This box" + cost sections.
+- next: 5.6 (doctrine audit script — reads
+  `skills/bonsai2-harness/claims.json` + `etc/bench.yaml` +
+  bench-results rows; emits `doctrine-audit.json`, exit 0/1; failing
+  audit blocks the skill PR). The audit script should also verify the
+  SKILL.md citations against claims.json (single source of truth =
+  claims.json; SKILL.md prose is reviewed against it).
+- blockers/intricacies: (1) M1's two consecutive bench-confirmed losses
+  are engine-format losses (the [M6] control shows main fails the M1
+  shape too) — the skill documents the nuance in the win-rule section
+  rather than flipping the row; the rubric seam stays the bench's job.
+  (2) T3 (browser-via-python) has no S5.2 row yet — template marked
+  provisional in claims.json + the SKILL.md; the citation rule applies
+  when it is benched. (3) t/s_prefill stays a-priori (4800, 20 %
+  dispatch-side margin) — the first full bench did not measure prefill.
+- spec deltas: SPEC.md S4.4 delta note (2026-09-28, Phase 5): the
+  a-priori 29/4800 floor is replaced where the post-hotfix run measured
+  (contention-adjusted decode, tool-loop wall profile, main idle 8.52;
+  M8 0.00 = timing artifact, planning number = halved). No locked
+  acceptance number changed.
 
 ### 2026-09-28 — Phase 5 preliminary analysis + user directions baked into SPEC/MAP (branch `phase5-harness-skill-design`)
 - agent/model: Hermes qwen3.8-27b (session: senior-architect
