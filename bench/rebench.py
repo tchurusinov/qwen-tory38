@@ -273,6 +273,13 @@ def quick_gate(
     base_c = base_scen.get(_M7, {}).get("comparability")
     cur_c = current.get(_M7, {}).get("comparability")
     comparable = True
+    # G3c round-6 P2: the triple is a dict comparison (base_c != cur_c).
+    # A MISSING key in one triple makes the dicts unequal -> "not
+    # comparable", which is the correct (conservative) reading: a partial
+    # row (one of {n_tasks, concurrency, N} absent) is NOT known to be the
+    # same load, so the t/s half is recorded, not silently compared. A
+    # reader wanting to know WHY can look at the recorded
+    # baseline_comparability / current_comparability above.
     if base_c is not None and cur_c is not None and base_c != cur_c:
         comparable = False
         tps_info["comparable"] = False

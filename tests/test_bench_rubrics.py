@@ -177,6 +177,21 @@ class M5RubricTest(unittest.TestCase):
         )
         self.assertFalse(m5._match("M1, M2", golden), "a missing fact fails")
 
+    def test_multi_value_golden_requires_order(self):
+        # G3c round-6 P1: the multi-value H8 half is an ordered
+        # subsequence, not a bare set-subset. A reordered fact list
+        # ("M7, M2, M1") must NOT pass the golden "M1, M2, M7"; extra
+        # words / stop-particles BETWEEN the facts still pass
+        # ("tolerant of phrasing"); a missing fact still fails.
+        golden = "M1, M2, M7"
+        self.assertFalse(m5._match("M7, M2, M1", golden), "reordered fails")
+        self.assertFalse(m5._match("M2, M1, M7", golden), "partial reorder fails")
+        self.assertTrue(
+            m5._match("M1 and M2 and finally M7", golden),
+            "stop-words between keep order",
+        )
+        self.assertFalse(m5._match("M1 M7", golden), "missing middle fact fails")
+
     def test_mis_sized_golden_fails_named(self):
         # the S5.2 "5 QA questions" rubric contract: a golden with a
         # different question count fails NAMED instead of the rubric

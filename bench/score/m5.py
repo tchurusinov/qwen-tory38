@@ -18,8 +18,11 @@ Scoring (auto, per-question binary — S5.3 "machine-scored"):
     containment did not tolerate, while the long-context read itself
     worked): common particles (and/or/the/a/an) are dropped from both
     sides, and the rule is ordered containment OR every golden token
-    present in the answer's token set. A missing fact still fails (the
-    token-set half is strict on missing tokens).
+    present in the answer's token sequence, IN GOLDEN ORDER (a missing
+    fact still fails; a reordered fact list — "M7, M2, M1" vs "M1, M2,
+    M7" — also fails; G3c round-6 P1: "tolerant of phrasing" = extra
+    words / case / punctuation / stop-words between the facts, the facts
+    keep their golden order).
   * normalization (``_normalize``): case-fold, keep only alphanumerics +
     underscores + commas + spaces (everything else collapses to a space).
     It does NOT strip stop-words / conjunctions — that is the token-set
@@ -90,6 +93,28 @@ def _tokens(s: str) -> set[str]:
     return {t for t in _TOKEN_RE.findall(s) if t not in _STOP}
 
 
+def _token_seq(s: str) -> list[str]:
+    """The ORDERED non-stop tokens (the order-insensitive _tokens's
+    ordered twin). G3c round-6 P1: the multi-value match is an ordered
+    subsequence, not a bare set-subset — a golden "M1, M2, M7" must not
+    match an answer that lists the facts out of order ("M7, M2, M1").
+    'Tolerant of phrasing' means extra words / case / punctuation / stop
+    words may appear BETWEEN the facts; the facts themselves keep their
+    golden order.
+    """
+    return [t for t in _TOKEN_RE.findall(s) if t not in _STOP]
+
+
+def _is_subseq(needle: list[str], haystack: list[str]) -> bool:
+    """True when every needle token appears in the haystack IN ORDER
+    (not necessarily adjacent)."""
+    i = 0
+    for h in haystack:
+        if i < len(needle) and h == needle[i]:
+            i += 1
+    return i == len(needle)
+
+
 def _match(answer: str, golden: str) -> bool:
     a = _normalize(answer)
     g = _normalize(golden)
@@ -112,7 +137,10 @@ def _match(answer: str, golden: str) -> bool:
         return True
     # H8 tolerant half: conjunctions / word-boundary phrasing. Drop the
     # stop particles and require every golden token in the answer's token
-    # set. Ordered containment above remains the strict special case.
+    # set, IN GOLDEN ORDER (G3c round-6 P1: "tolerant of phrasing" = extra
+    # words / case / punctuation / stop-words between the facts; the facts
+    # keep their golden order, so "M7, M2, M1" does NOT pass "M1, M2, M7").
+    # Ordered containment above remains the strict fast-path special case.
     g_tokens = _tokens(g)
     if not g_tokens:
         # a golden that is ALL stop words (e.g. "an") — the token-set half
@@ -121,7 +149,7 @@ def _match(answer: str, golden: str) -> bool:
         # of "banana"; G3c round-1 P2). No golden answer is a bare stop
         # word today, so this only hardens the degenerate path.
         return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
-    return g_tokens <= _tokens(a)
+    return _is_subseq(_token_seq(g), _token_seq(a))
 
 
 def score(payload: dict, root=None) -> dict:

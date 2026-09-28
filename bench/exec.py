@@ -347,6 +347,17 @@ def run_concurrent(
         for fut in as_completed(futures):
             idx, res = fut.result()
             results[idx] = res
+    # G3c round-6 P2: batch_wall_s includes the ThreadPoolExecutor teardown
+    # (the __exit__ shutdown(wait=True) join). This is negligible: all
+    # futures have been consumed by the as_completed loop above, so the
+    # join is near-instant. The wall therefore measures "from first task
+    # submit to last task complete + pool teardown" — effectively the
+    # batch WALL-clock at the scenario's concurrency, as SPEC S5.1 H9
+    # describes. If a future implementation pre-allocates the pool or
+    # adds post-pool work (e.g. a result aggregation step), the wall
+    # would grow to include that; the S5.5 baseline capture is a snapshot
+    # of THIS measurement, so like-with-like comparison holds as long as
+    # the executor path is unchanged.
     batch_wall_s = time.monotonic() - batch_start
 
     out: list[TaskResult] = [r for r in results if r is not None]

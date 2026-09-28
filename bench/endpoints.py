@@ -113,7 +113,13 @@ def main_endpoint(harness: dict) -> dict:
         api_key = ""
     port = 30001
     # parse the port out of the url for the record (best-effort; the url is
-    # authoritative for the executor).
+    # authoritative for the executor). G3c round-6 P2: the 30001 default is
+    # a FALLBACK only — when the url carries an explicit port (e.g. an
+    # override or keepalive proxy on a non-standard port) the parsed value
+    # wins. The S3.1 contract says the endpoint dict carries the real port;
+    # this parser extracts it from the url string (the executor's source of
+    # truth), so the recorded port matches what the executor actually
+    # targets, not a hardcoded default.
     if ":" in url:
         _, _, port_s = url.rpartition(":")
         if port_s.isdigit():

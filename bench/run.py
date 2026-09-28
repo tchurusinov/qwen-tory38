@@ -448,7 +448,16 @@ def _score_shape(
     if sid == "M7":
         # H9 (post-live-run): score from the MEASURED aggregate (the
         # batch wall clock — the S5.1 "t/s at the ceiling" saturation
-        # figure). A None agg keeps the legacy serial shape.
+        # figure). G3c round-6 P2 (DOD note): a None agg means the caller
+        # did not run run_concurrent (a legacy / capability / mock path
+        # that pre-dates the H9 wall measurement); in that case the
+        # serial figure is recomputed from the per-task results, and the
+        # M7 scorer's fallback (aggregate_tps_wall absent -> aggregate_tps)
+        # scores the serial figure. This is the documented legacy shape —
+        # a pre-amendment M7 row is scored on the serial figure, NOT
+        # silently compared to a post-amendment wall figure (the S5.5
+        # comparability triple + the re-bench gate's not-comparable path
+        # are what prevent a silent cross-amendment compare).
         if agg is None:
             agg = _aggregate_tps(tasks)
         return bscore.m7.score({"agg": agg, "results": tasks})
@@ -524,6 +533,16 @@ def run(
                 # scenario it precedes + follows, so a multi-scenario run
                 # can attribute WHICH boundary fired / failed (the record
                 # itself carries no sid).
+                # G3c round-6 P1: this release (unload -> reload -> warmup)
+                # runs INSIDE the S3.5 bench lock (the try/finally above
+                # holds BONSAI2_BENCH_LOCK; it is released only in the
+                # finally at the bottom of run()). No second bench can
+                # acquire the lock while this one is at a boundary
+                # tearing the pool down / reloading it, so the release
+                # side-effects are serialized with the bench — S3.5
+                # "a bench never runs while another bench is active"
+                # holds for the release path too, not just the scenario
+                # rows.
                 prev_sid = ordered_sids[n - 1]
                 rec = _pool_release(
                     "between",
@@ -578,6 +597,11 @@ def run(
         # row file for it).
         out["box_state_post_run"] = boxstate.snapshot()
         if release_after:
+            # G3c round-6 P1 (same as the release_between case): the
+            # post-run teardown also runs INSIDE the S3.5 bench lock —
+            # the lock is released only in the finally below, so no
+            # second bench can acquire it while this one is tearing the
+            # pool down.
             out["release_after"] = _pool_release(
                 "after", unload_bin, reload_bin, mock is not None, engine=engine
             )
