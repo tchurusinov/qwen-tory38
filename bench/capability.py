@@ -376,11 +376,13 @@ def run_mode(
     S5.4 "failure is data" rule).
 
     wait_s: the terminal-poll window. None (the default) = the task's own
-    ``deadline_s`` + a 60 s poll margin (the post-live-run amendment,
-    S5.2/S5.9 #5: the live M9 crash was a hardcoded 120 s window racing
-    a 300/600 s task deadline — the driver must cover the backstop, not
-    a constant smaller than it). An explicit ``wait_s`` wins (the
-    hermetic seam).
+    ``deadline_s`` + the in-flight step bound (``TOOL_TIMEOUT_S`` = 60 s)
+    + a 30 s slack (the post-live-run amendment, S5.2/S5.9 #5: the live M9
+    crash was a hardcoded 120 s window racing a 300/600 s task deadline
+    — the driver must cover the backstop, not a constant smaller than
+    it; G3c round-2 P1 made the margin EXCEED the in-flight bound rather
+    than equal it, so the default is deadline + 90 s, not deadline + 60
+    s). An explicit ``wait_s`` wins (the hermetic seam).
     """
     if tool_execution not in ("host", "engine"):
         raise CapabilityError(

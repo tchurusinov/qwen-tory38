@@ -352,9 +352,20 @@ def run_concurrent(
     out: list[TaskResult] = [r for r in results if r is not None]
     n_errors = sum(1 for r in out if not r.ok)
     total_completion_tokens = sum(r.completion_tokens or 0 for r in out if r.ok)
-    # aggregate t/s, two denominators (the post-live-run amendment, H9 /
+    # NUMERATOR CHOICE (S5.1 H9, G3c round-4 P1): the t/s numerator for BOTH
+    # figures below is ``total_completion_tokens`` — the OUTPUT tokens only
+    # (completion), NOT prompt+completion. This is settled by the spec's own
+    # H9 worked example (SPEC S5.1/S5.5): the live first run's 0.25 was the
+    # serial sum "370/1484 s" and the wall figure is "370/161 s" — 370 is the
+    # completion-token count (the pre-amendment ``aggregate_tps`` numerator) in
+    # BOTH, so serial and wall are LIKE-FOR-LIKE (identical numerator, only
+    # the denominator differs: per-task elapsed sum vs batch wall-clock). It
+    # is a DECODE-throughput ceiling (output t/s at the concurrency ceiling),
+    # not a "total generated tokens incl. prefill" figure — the prefill cost
+    # is the separate S5.1 prefill-t/s half, not mixed into this ceiling.
+    # aggregate_tps, two denominators (the post-live-run amendment, H9 /
     # S5.1 + S5.5): the M7 "t/s at the ceiling" is a BATCH WALL-CLOCK
-    # saturation figure (total tokens / batch wall) — the live first run's
+    # saturation figure (completion tokens / batch wall) — the live first run's
     # 0.25 was the serial sum (370 tokens / 1484 s of *per-task* elapsed),
     # not the ~161 s wall. The serial sum stays recorded as the
     # decode-throughput invariant (aggregate_tps_serial).

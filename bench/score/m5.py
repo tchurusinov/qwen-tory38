@@ -24,12 +24,11 @@ Scoring (auto, per-question binary — S5.3 "machine-scored"):
     underscores + commas + spaces (everything else collapses to a space).
     It does NOT strip stop-words / conjunctions — that is the token-set
     half's job: the token-set scorer (``_tokens`` + ``_match``) case-folds
-    and drops the conjunction/word-boundary particles via the S5.2
-    normalization contract (``STOP_WORDS``: "and", "or", "a", "an", "the",
-    "with") so "M1 and M2" matches the golden "M1, M2, M7". ``_normalize``
-    alone is therefore tolerant of case, surrounding punctuation, and extra
-    whitespace, but NOT of "and"-phrasing (that tolerance is the
-    token-set half).
+    and drops the conjunction/word-boundary particles via the ``_STOP``
+    constant ("and", "or", "the", "a", "an") so "M1 and M2" matches the
+    golden "M1, M2, M7". ``_normalize`` alone is therefore tolerant of
+    case, surrounding punctuation, and extra whitespace, but NOT of
+    "and"-phrasing (that tolerance is the token-set half).
   * the golden answers are short tokens: "PTQ_1_0", "80", "M1, M2, M7" —
     the scoring is tolerant of case, surrounding punctuation, extra
     whitespace, and "and"-phrasing (token-set half), but NOT of a

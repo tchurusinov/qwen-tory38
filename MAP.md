@@ -791,7 +791,9 @@ SPEC.md `status` → `active`.
   - H1 (P0): `bench/capability.py` — the driver's terminal-poll window
     `wait_s` was a hardcoded 120 s racing a 300/600 s task deadline
     (the live M9 crash `not terminal within 120.0s`). Now `wait_s`
-    defaults to None = `deadline_s + 60 s` margin; an explicit value wins
+    defaults to None = `deadline_s + TOOL_TIMEOUT_S (60 s) + 30 s slack`
+    (G3c round-2 P1: the margin EXCEEDS the in-flight step bound, so the
+    default is deadline + 90 s); an explicit value wins
     (the hermetic seam).
   - H2 (P1): `bench/run.py` `_run_capability` — a capability-row failure
     (CapabilityError) is now a ROW verdict (fail, named detail), not a

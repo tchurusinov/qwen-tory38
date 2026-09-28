@@ -122,6 +122,11 @@ def meminfo() -> str:
     parts = []
     for name in fields:
         val = _meminfo_field(name)
+        # G3c round-4 P2: 'n/a' is a deliberate STRING sentinel (the S5.2
+        # "stored as strings" rule). A missing /proc/meminfo field (e.g. a
+        # minimal container) records n/a, not a numeric 0 — the snapshot is
+        # diagnostic data, not a machine-parsed metric; a reader parsing
+        # the value should handle the n/a string (it's a string by contract).
         parts.append(f"{name}={val if val is not None else 'n/a'}")
     return " ".join(parts)
 

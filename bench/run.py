@@ -785,14 +785,20 @@ def _run_capability(
                 "reasoning": "",
                 "usage": {},
                 "tool_log": [],
-                # G3c round-3 P1 (S3.1 typed shape): steps / the timing
-                # token count are typed fields (integer / numeric) in the
-                # S3.1 result-file shape + the capability success path
-                # (mock: steps=3, timing.completion_tokens=120); a null
-                # would be out-of-contract. A crashed row reports "zero
-                # steps / zero completion tokens measured", not "unknown"
-                # (None) — 0 is the honest typed value for a driver that
-                # never reached a terminal record.
+                # G3c round-3 P1 + round-4 P2 (S3.1 typed shape, 0 confirmed
+                # valid): `steps` is a typed integer in the S3.1 result-file
+                # shape + the capability success path (mock: steps=3,
+                # timing.completion_tokens=120); a null would be
+                # out-of-contract. S3.1 §3.1 says "steps = total completions
+                # issued (1 for a text-only task)" — that phrasing describes
+                # a SUCCESS result file (at least 1 completion). For a
+                # CRASHED driver that raised CapabilityError while polling
+                # (no terminal record to copy from), ZERO completions
+                # issued is the honest value, not "unknown" (None). 0 is a
+                # valid integer in the typed contract — the scorer keys
+                # only on state=="done" (ok=False here), so the 0 steps is
+                # recorded data, not a state-machine input. A reader
+                # parsing steps as an int will not choke on 0.
                 "steps": 0,
                 # G3c round-1 P2 (degraded workdir): the real staged dir was
                 # already rmtree'd in the driver's finally, so pointing at
@@ -1095,6 +1101,23 @@ def _pool_release(
             }
         )
         return rec
+    except subprocess.TimeoutExpired:
+        # G3c round-4 P2: a hung unload that hits the 90 s subprocess cap
+        # is a named skip (the caller has no outer try/except — this would
+        # otherwise propagate and crash the boundary loop). 90 s is the
+        # HARD cap (a hung script must not stall the bench forever); the
+        # S2.8 30 s budget is the soft WARN recorded on the reload side
+        # below (data, not a gate) — a hung unload is recorded, not
+        # enforced.
+        rec.update(
+            {
+                "note": "skipped (unload timed out at 90 s)",
+                "unload_exit": None,
+                "unload_timeout": True,
+                "s": round(time.monotonic() - t0, 3),
+            }
+        )
+        return rec
     unload_exit = p.returncode
     if unload_exit == 84:
         rec.update(
@@ -1140,6 +1163,22 @@ def _pool_release(
                 }
             )
             return rec
+        except subprocess.TimeoutExpired:
+            # G3c round-4 P2: a hung reload that hits the 90 s subprocess
+            # cap is a named partial (the caller has no outer try/except).
+            # 90 s is the HARD cap; the S2.8 30 s reload budget is the
+            # soft WARN (data, not a gate) — a hung reload is recorded,
+            # not enforced.
+            rec.update(
+                {
+                    "note": "partial (reload timed out at 90 s)",
+                    "reload_exit": None,
+                    "reload_s": round(time.monotonic() - t0, 3),
+                    "reload_budget_s": 30.0,
+                    "budget_exceeded": True,
+                }
+            )
+            return rec
         reload_exit = p.returncode
         reload_s = round(time.monotonic() - t0, 3)
         # S2.8 30 s reload budget (post-amendment): the reload is
@@ -1169,6 +1208,16 @@ def _pool_release(
         rec["warmup_s"] = round(time.monotonic() - w0, 3)
         rec["warmup_ok"] = warmup_ok
     rec["note"] = rec.get("note", "done")
+    # G3c round-4 P2: name the record-shape asymmetry explicitly. A
+    # ``between`` record carries the reload_* keys (reload runs at a
+    # boundary); an ``after`` record is UNLOAD-ONLY (S4.2 "at the run's
+    # end: unload only" — there is no reload + warmup at the end of the
+    # run), so the reload_* keys are ABSENT BY DESIGN, not missing. The
+    # explicit ``reload: false`` marker lets a reader infer the JSON
+    # schema without guessing that "no reload_* keys" means "not loaded".
+    if kind == "after":
+        rec["reload"] = False
+        rec["reload_note"] = "absent by design (unload-only at run end)"
     return rec
 
 

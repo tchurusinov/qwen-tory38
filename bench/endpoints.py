@@ -102,6 +102,14 @@ def main_endpoint(harness: dict) -> dict:
     url = harness.get("main_endpoint", "http://localhost:30001")
     api_key = harness.get("main_api_key", "")
     if not isinstance(api_key, str):
+        # G3c round-4 P2: a non-string key (a number, a list, …) is a
+        # CONFIG ERROR, not a "keyless" signal. We coerce to "" (keyless)
+        # rather than raise — main-PROBE tolerates a keyless main (the
+        # health probe is 401-tolerant) and the completions endpoint may
+        # genuinely be keyless — but a MIS-TYPED key (e.g. a bare number
+        # instead of a string) is silently dropped here. Naming it in a
+        # comment (rather than raising) keeps the hermetic / no-key path
+        # working while flagging the case a reader should check.
         api_key = ""
     port = 30001
     # parse the port out of the url for the record (best-effort; the url is

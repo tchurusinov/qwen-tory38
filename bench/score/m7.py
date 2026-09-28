@@ -12,7 +12,12 @@ Input (the runner's saturation payload for one M7 task, the
     ~2.3 batch wall 370/161 s — the ceiling is a wall-clock saturation
     figure). ``aggregate_tps_wall`` is the headline; ``aggregate_tps``
     aliases it; ``aggregate_tps_serial`` is recorded for the
-    decode-throughput comparison.
+    decode-throughput comparison. The numerator of every t/s figure here
+    is ``total_completion_tokens`` (OUTPUT tokens only — NOT
+    prompt+completion): the spec's H9 worked example uses 370 (the
+    completion count) as the numerator for BOTH serial and wall, so the
+    two are like-for-like and this is a decode-throughput ceiling, not a
+    "total generated tokens incl. prefill" figure.
   * ``results`` — the per-task results (the 5xx/429 count the "zero 5xx"
     half checks: any task whose error is an engine/5xx-class failure
     counts; a ctx/parse task failure is NOT a 5xx — it is the request
