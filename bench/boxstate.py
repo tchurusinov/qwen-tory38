@@ -149,7 +149,17 @@ def snapshot() -> dict:
     The runner already snapshots PER ROW (one per M row) — the committed
     rows form the run's VRAM time series; the runner adds ONE extra
     post-scenarios snapshot (the run JSON's ``box_state_post_scenarios``)
-    so the end-of-scenarios state is explicit (H12)."""
+    so the end-of-scenarios state is explicit (H12).
+
+    G3c round-12 P2 (the failure contract, named): ``snapshot`` never
+    RAISES on a box-state failure — a hung/missing nvidia-smi or docker
+    is a NAMED STRING in the corresponding field (the
+    "nvidia-smi-unavailable: ..." / "docker-stats-unavailable: ..." /
+    "timeout after N s" markers from _run), not an exception, so a
+    degraded box (no GPU, no docker daemon) cannot crash the bench's
+    per-row snapshot path. The regression test
+    test_snapshot_never_raises_on_subprocess_timeout pins this by
+    forcing a subprocess.TimeoutExpired through the real code paths."""
     gpu = nvidia_smi()
     return {
         "nvidia_smi": gpu,
