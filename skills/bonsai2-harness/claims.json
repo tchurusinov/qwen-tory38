@@ -12,7 +12,7 @@
     {"task_shape": "Single-file code-gen chunk (new function / test file / boilerplate)", "allocation": "subagent", "bench": "M1", "note": "bounded, self-contained, verify-by-compile; live verdict fail 0/3 at the pin (reasoning-only content; content-forcing is recipe-level, the rubric seam is the bench's job)"},
     {"task_shape": "Per-file / per-section analysis (review notes, doc summaries, data transforms)", "allocation": "fan-out N", "bench": "M3", "note": "N = min(files, instances*slots); independent units, embarrassingly parallel; live verdict pass 0.88 (spot-check driven by main)"},
     {"task_shape": "Diff review of a PR-sized diff", "allocation": "subagent draft -> main verifies", "bench": "M4", "note": "mirrors the reviewer-proposes/builder-verifies split; live verdict pass 10/10 seeded bugs; the draft is a self-report"},
-    {"task_shape": "Long-context reading of repo docs / transcripts (>= ~30K tokens)", "allocation": "main", "bench": "M5", "note": "main's 262K ctx is free (already loaded); a subagent at the 8k default loses the tail; M5 proves the subagent works -> subagent viable for QA on long docs (--ctx 65536 is the pre-submission gate value per S3.4; the real cap is the per-slot 32,768 = ctx_size/parallel; ctx sizing documented in recipe R6)"},
+    {"task_shape": "Long-context reading of repo docs / transcripts (>= ~30K tokens)", "allocation": "main", "bench": "M5", "note": "main's 262K ctx is free (already loaded); a subagent at the 8k default loses the tail. CITATION HONESTY: the live M5 golden doc is ~475 tokens (ctx_cap recorded 8192), so [M5] validates the QA-on-doc SHAPE, not the 60K shape; the 60K allocation is supported by main's free-ctx reasoning, not by M5. Subagent viable for QA on long docs only when the doc fits one slot (--ctx is the pre-submission gate value per S3.4; the real cap is the per-slot 32,768 = ctx/parallel; a 60K doc does not fit one slot -> split R5-style or run on main; ctx sizing documented in recipe R6)"},
     {"task_shape": "Test execution / lint / build-check", "allocation": "subagent", "bench": "M2", "note": "mechanical, parallelizable, output is a report not a decision; live verdict pass 10/10 coverage"},
     {"task_shape": "Draft writing (docs, summaries, commit messages at scale)", "allocation": "subagent", "bench": "M3", "note": "quality bar is lower-verification; main edits the draft; live verdict pass 0.88"},
     {"task_shape": "Anything requiring live tool feedback loops (iterative debugging, interactive exploration)", "allocation": "main", "bench": null, "note": "main by construction: feedback latency; fire-and-collect gives no mid-task steering value"},
@@ -28,7 +28,7 @@
     {"id": "R4", "task_shape": "spec-chunk implementation", "bench": "M9", "template": "T1", "tools": "on"},
     {"id": "R5", "task_shape": "fan-out analysis", "bench": "M3", "template": "inline (R5 section)", "tools": "off"},
     {"id": "R6", "task_shape": "long-context QA", "bench": "M5", "template": "inline (R6 section)", "tools": "off"},
-    {"id": "R7", "task_shape": "saturation / high-concurrency fan-out", "bench": "M7", "template": "per-unit (R5-style or R2-style)", "tools": "off"}
+    {"id": "R7", "task_shape": "saturation / high-concurrency fan-out", "bench": "M7", "template": "per-unit (R5-style or R2-style)", "tools": "off (R5-style text-only) or on (R2-style tool loop) — follows the per-unit template; the [M7] citation is for the load/concurrency shape, not the template shape"}
   ],
   "prompt_templates": [
     {"id": "T1", "s4_2_row": "spec-chunk implementation", "bench": "M9", "tools": "on"},
@@ -42,9 +42,9 @@
       "subagent_decode_tps_16_wide_contention_per_task": {"value": [3.7, 19.3], "source": "M7 (16 tasks, 2 instances)"},
       "aggregate_tps_16_wide_2_instances": {"wall": 2.08, "serial": 0.215, "source": "M7"},
       "tool_loop_wall_profile": {
-        "M9": {"completion_tokens": 111, "wall_s": 413, "effective_tps": 0.27, "steps": 5},
-        "M10": {"completion_tokens": 250, "wall_s": 108, "effective_tps": 2.33, "steps": 10},
-        "note": "tool execution dominates wall time, not decode; dispatch_cost for --tools on = steps_est * tool_mean_duration_s + prefill_of_tool_results"
+        "M9": {"completion_tokens": 111, "wall_s": 413, "effective_tps": 0.27, "tool_steps": 5, "wall_s_per_tool_step": 82.6},
+        "M10": {"completion_tokens": 250, "wall_s": 108, "effective_tps": 2.33, "tool_steps": 10, "wall_s_per_tool_step": 10.8},
+        "note": "tool execution dominates wall time, not decode; dispatch_cost for --tools on = steps_est * tool_mean_duration_s + prefill_of_tool_results. wall_s_per_tool_step is the measured WHOLE per-step term (tool execution + step-boundary completion + re-prefill of the growing history), not tool_mean_duration_s alone (which is capped at the 60 s tool timeout). 'tool_steps' = the loop's tool-call executions; it is NOT the S3.4 result field 'steps' (total completions issued) — in these runs tool_steps ~ completions."
       },
       "main_tps_idle": {"value": 8.52, "source": "M6 control"},
       "main_tps_while_subagents_loaded": {"value": "halved (planning number; user observation 30 -> 15)", "source": "live run; M8 0.00 is a timing artifact"}

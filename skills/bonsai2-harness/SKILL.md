@@ -45,7 +45,7 @@ The only box-specific section. A different box updates this section only.
   decode 44.7–61.9 t/s (MAP 1.8 @gpu live runs 2026-09-22; the S1.8 #3
   load-band floor is 26.2 = 0.9 × 29.16 community baseline), 16-wide
   contention 3.7–19.3 per-task, tool-loop
-  M9 413 s / 5 steps, M10 108 s / 10 steps, main idle 8.52 t/s,
+  M9 413 s / 5 tool steps, M10 108 s / 10 tool steps, main idle 8.52 t/s,
   main-under-load planning number = halved (user observation 30 → 15;
   the M8 bench 0.00 is a timing artifact).
 - **Layout:** pre-install = this repo (`bin/` commands + `etc/*.yaml`
@@ -144,9 +144,11 @@ Schemas and mechanics (S3.1/S3.3/S3.4, abridged — the lock is in the spec):
 | 84 | manager itself down |
 
 Exit 8 vs 22 (both deadline-related, different owners): **8** is the
-*manager-side wait budget* — the queue wait at `spawn` or the
-`steer --wait` window; the task is still running or still queued. **22**
-is the *task's own* `--deadline` expiring mid-run, so the manager aborts
+*manager-side wait budget*, with exactly two owners: (a) `spawn` — the
+task is still in the queue when `queue_wait_max_s` expires; (b)
+`steer --wait` — no state change within the SECS window (the task is
+still running). `collect` never returns 8. **22** is the *task's own*
+`--deadline` (or step budget) expiring mid-run, so the manager aborts
 it. A task that never started (queue) → 8; a task that started but ran
 past its deadline → 22.
 
@@ -173,7 +175,7 @@ bench row; the verdict is data, not a verdict on the allocation.
 | Single-file code-gen chunk (new function / test file / boilerplate) | **subagent** | [M1] | fail 0/3 at the pin: reasoning-only output (the H4 content-forcing prompt landed; the rubric seam is open). The shape itself is verify-by-compile; recipe R1 forces content-only |
 | Per-file / per-section analysis (review notes, doc summaries, data transforms) | **fan-out N** (N = min(files, instances×slots)) | [M3] | pass 0.88 (auto 5/6 + spot-check 1.00). Independent units work; the spot-check is main's job (recipe R5 drives it) |
 | Diff review of a PR-sized diff | **subagent draft → main verifies** | [M4] | pass 10/10 seeded bugs. The subagent finds bugs reliably; the draft is still a self-report — main verifies the claim |
-| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | [M5] | pass 5/5 at 64k ctx. M5 proves the subagent works; the row stays main because main's 262K ctx is free (already loaded) and a subagent at the 8k default loses the tail. Subagent is viable for QA on long docs (`--ctx 65536` is the pre-submission gate value, S3.4 — the real cap is the per-slot 32,768; ctx sizing per recipe R6) |
+| Long-context reading of repo docs / transcripts (≥ ~30K tokens) | **main** | [M5] | pass 5/5 QA (the live M5 golden doc is ~475 tokens, `ctx_cap` recorded 8192 — the bench validates the QA-on-doc shape, NOT the 60K shape). The row stays **main** because main's 262K ctx is free (already loaded) and a subagent at the 8k default loses the tail — that reasoning, not M5, supports the 60K allocation. Subagent is viable for QA on long docs only when the doc fits one slot (`--ctx` is the pre-submission gate value, S3.4; the real cap is the per-slot 32,768 = ctx/parallel; a 60K doc does NOT fit one slot → split R5-style or run on main; ctx sizing per recipe R6) |
 | Test execution / lint / build-check | **subagent** | [M2] | pass 10/10 coverage. Mechanical, parallelizable, output is a report not a decision |
 | Draft writing (docs, summaries, commit messages at scale) | **subagent** | [M3] | pass 0.88. Quality bar is lower-verification; main edits the draft |
 | Anything requiring live tool feedback loops (iterative debugging, interactive exploration) | **main** | — (main by construction) | feedback latency; fire-and-collect gives no mid-task steering value here |
@@ -324,12 +326,20 @@ dispatch_cost = prefill_tokens / t/s_prefill
 dispatch_cost += steps_est * tool_mean_duration_s + prefill_of_tool_results
 ```
 
-Calibrated `tool_mean_duration_s` from the run: M9-class spec-chunk
-(bash unittest + file writes) ≈ 413 s / 5 steps; M10-class test batch
-(bash unittest × 10) ≈ 108 s / 10 steps. Estimate `steps_est` from the
-task (the recipe's definition of done names the expected tool calls);
-the per-step ceiling is the 60 s tool timeout, and each step's
-completion + re-prefill of the growing history adds on top.
+Calibrated per-step wall cost from the run — the WHOLE per-step term
+(`tool_mean_duration_s + prefill_of_tool_results`, S4.4), measured as
+wall time per tool step: M9-class spec-chunk (bash unittest + file
+writes) ≈ 413 s / 5 tool steps ≈ 82.6 s per step; M10-class test batch
+(bash unittest × 10) ≈ 108 s / 10 tool steps ≈ 10.8 s per step.
+("tool steps" = the loop's tool-call executions; that is NOT the S3.4
+result field `steps` (total completions issued) — in these runs
+tool steps ≈ completions, since each completion carries one tool call
+except the final answer.) `tool_mean_duration_s` alone is capped at
+the 60 s tool timeout; what dominates the per-step wall is the
+tool execution + the step-boundary completion + the re-prefill of the
+growing history (M9: 413 s for only 111 completion tokens = 0.27
+effective t/s). Estimate `steps_est` from the task (the recipe's
+definition of done names the expected tool calls).
 
 **Win rule:** dispatch iff `dispatch_cost < est_main_time_s(task)`
 (est_main_time_s = the time the same task would take on main, including
@@ -658,9 +668,12 @@ Final answer contract:
 3 claims, one per line. No preamble. No summary. Just the 3 claims.
 ```
 
-- **Verification:** main spot-checks 1/3 of the sections (reads the
-  section itself, checks the 3 claims are accurate) — the M3 seam;
-  claim accuracy threshold ≥ 2/3 per the rubric.
+- **Verification:** main spot-checks 1 in every 3 sections (reads the
+  section itself, checks the claims are accurate) — the M3 seam (SPEC
+  S5.2: "main verifies 1/3 by spot-check"). The per-section
+  claim-accuracy gate is ≥ 2/3 — i.e. ≥ 2 of that section's 3 named
+  claims must be accurate (the rubric threshold is per section, not
+  per batch).
 - **Failure modes:** summary too long (>300 tokens) or more than 3
   claims — the template caps both; a unit that ignores the cap gets one
   tightened re-spawn, then main absorbs it.
@@ -685,9 +698,14 @@ Final answer contract:
   box — split it (one section per unit, R5-style) or run it on main.
   Use `--ctx 65536` only as the gate value that lets a ≤32,768-token
   request through; it is not the window size.
-- **Bench:** [M5] — pass 5/5 QA at 64k ctx (the 2026-09-28 matcher fix
-  made the rubric tolerant of conjunctions; the pre-fix row had lost 1/5
-  to "M1, M2, M7" vs "M1, M2, and M7").
+- **Bench:** [M5] — pass 5/5 QA. **Citation honesty:** the live M5
+  golden doc is ~475 tokens (`ctx_cap` recorded 8192 in the row), so
+  [M5] validates the *QA-on-a-document shape*, not the 60K case. The
+  60K allocation to main is supported by main's free-ctx reasoning
+  (main's 262K ctx is already loaded; a subagent at the 8k default
+  loses the tail), not by M5. The 2026-09-28 matcher fix made the M5
+  rubric tolerant of conjunctions (the pre-fix row had lost 1/5 to
+  "M1, M2, M7" vs "M1, M2, and M7").
 - **Prompt template (if delegating to the subagent):**
 
 ```

@@ -719,7 +719,12 @@ Phase 5 implementation must treat as binding):
       scaling — source list: report §9). Each recipe = task shape +
       bench citation + filled prompt template + verification
       protocol + failure modes + workflow branch; a recipe without a
-      bench citation is a review defect (S4.1). (implemented 2026-09-28
+      bench citation is a review defect (S4.1). Note: R7's [M7] citation
+      is for the *load/concurrency* shape (saturation), not the per-unit
+      *template* shape — R7 runs R5-style (text-only, M3-class) or
+      R2-style (tool loop, M10-class) units; the 5.6 audit must not
+      require M7 to validate the R2-style sub-case. (implemented
+      2026-09-28
       on `phase5-harness-skill-design`, PR pending; recipe citations
       in `skills/bonsai2-harness/claims.json`)
 - [ ] 5.6 Doctrine audit script: `bench.yaml` scenario rows ↔ S4.2

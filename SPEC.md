@@ -1315,8 +1315,10 @@ quality becomes apparent from task success")
 > a-priori 29/4800; real: subagent decode 44.7–61.9 t/s single-task no
 > contention (MAP 1.8 @gpu live runs 2026-09-22), 3.7–19.3 t/s per-task
 > under 16-wide contention, tool-loop
-> wall dominated by tool execution (M9 413 s / 5 steps = 0.27 effective
-> t/s; M10 108 s / 10 steps = 2.33), main idle 8.52 t/s ([M6]); M8's 0.00
+> wall dominated by tool execution (M9 413 s / 5 tool steps = 0.27 effective
+> t/s; M10 108 s / 10 tool steps = 2.33 — "tool steps" = the loop's
+> tool-call executions, which in these runs equal the S3.4 `steps`
+> total-completions count, not the scenario's file/function counts), main idle 8.52 t/s ([M6]); M8's 0.00
 > is a timing artifact — the planning number is the user's observed
 > 30 → 15 halving. The win/lose call therefore uses the
 > contention-adjusted t/s, and `t/s_prefill` stays a-priori (20 %
