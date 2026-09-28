@@ -103,10 +103,32 @@ def docker_stats() -> str:
 
 
 def meminfo() -> str:
-    """The MemTotal + MemAvailable pair of /proc/meminfo, one string."""
-    total = _meminfo_field("MemTotal")
-    avail = _meminfo_field("MemAvailable")
-    return f"MemTotal={total} MemAvailable={avail}"
+    """The /proc/meminfo memory fields, one string. H12 (post-live-run):
+    beyond ``MemTotal``/``MemAvailable`` the snapshot carries the
+    RECLAIMABLE pool (``MemFree``, ``Cached``, ``Shmem``,
+    ``SReclaimable``) — the live run's VRAM climb (100 -> 116 GiB) with
+    cache at ~99% could not be distinguished as resident vs reclaimable
+    from a 2-field snapshot; the committed per-row snapshots form the
+    run's VRAM time series, so a reader can tell page-cache /
+    shared-memory (reclaimable) from resident growth."""
+    fields = (
+        "MemTotal",
+        "MemAvailable",
+        "MemFree",
+        "Cached",
+        "Shmem",
+        "SReclaimable",
+    )
+    parts = []
+    for name in fields:
+        val = _meminfo_field(name)
+        # G3c round-4 P2: 'n/a' is a deliberate STRING sentinel (the S5.2
+        # "stored as strings" rule). A missing /proc/meminfo field (e.g. a
+        # minimal container) records n/a, not a numeric 0 — the snapshot is
+        # diagnostic data, not a machine-parsed metric; a reader parsing
+        # the value should handle the n/a string (it's a string by contract).
+        parts.append(f"{name}={val if val is not None else 'n/a'}")
+    return " ".join(parts)
 
 
 def snapshot() -> dict:
@@ -117,12 +139,27 @@ def snapshot() -> dict:
       {
         "nvidia_smi": str,     # driver_version + memory.used
         "docker_stats": str,   # name + MemUsage per container
-        "meminfo": str,        # MemTotal + MemAvailable
+        "meminfo": str,        # MemTotal + MemAvailable + the reclaimable
+                               # pool (MemFree/Cached/Shmem/SReclaimable,
+                               # H12 post-live-run)
         "driver": str,        # extracted from the nvidia-smi line
         "date": str,          # UTC date string
         "epoch": int,         # the capture time (unix seconds)
       }
-    """
+    The runner already snapshots PER ROW (one per M row) — the committed
+    rows form the run's VRAM time series; the runner adds ONE extra
+    post-scenarios snapshot (the run JSON's ``box_state_post_scenarios``)
+    so the end-of-scenarios state is explicit (H12).
+
+    G3c round-12 P2 (the failure contract, named): ``snapshot`` never
+    RAISES on a box-state failure — a hung/missing nvidia-smi or docker
+    is a NAMED STRING in the corresponding field (the
+    "nvidia-smi-unavailable: ..." / "docker-stats-unavailable: ..." /
+    "timeout after N s" markers from _run), not an exception, so a
+    degraded box (no GPU, no docker daemon) cannot crash the bench's
+    per-row snapshot path. The regression test
+    test_snapshot_never_raises_on_subprocess_timeout pins this by
+    forcing a subprocess.TimeoutExpired through the real code paths."""
     gpu = nvidia_smi()
     return {
         "nvidia_smi": gpu,

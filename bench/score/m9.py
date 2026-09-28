@@ -109,13 +109,18 @@ def _main_rerun_suite(root, python_bin: str | None) -> tuple[bool, str, int]:
 
 
 def _tool_log_shows_test_run(tool_log: list | None) -> tuple[bool, str]:
-    """The S5.2 "tool_log shows the test run with exit 0" half: there is a
-    ``bash``/``python`` tool_log entry that ran the 3-case suite (its command
-    / code mentions the suite runner) and whose exit_code is 0. A tool_log
-    with no such entry (or whose suite run is non-zero) is a fail of this
-    sub-condition."""
+    """The S5.2 "tool_log shows the test run with exit 0" half: there EXISTS
+    a ``bash``/``python`` tool_log entry that ran the 3-case suite (its
+    command / code mentions the suite runner) and whose exit_code is 0.
+    A failed-then-successful run PASSES this sub-condition (the 2026-09-27
+    post-live-run amendment, H7: the pre-fix loop returned False on the
+    FIRST suite-mentioning entry with a non-zero exit_code instead of
+    continuing — a failed-then-successful suite was mis-scored "no
+    successful run"). A tool_log with no exit-0 suite run at all is the
+    fail of this sub-condition."""
     if not isinstance(tool_log, list):
         return False, "M9: tool_log is not a list"
+    n_suite_runs = 0
     for entry in tool_log:
         if not isinstance(entry, dict):
             continue
@@ -131,11 +136,13 @@ def _tool_log_shows_test_run(tool_log: list | None) -> tuple[bool, str]:
         text += " " + str(entry.get("output") or "")
         if "unittest" not in text and "test_textkit" not in text:
             continue
+        n_suite_runs += 1
         code = entry.get("exit_code")
         if code == 0:
             return True, "M9: tool_log shows the suite run with exit 0"
-        return False, f"M9: tool_log suite run exited {code} (non-zero)"
-    return False, "M9: tool_log has no successful suite run"
+    if n_suite_runs == 0:
+        return False, "M9: tool_log has no successful suite run"
+    return False, f"M9: tool_log suite runs all non-zero ({n_suite_runs} run(s))"
 
 
 def _functions_in_workdir(
@@ -185,9 +192,30 @@ def score(payload: dict, root=None, python_bin: str | None = None) -> dict:
     # 2) the tool_log shows the subagent's test run with exit 0.
     log_ok, log_detail = _tool_log_shows_test_run(tool_log)
     # 3) the spec's 3 functions exist in the workdir (the file check).
-    funcs_ok, funcs_detail, n_present = _functions_in_workdir(
-        workdir, module_name, funcs
-    )
+    #    G3c round-8 P1: when the task did not reach a terminal "done"
+    #    state (the runner's runner-level "crashed" marker — the driver
+    #    raised CapabilityError while polling, so the staged workdir was
+    #    already rmtree'd in the driver's finally), the file check is
+    #    SKIPPED, not scored against a cleaned path: the subagent's
+    #    functions never existed anywhere the scorer could verify them,
+    #    and "module not found" would be a misleading partial score (the
+    #    honest-fail is the row verdict + the driver error, not a
+    #    0/3-functions sub-fail). The sub-condition records
+    #    skipped: true + a named reason so the score (still the fraction
+    #    met — 1/3 here) is not read as "file check ran and failed".
+    state = payload.get("state")
+    if state is not None and state != "done":
+        funcs_ok = False
+        funcs_detail = (
+            f"M9: workdir functions check SKIPPED (task state {state!r}: "
+            "the staged workdir was cleaned before scoring; the driver "
+            "error is the honest-fail, not a 0/3 sub-fail)"
+        )
+        n_present = 0
+    else:
+        funcs_ok, funcs_detail, n_present = _functions_in_workdir(
+            workdir, module_name, funcs
+        )
 
     met = sum((rerun_ok, log_ok, funcs_ok))
     n = 3
@@ -205,6 +233,7 @@ def score(payload: dict, root=None, python_bin: str | None = None) -> dict:
                 "detail": funcs_detail,
                 "n_present": n_present,
                 "n_expected": len(funcs),
+                "skipped": state is not None and state != "done",
             },
         },
     )

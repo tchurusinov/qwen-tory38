@@ -36,8 +36,11 @@ bench runner's 0/2 closed set — the runner is the bench; the re-bench gate
 is a gate that can BLOCK a PR, so a distinct "blocked/due" exit is the
 signal the pin-bump PR flow asserts on):
 
-  * ``gate``    — 0 = no regression (the PR is unblocked), 2 = bad config /
-                  input, 3 = regression found (the PR is BLOCKED).
+  * ``gate``    — 0 = no regression (the PR is unblocked) OR not-comparable
+                  (the named H9 status: the M7 t/s comparison is recorded
+                  "not comparable", NOT silently skipped — a rubric
+                  regression still blocks), 2 = bad config / input,
+                  3 = regression found (the PR is BLOCKED).
   * ``due``     — 0 = full bench not due, 2 = bad config, 3 = full bench DUE.
   * ``save-baseline`` — 0 = baseline written, 2 = bad config / input.
 
@@ -133,6 +136,32 @@ def row_tps(row: dict) -> float | None:
     return None
 
 
+def row_comparability(row: dict) -> dict | None:
+    """The M7 row's COMPARABILITY triple (the 2026-09-27 post-live-run
+    amendment, H9 / decision §0.2): ``{n_tasks, concurrency, N}`` —
+    the load the bench applied. The S5.5 baseline row carries the same
+    triple; the gate compares LIKE-WITH-LIKE (a mismatch -> "not
+    comparable", named, not a silent compare: the engine's ``--parallel
+    8`` cap is constant, but the load varies per M — M2 = 8-wide,
+    M7 = 16, M8 = 8 — so comparability is a RECORDED property). Pre-
+    amendment rows carry no triple -> None (the gate compares on t/s
+    alone, the legacy behavior). G3c round-15 P2: the per-key ``c.get``
+    calls are a deliberate 3-KEY PROJECTION, not a redundant re-fetch —
+    it guarantees the returned triple is EXACTLY the S5.5 comparability
+    shape (n_tasks/concurrency/N) even if a row's ``comparability``
+    dict carries extra fields or omits one (an omitted key -> None, the
+    legacy "no triple" sentinel for that axis), so a caller never sees
+    the raw row dict and can rely on the fixed keys."""
+    c = row.get("comparability")
+    if isinstance(c, dict):
+        return {
+            "n_tasks": c.get("n_tasks"),
+            "concurrency": c.get("concurrency"),
+            "N": c.get("N"),
+        }
+    return None
+
+
 def rows_summary(rows: list[dict]) -> dict:
     """The gate's per-scenario summary from a run's rows (a list of S5.2
     run-row dicts): ``{sid: {"verdict": str, "tps": float|None, "score":
@@ -148,6 +177,7 @@ def rows_summary(rows: list[dict]) -> dict:
             "verdict": row_verdict(row),
             "score": float(verdict.get("score") or 0.0),
             "tps": row_tps(row),
+            "comparability": row_comparability(row),
         }
     return out
 
@@ -223,7 +253,13 @@ def quick_gate(
       1. **t/s regression** — the M7 ``aggregate_tps`` (the quick bench's
          throughput scenario). A drop ``> regression_tps_pct`` over the
          baseline M7 t/s is a regression. No baseline M7 t/s (the first
-         run) -> no t/s gate (nothing to drop from).
+         run) -> no t/s gate (nothing to drop from). H9 (post-live-run,
+         decision §0.2): when BOTH sides carry a COMPARABILITY triple
+         (the {n_tasks, concurrency, N} load), a mismatched triple makes
+         the t/s comparison "not comparable" — it is RECORDED as such
+         (``tps["comparable"] = False`` + a reason), NOT silently compared
+         and NOT silently skipped (the rubric half still runs, and a
+         rubric regression still blocks).
       2. **auto-rubric regression** — a quick auto-rubric scenario (M1,
          M2, M7) that PASSED in the baseline now FAILS in the current run
          (a rubric flip; the S5.5 "any auto-rubric regression"). A scenario
@@ -240,8 +276,49 @@ def quick_gate(
     cur_tps = current.get(_M7, {}).get("tps")
     tps_regression = False
     tps_info: dict = {"baseline_tps": base_tps, "current_tps": cur_tps}
+    base_c = base_scen.get(_M7, {}).get("comparability")
+    cur_c = current.get(_M7, {}).get("comparability")
+    comparable = True
+    # G3c round-6 P2: the triple is a dict comparison (base_c != cur_c).
+    # A MISSING key in one triple makes the dicts unequal -> "not
+    # comparable", which is the correct (conservative) reading: a partial
+    # row (one of {n_tasks, concurrency, N} absent) is NOT known to be the
+    # same load, so the t/s half is recorded, not silently compared. A
+    # reader wanting to know WHY can look at the recorded
+    # baseline_comparability / current_comparability above.
+    #
+    # G3c round-8 P2 (asymmetric case, named): when ONLY ONE side carries
+    # a triple (base_c is None but cur_c is not, or vice versa — e.g. a
+    # legacy baseline with no M7 row, or a pre-amendment baseline vs a
+    # post-amendment run), `comparable` stays True and the t/s half is
+    # compared on t/s ALONE (the legacy pre-triple behavior). This is the
+    # intended "pre-amendment" reading, NOT a silent skip: the triple is
+    # only a comparability GATE when BOTH sides have it; one side missing
+    # it means the baseline predates the triple, so we fall back to the
+    # t/s-only comparison that always worked. The gate-level
+    # `status: "not_comparable"` marker is set ONLY in the BOTH-sides-
+    # differ case above (the `comparable = False` branch); the asymmetric
+    # case is the legacy "compare on t/s" path and is not not-comparable.
+    if base_c is not None and cur_c is not None and base_c != cur_c:
+        comparable = False
+        tps_info["comparable"] = False
+        # G3c round-3 P2: name that the t/s half was SKIPPED, not
+        # "checked and passed". A reader seeing regression: false with
+        # comparable: false could misread it as "t/s checked, no
+        # regression"; the explicit skipped marker removes that ambiguity
+        # (regression is only meaningful when comparable — it is left
+        # absent here so its .get(..., False) default is the read).
+        tps_info["skipped"] = True
+        tps_info["baseline_comparability"] = base_c
+        tps_info["current_comparability"] = cur_c
+        reasons.append(
+            "M7 t/s not comparable (load triple differs: "
+            f"baseline {base_c} vs current {cur_c}) — t/s half SKIPPED, "
+            "recorded, not silently compared"
+        )
     if (
-        isinstance(base_tps, (int, float))
+        comparable
+        and isinstance(base_tps, (int, float))
         and base_tps > 0
         and isinstance(cur_tps, (int, float))
     ):
@@ -269,8 +346,37 @@ def quick_gate(
             reasons.append(f"{sid} auto-rubric regressed: pass -> {cur_v}")
 
     blocked = tps_regression or bool(rubric_regressions)
+    # G3c round-5 P1: name the "unblocked-but-tps-skipped" case distinctly
+    # at the GATE-OUTPUT level (not just inside tps_info). The S5.5 gate
+    # is "blocked = t/s regression OR rubric regression" — when the t/s
+    # half is not comparable (the load triple differs) and no rubric
+    # regressed, the gate unblocks on the rubric half alone with the t/s
+    # half SKIPPED. A reader seeing only `blocked: false` could not tell
+    # "t/s checked and passed" from "t/s skipped, rubric passed". The
+    # explicit gate-level `status: "not_comparable"` (alongside
+    # `blocked: false`) names it. The S5.5 spec requires RECORDING the
+    # not-comparable case, not unblocking on it; the current behavior
+    # (unblock on the rubric half, record the skip) is the spec's weaker
+    # reading, and the status marker makes that weaker reading VISIBLE
+    # rather than silent.
+    # G3c round-7 P2 (make the `blocked`-vs-`status` split airtight): this
+    # holds in BOTH directions of the t/s baseline — (a) base_tps present
+    # but the triple differs -> t/s skipped, and (b) base_tps ABSENT
+    # (a first-run / no-aggregate baseline) AND the triple differs -> the
+    # t/s half is skipped for the same not-comparable reason even though
+    # there was nothing to drop from. In both, `blocked` reflects ONLY the
+    # rubric half; it is the gate DECISION (rubric regression OR a
+    # comparable t/s regression), NOT an "every half was checked" flag.
+    # A reader who keys on `blocked` alone for "did we verify t/s?" must
+    # also read `status` (== "not_comparable" -> the t/s half did not
+    # run) and `tps.skipped` / `tps.comparable`. The S5.5 contract is
+    # satisfied by the recorded `status` + `skipped` fields, and this
+    # comment is the authoritative note that `blocked` is not the whole
+    # story in that case.
+    gate_status = "not_comparable" if not comparable else "comparable"
     return {
         "blocked": blocked,
+        "status": gate_status,
         "tps": tps_info,
         "rubrics": rubric_info,
         "regression_tps_pct": regression_tps_pct,
@@ -391,26 +497,135 @@ class RebenchError(Exception):
 # --------------------------------------------------------------------------
 # the CLI (the S5.5 gate: a named tool distinct from the S5.4 bench runner)
 # --------------------------------------------------------------------------
-def _config_value(cfg_path: str | None, key: str, default):
-    """Read one S5.7 bench.yaml key (``regression_tps_pct`` /
-    ``rebench_baseline``) with a default. A bad/absent file uses the
-    default (the gate still runs — the config is not the source of the
-    regression data)."""
+def _load_bench_yaml(cfg_path: str | None) -> tuple[bool, dict | None, str | None]:
+    """Single load-parse-validate pass for the CLI's bench.yaml config.
+
+    Returns ``(present, data, error)``:
+      - ``present=False``: no config (falsy path OR file not there) — the
+        caller uses its defaults; no error.
+      - ``present=True, data=None, error=<msg>``: a present file that
+        FAILED to parse into a dict (the H10 "bad input" cases:
+        unparseable, non-mapping top level, or an empty/whitespace file
+        which parses to None — G3c round-13 P1#1 extended the strict
+        path to name this). The caller raises ``RebenchError`` (exit 2
+        "bad input").
+      - ``present=True, data=<dict>, error=None``: a present mapping; the
+        caller pulls its keys out of it.
+
+    The G3c round-13 P2 (double-parse) fix: this is the single pass the
+    CLI uses for BOTH S5.7 keys it reads (``rebench_baseline`` /
+    ``regression_tps_pct``), so the file is parsed ONCE, not once per
+    key. ``_config_value`` (the documented H10 interface) delegates its
+    load-parse-validate to this helper, so the CLI path and the per-key
+    helper share one source of parse truth and cannot diverge on what
+    counts as a bad input.
+
+    G3c round-9 P2 (empty-string convention, named) still applies: a
+    FALSY ``cfg_path`` — None (the argparse default) OR "" (an
+    explicitly-passed ``--config ""``) — is treated as "no config
+    given" (present=False), consistent with the documented "empty =
+    absent" escape hatch.
+    """
     if not cfg_path:
-        return default
+        return False, None, None
     p = Path(cfg_path)
     if not p.is_file():
-        return default
+        return False, None, None
     try:
         import yaml
     except ImportError:
-        return default
+        # No PyYAML in the environment (hermetic / minimal box): the
+        # config file is NOT readable, so behave exactly as the legacy
+        # lenient behavior did — "no usable config data" -> the caller
+        # takes its defaults. Reported as present=False (not a parse
+        # error) so the strict path does not invent a bad-input error
+        # out of an environment condition (missing module) rather than
+        # a data condition (malformed file).
+        return False, None, None
     try:
-        data = yaml.safe_load(p.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+        data = yaml.safe_load(p.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        return True, None, f"--config {cfg_path} unparseable: {exc!r}"
+    if data is None:
+        # G3c round-13 P1#1: an empty / whitespace file parses to None.
+        # Previously hidden by ``or {}`` (so it was a silent default);
+        # now normalized to the empty mapping so the caller's key
+        # lookup runs — in the strict path that becomes the named
+        # "has no '<key>' key" bad input, the SAME message as a mapping
+        # that lacks the key (the two are indistinguishable from the
+        # caller's point of view: a present file that yields no value).
+        return True, {}, None
+    if not isinstance(data, dict):
+        # G3c round-13 P1#1: an empty/whitespace file parses to None —
+        # previously hidden by ``or {}`` (so it was a silent default),
+        # now named as the same bad input as any other non-mapping.
+        return (
+            True,
+            None,
+            (f"--config {cfg_path} top level is not a mapping: {type(data).__name__}"),
+        )
+    return True, data, None
+
+
+def _config_value(
+    cfg_path: str | None, key: str, default, strict_malformed: bool = False
+):
+    """Read one S5.7 bench.yaml key (``regression_tps_pct`` /
+    ``rebench_baseline``). File ABSENT -> the default (the gate still
+    runs — the config is not the source of the regression data).
+
+    H10 (post-live-run): a file PRESENT but unparseable (or whose top
+    level is not a mapping) is NOT a silent default — it is a named bad
+    input. ``strict_malformed=True`` (the documented CLI ``--config``
+    path) makes that a ``RebenchError`` (the caller maps it to exit 2
+    "bad input"); without strictness the legacy lenient behavior is
+    kept for internal callers.
+
+    G3c round-9 P2 (empty-string convention, named): a FALSY ``cfg_path``
+    — None (the argparse default) OR "" (an explicitly-passed
+    ``--config ""``) — is treated as "no config given", NOT as a bad
+    input: the ``if not cfg_path: return default`` short-circuit above is
+    the documented "empty = absent" convention, so ``--config ""`` is a
+    no-config escape hatch, consistent with the H10 "absent = default"
+    half of the contract (the bad-input half applies to a NON-EMPTY path
+    naming a present-but-malformed file). A caller wanting "" to be an
+    error must check it at the CLI layer; the config layer treats it as
+    absent by design (an empty path names nothing to parse).
+
+    G3c round-13 P1, re-amended at round-14 P1 (runner alignment, H10
+    letter): the strict path fires on a PRESENT file that is MALFORMED —
+    unparseable, or a non-mapping top level that is NOT empty. A present
+    file that PARSES to a mapping but LACKS the key (including an
+    empty/whitespace file, which the runner normalizes to {} at
+    bench/config.py:253-254) is INCOMPLETE, not malformed: the runner
+    fills that key from BENCH_CONFIG_DEFAULTS (bench/config.py:266-269),
+    so the gate does the same and returns the default here (named in the
+    CLI's config_note by main; this accessor returns the bare default).
+    The round-13 "hard-fail a present-but-incomplete file" over-tightened
+    the contract relative to the runner; round-14 restores runner parity
+    while keeping the malformed half (H10) intact. The lenient (internal
+    caller) path is UNCHANGED: it returns the default for every
+    present-but-valueless file, strict or not.
+
+    G3c round-13 P2 (single source of parse truth): this now delegates
+    the load-parse-validate to ``_load_bench_yaml`` (the same single
+    pass ``main`` uses for BOTH S5.7 keys), so the CLI path and this
+    helper can never diverge on what counts as a bad input.
+    """
+    present, data, err = _load_bench_yaml(cfg_path)
+    if err:
+        if strict_malformed:
+            raise RebenchError(err)
         return default
-    if isinstance(data, dict) and key in data:
+    if not present:
+        return default
+    data = data or {}
+    if key in data:
         return data[key]
+    # G3c round-14 P1: a present mapping that lacks the key is INCOMPLETE
+    # (the runner fills it from the S5.7 default), not MALFORMED — so it
+    # is the default here, whether strict or lenient. Only a genuinely
+    # malformed file (the err case above) is the strict bad input.
     return default
 
 
@@ -458,10 +673,60 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    baseline_path = args.baseline or _config_value(
-        args.config, "rebench_baseline", DEFAULT_BASELINE
-    )
-    regression_tps_pct = _config_value(args.config, "regression_tps_pct", 10.0)
+    # H10 (post-live-run): a PRESENT-but-malformed --config is a named
+    # bad-input error (exit 2), not a silent default fallback; an ABSENT
+    # config keeps the legacy default (the gate still runs).
+    #
+    # G3c round-13 P2 (single pass): the file is parsed ONCE via
+    # _load_bench_yaml and both S5.7 keys are read from that single
+    # result — no double I/O / double parse / divergent error surface for
+    # the two keys.
+    #
+    # G3c round-14 P1 (runner alignment, H10 letter): a present bench.yaml
+    # that PARSES to a mapping (including an empty/whitespace file, which
+    # the runner normalizes to {} at bench/config.py:253-254) but LACKS
+    # one of the two S5.7 keys is NOT a bad input — the runner fills that
+    # key from BENCH_CONFIG_DEFAULTS (bench/config.py:266-269), so the
+    # gate must do the same (same file, same semantics; H10 only required
+    # "present-but-malformed -> exit 2"). The gate now fills a missing
+    # key from the SAME S5.7 defaults the runner uses, and records the
+    # fill (config_note) in the gate output so a reader can see the value
+    # came from the default, not the file — the round-13 concern ("silent
+    # default, indistinguishable from absent") is answered by the named
+    # fill, not by hard-failing a file the runner accepts. Only a
+    # genuinely malformed file (unparseable, or a non-mapping top level
+    # that is NOT empty) is the exit-2 bad input.
+    try:
+        present, data, err = _load_bench_yaml(args.config)
+        if err:
+            raise RebenchError(err)
+        data = data or {}
+        config_note = None
+        if not present:
+            # no --config (or it names a missing file): H10 default, gate
+            # still runs.
+            baseline_path = args.baseline or DEFAULT_BASELINE
+            regression_tps_pct = 10.0
+        else:
+            # a present mapping: take each S5.7 key from the file, fill a
+            # missing one from the S5.7 default (the runner's behavior,
+            # bench/config.py BENCH_CONFIG_DEFAULTS), and name the fill.
+            fills = []
+            if "rebench_baseline" in data:
+                baseline_path = args.baseline or data["rebench_baseline"]
+            else:
+                baseline_path = args.baseline or DEFAULT_BASELINE
+                fills.append(f"rebench_baseline <- S5.7 default ({DEFAULT_BASELINE})")
+            if "regression_tps_pct" in data:
+                regression_tps_pct = data["regression_tps_pct"]
+            else:
+                regression_tps_pct = 10.0
+                fills.append("regression_tps_pct <- S5.7 default (10)")
+            if fills:
+                config_note = "; ".join(fills)
+    except RebenchError as exc:
+        _print({"status": "error", "error": str(exc)})
+        return EXIT_CONFIG
 
     try:
         if args.command == "gate":
@@ -472,19 +737,23 @@ def main(argv: list[str] | None = None) -> int:
             current = rows_summary(rows)
             baseline = load_baseline(baseline_path)
             gate = quick_gate(baseline, current, regression_tps_pct)
-            _print(
-                {
-                    "status": "blocked" if gate["blocked"] else "unblocked",
-                    "gate": gate,
-                }
-            )
+            out_gate = {
+                "status": "blocked" if gate["blocked"] else "unblocked",
+                "gate": gate,
+            }
+            if config_note:
+                out_gate["config_note"] = config_note
+            _print(out_gate)
             return EXIT_BLOCKED if gate["blocked"] else EXIT_OK
 
         if args.command == "due":
             engine = load_engine_yaml(args.engine)
             baseline = load_baseline(baseline_path)
             due = full_bench_due(baseline, engine_identity(engine), args.s42_flip)
-            _print({"status": "due" if due["due"] else "not-due", "due": due})
+            out_due = {"status": "due" if due["due"] else "not-due", "due": due}
+            if config_note:
+                out_due["config_note"] = config_note
+            _print(out_due)
             return EXIT_BLOCKED if due["due"] else EXIT_OK
 
         # save-baseline
@@ -495,13 +764,14 @@ def main(argv: list[str] | None = None) -> int:
         engine = load_engine_yaml(args.engine)
         commit = _git_commit()
         p = save_baseline(baseline_path, engine, rows, commit)
-        _print(
-            {
-                "status": "saved",
-                "baseline": str(p),
-                "scenarios": sorted(rows_summary(rows)),
-            }
-        )
+        out_save = {
+            "status": "saved",
+            "baseline": str(p),
+            "scenarios": sorted(rows_summary(rows)),
+        }
+        if config_note:
+            out_save["config_note"] = config_note
+        _print(out_save)
         return EXIT_OK
     except RebenchError as exc:
         _print({"status": "error", "error": str(exc)})

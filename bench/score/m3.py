@@ -26,8 +26,14 @@ M3 rubric is SEMI-AUTO:
 
 The spot-check value is SUPPLIED by the runner (the main's judgment — the
 S5.3 "M3's spot-check is the human/main-judgment seam"; an LLM-judge mode
-is a bench v2 item, parked). The hermetic S5.8 golden in/out pair: all
-6 sections shape-correct + spot-check 1.0 -> pass; a mix -> the blend.
+is a bench v2 item, parked). When it is NOT supplied (``None`` — the
+seam was not driven), the row records ``spotcheck: "unjudged"`` + a named
+detail (the 2026-09-27 post-live-run amendment, H5: the live M3 fail was
+0.70 at construction and the row did not say the seam was undriven — an
+undriven seam is recorded "unjudged", NOT silently 0.0). The numeric
+blend still computes at the 0.0 spot-check weight for the unjudged case;
+"judged 0.0" (``spotcheck: 0.0``) is distinguished from "not driven"
+(``None``) in the detail + extra.
 
 Stdlib-only: the shared verdict helper.
 """
@@ -88,28 +94,50 @@ def score(payload: dict, root=None) -> dict:
     n = len(sections)
     shape_ok = sum(1 for s in sections if _section_shape_ok(s))
     auto = shape_ok / n
-    spot = payload.get("spotcheck")
-    if not isinstance(spot, (int, float)):
+    spot_raw = payload.get("spotcheck")
+    # H5 (post-live-run): distinguish the UNDRIVEN seam (None -> the main
+    # did not supply --spotcheck; recorded "unjudged", never silent 0.0)
+    # from a JUDGED zero (0.0). The numeric blend still computes at 0.0
+    # weight for the unjudged case.
+    if isinstance(spot_raw, (int, float)) and not isinstance(spot_raw, bool):
+        undriven = False
+        spot = min(1.0, max(0.0, float(spot_raw)))
+    else:
+        undriven = True
         spot = 0.0
-    spot = min(1.0, max(0.0, float(spot)))
+    spot_display = "unjudged" if undriven else f"{spot:.2f}"
     blend = auto * AUTO_WEIGHT + spot * SPOTCHECK_WEIGHT
     # pass: the blend is above 0.5 AND the spot-check clears the S5.2
-    # 2/3 threshold (a weak spot-check can't be rescued by shape alone).
+    # 2/3 threshold (a weak spot-check can't be rescued by shape alone;
+    # the unjudged seam is below the threshold by construction).
     ok = blend >= 0.5 and spot >= SPOTCHECK_THRESHOLD
+    if undriven:
+        detail = (
+            f"M3: auto shape {shape_ok}/{n} ({auto:.2f}), spot-check UNJUDGED "
+            f"(seam not driven — supply --spotcheck 0..1; the main reads 1/3 "
+            f"of the sections and judges claim accuracy) "
+            f"(threshold {SPOTCHECK_THRESHOLD:.2f}), blend {blend:.2f} "
+            f"({'pass' if ok else 'fail'})"
+        )
+    else:
+        detail = (
+            f"M3: auto shape {shape_ok}/{n} ({auto:.2f}), spot-check {spot:.2f} "
+            f"(threshold {SPOTCHECK_THRESHOLD:.2f}), blend {blend:.2f} "
+            f"({'pass' if ok else 'fail'})"
+        )
     return verdict(
         ok,
         blend,
-        f"M3: auto shape {shape_ok}/{n} ({auto:.2f}), spot-check {spot:.2f} "
-        f"(threshold {SPOTCHECK_THRESHOLD:.2f}), blend {blend:.2f} "
-        f"({'pass' if ok else 'fail'})",
+        detail,
         {
             "auto": round(auto, 4),
-            "spotcheck": spot,
+            "spotcheck": spot_display,
             "blend": round(blend, 4),
             "n_sections": n,
             "n_shape_ok": shape_ok,
             "auto_weight": AUTO_WEIGHT,
             "spotcheck_weight": SPOTCHECK_WEIGHT,
             "spotcheck_threshold": SPOTCHECK_THRESHOLD,
+            "spotcheck_driven": not undriven,
         },
     )

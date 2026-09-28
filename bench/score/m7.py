@@ -4,13 +4,33 @@ Input (the runner's saturation payload for one M7 task, the
 ``bench.exec.run_concurrent`` aggregate):
   {"agg": <dict from run_concurrent>, "results": [<TaskResult>, ...]}
   * ``agg`` — the concurrency aggregate: ``n_ok``, ``n_errors``,
-    ``total_completion_tokens``, ``total_elapsed_s``, ``aggregate_tps``
-    (the S5.1 "t/s at the ceiling" — the concurrency ceiling: all
-    instances, all slots, 8*N concurrent).
+    ``total_completion_tokens``, ``total_elapsed_s`` (the SERIAL sum —
+    the decode-throughput invariant), ``total_wall_s`` (the batch
+    wall-clock), and the t/s figures. The S5.1 "t/s at the ceiling" is
+    the WALL figure (the 2026-09-27 post-live-run amendment, H9 / S5.5:
+    the live first run's 0.25 was the serial sum 370/1484 s, not the
+    ~2.3 batch wall 370/161 s — the ceiling is a wall-clock saturation
+    figure). ``aggregate_tps_wall`` is the headline; ``aggregate_tps``
+    aliases it; ``aggregate_tps_serial`` is recorded for the
+    decode-throughput comparison. The numerator of every t/s figure here
+    is ``total_completion_tokens`` (OUTPUT tokens only — NOT
+    prompt+completion): the spec's H9 worked example uses 370 (the
+    completion count) as the numerator for BOTH serial and wall, so the
+    two are like-for-like and this is a decode-throughput ceiling, not a
+    "total generated tokens incl. prefill" figure.
   * ``results`` — the per-task results (the 5xx/429 count the "zero 5xx"
     half checks: any task whose error is an engine/5xx-class failure
     counts; a ctx/parse task failure is NOT a 5xx — it is the request
     shape, not the engine).
+
+Extra fields (G3c round-16 P1 + P2): ``aggregate_tps`` is the headline
+the verdict scores; ``aggregate_tps_wall`` records the measured WALL
+figure, and is None for a legacy aggregate that predates the wall
+measurement (the pre-amendment shape, which carries only the serial
+alias — the wall was NOT measured for it, not mislabeled). ``tps_source``
+names which denominator the headline used ("wall" / "serial"), so a
+legacy M7 row scored on the serial figure is explicit, not a silent
+fall-through.
 
 Scoring (auto, binary — S5.3 "machine-scored"):
   * ``zero_5xx`` = no task failed with an engine/5xx-class error
@@ -54,8 +74,29 @@ def score(payload: dict, root=None) -> dict:
     results = payload.get("results") or []
     if not isinstance(agg, dict):
         return verdict(False, 0.0, "M7: no concurrency aggregate in payload")
-    tps = agg.get("aggregate_tps")
-    tps = tps if isinstance(tps, (int, float)) else 0.0
+    # H9 (post-live-run): the headline "t/s at the ceiling" is the BATCH
+    # WALL figure. G3c round-16 P1 + P2: resolve the wall figure
+    # SEPARATELY from the headline so the recorded extra stays honest. A
+    # legacy row (no measured wall — the pre-amendment _aggregate_tps
+    # shape that omits aggregate_tps_wall) records
+    # aggregate_tps_wall = None (the wall was NOT measured), NOT the
+    # serial figure; the headline aggregate_tps aliases the serial figure
+    # for that row (the pre-amendment behavior), and tps_source NAMES
+    # which denominator the headline used, so the legacy M7 score is
+    # explicitly "serial", not a silent mislabel of "wall". Post-amendment
+    # rows always carry a real aggregate_tps_wall (== aggregate_tps), so
+    # tps_source = "wall" for them and the headline is unchanged.
+    wall_tps = agg.get("aggregate_tps_wall")
+    if isinstance(wall_tps, (int, float)):
+        tps = float(wall_tps)
+        tps_source = "wall"
+    else:
+        # legacy / no measured wall: the pre-amendment serial alias.
+        tps = agg.get("aggregate_tps")
+        tps = float(tps) if isinstance(tps, (int, float)) else 0.0
+        tps_source = "serial"
+    tps_serial = agg.get("aggregate_tps_serial")
+    tps_serial = tps_serial if isinstance(tps_serial, (int, float)) else None
     n_errors = agg.get("n_errors", 0)
     # cross-check the 5xx count two ways: the agg's n_errors and the
     # results' engine-class failures — they should agree; use the results
@@ -67,14 +108,21 @@ def score(payload: dict, root=None) -> dict:
     return verdict(
         ok,
         1.0 if ok else 0.0,
-        f"M7: t/s at ceiling {tps:.2f}, {'zero' if zero_5xx else f'{n_5xx}'} 5xx "
+        f"M7: t/s at ceiling {tps:.2f} ({tps_source}), "
+        f"{'zero' if zero_5xx else f'{n_5xx}'} 5xx "
         f"({'pass' if ok else 'fail'})",
         {
             "aggregate_tps": tps,
+            "aggregate_tps_wall": wall_tps
+            if isinstance(wall_tps, (int, float))
+            else None,
+            "aggregate_tps_serial": tps_serial,
+            "tps_source": tps_source,
             "n_5xx": n_5xx,
             "n_errors_agg": n_errors,
             "n_tasks": agg.get("n_tasks", 0),
             "n_ok": agg.get("n_ok", 0),
             "total_completion_tokens": agg.get("total_completion_tokens", 0),
+            "total_wall_s": agg.get("total_wall_s"),
         },
     )

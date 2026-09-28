@@ -160,6 +160,69 @@ class M5RubricTest(unittest.TestCase):
         v = m5.score({"answers": answers})
         self.assertTrue(v["pass"], v)
 
+    def test_comma_tokenization_is_comma_placement_independent(self):
+        # G3c round-2 P2 (H8 hardening): the golden "M1, M2, M7" used to
+        # tokenize with the comma attached ("m1," / "m2," / "m7"), so the
+        # token-set half only matched when the answer used the EXACT same
+        # comma placement. The live regression was saved only because the
+        # conjunction was "and" and the tokens happened to align. Now the
+        # H8 half extracts alnum/underscore runs, so a comma-FREE or
+        # differently-punctuated answer still matches, and a genuinely
+        # missing fact still fails.
+        golden = "M1, M2, M7"
+        self.assertTrue(m5._match("M1 M2 M7", golden), "comma-free variant")
+        self.assertTrue(m5._match("M1, M2, and M7", golden), "conjunction")
+        self.assertTrue(
+            m5._match("the quick bench is M1, M2, and M7", golden), "padded"
+        )
+        self.assertFalse(m5._match("M1, M2", golden), "a missing fact fails")
+
+    def test_multi_value_golden_requires_order(self):
+        # G3c round-6 P1: the multi-value H8 half is an ordered
+        # subsequence, not a bare set-subset. A reordered fact list
+        # ("M7, M2, M1") must NOT pass the golden "M1, M2, M7"; extra
+        # words / stop-particles BETWEEN the facts still pass
+        # ("tolerant of phrasing"); a missing fact still fails.
+        golden = "M1, M2, M7"
+        self.assertFalse(m5._match("M7, M2, M1", golden), "reordered fails")
+        self.assertFalse(m5._match("M2, M1, M7", golden), "partial reorder fails")
+        self.assertTrue(
+            m5._match("M1 and M2 and finally M7", golden),
+            "stop-words between keep order",
+        )
+        self.assertFalse(m5._match("M1 M7", golden), "missing middle fact fails")
+
+    def test_multi_token_golden_rejects_prefix_substring(self):
+        # G3c round-15 P1: the round-2 bare `g in a` fast path let the
+        # golden be a strict-PREFIX substring of the answer — "M1, M2"
+        # vs "M1, M22" -> "m1, m2" in "m1, m22" -> the last golden token
+        # ("m2") substring-matched a longer answer word ("m22") and the
+        # question falsely passed. The ordered whole-token subsequence is
+        # the matcher now: the golden's content tokens must each appear
+        # as a WHOLE token, in golden order.
+        golden = "M1, M2"
+        self.assertFalse(m5._match("M1, M22", golden), "prefix-substring fails")
+        self.assertFalse(m5._match("M1 M22", golden), "prefix-substring, no comma")
+        self.assertTrue(m5._match("M1, M2", golden), "exact passes")
+        self.assertTrue(m5._match("M1, M2 exactly", golden), "padded passes")
+        self.assertTrue(m5._match("M1 M2 M77", golden), "extra fact tolerated")
+        self.assertTrue(m5._match("M1 and M2", golden), "stop-word tolerated")
+
+    def test_bare_stop_word_golden_matches_whole_word_only(self):
+        # G3c round-7 P1: a golden that is itself a single stop word
+        # ("a", "the", "an") has _token_seq(g) == [] (the stop word is
+        # filtered), so the pre-fix post-filter token count misrouted it
+        # to the `g in a` substring fast-path and "banana" matched
+        # golden "a". The fix routes on the RAW (pre-filter) token count,
+        # so a single stop-word golden gets the whole-word matcher:
+        # "banana" does NOT match "a", "a cat" does.
+        self.assertFalse(m5._match("banana", "a"), "substring false positive")
+        self.assertTrue(m5._match("a cat", "a"), "word-boundary match")
+        self.assertFalse(m5._match("mother", "the"), "substring false positive")
+        self.assertTrue(m5._match("the cat", "the"), "word-boundary match")
+        self.assertFalse(m5._match("another", "an"), "substring false positive")
+        self.assertTrue(m5._match("an apple", "an"), "word-boundary match")
+
     def test_mis_sized_golden_fails_named(self):
         # the S5.2 "5 QA questions" rubric contract: a golden with a
         # different question count fails NAMED instead of the rubric
@@ -218,6 +281,45 @@ class M7RubricTest(unittest.TestCase):
         # a 400 (ctx) is the request shape, not the engine — the zero-5xx
         # half still holds.
         self.assertTrue(v["pass"])
+
+    def test_legacy_agg_records_wall_none_and_serial_source(self):
+        # G3c round-16 P1 + P2: a pre-amendment aggregate (no measured
+        # wall — no aggregate_tps_wall key) must record
+        # aggregate_tps_wall = None (the wall was NOT measured), NOT the
+        # serial figure masquerading as a wall value; tps_source names
+        # the serial denominator; the headline + pass/score are unchanged
+        # (the serial alias, the pre-amendment behavior).
+        results = [TaskResult(ok=True, completion_tokens=100) for _ in range(8)]
+        v = m7.score({"agg": self._agg(30.0), "results": results})
+        self.assertTrue(v["pass"], v)
+        self.assertEqual(v["extra"]["aggregate_tps"], 30.0)
+        self.assertIsNone(v["extra"]["aggregate_tps_wall"])
+        self.assertEqual(v["extra"]["tps_source"], "serial")
+        self.assertIn("(serial)", v["detail"])
+
+    def test_wall_agg_records_wall_figure_and_wall_source(self):
+        # the post-amendment shape: aggregate_tps_wall is present and is
+        # the headline (the S5.1 "t/s at the ceiling" saturation figure);
+        # tps_source = "wall"; the serial figure is recorded alongside.
+        results = [TaskResult(ok=True, completion_tokens=100) for _ in range(8)]
+        agg = {
+            "n_tasks": 8,
+            "n_ok": 8,
+            "n_errors": 0,
+            "total_completion_tokens": 800,
+            "total_elapsed_s": 40.0,
+            "aggregate_tps_serial": 800 / 40.0,
+            "total_wall_s": 200.0,
+            "aggregate_tps_wall": 800 / 200.0,
+            "aggregate_tps": 800 / 200.0,
+        }
+        v = m7.score({"agg": agg, "results": results})
+        self.assertTrue(v["pass"], v)
+        self.assertEqual(v["extra"]["aggregate_tps"], 800 / 200.0)
+        self.assertEqual(v["extra"]["aggregate_tps_wall"], 800 / 200.0)
+        self.assertEqual(v["extra"]["aggregate_tps_serial"], 800 / 40.0)
+        self.assertEqual(v["extra"]["tps_source"], "wall")
+        self.assertIn("(wall)", v["detail"])
 
     def test_zero_tps_fails(self):
         v = m7.score({"agg": self._agg(0.0), "results": []})
@@ -373,6 +475,41 @@ class M9RubricTest(unittest.TestCase):
         self.assertTrue(v["extra"]["main_rerun"]["pass"], v)
         self.assertTrue(v["extra"]["tool_log"]["pass"], v)
         self.assertTrue(v["extra"]["functions"]["pass"], v)
+
+    def test_crashed_state_skips_functions_sub_check(self):
+        # G3c round-8 P1: when the driver raises (state != "done"), the
+        # staged workdir was already rmtree'd — the functions sub-check
+        # must be SKIPPED (not scored against a cleaned path), and the
+        # sub-condition records skipped: true + a named reason.
+        p = self._payload("/nonexistent/cleaned-workdir", [self._suite_run_entry()])
+        p["state"] = "crashed"
+        v = m9.score(p)
+        self.assertFalse(v["pass"], v)
+        self.assertFalse(v["extra"]["functions"]["pass"], v)
+        self.assertTrue(v["extra"]["functions"]["skipped"], v)
+        self.assertIn("SKIPPED", v["extra"]["functions"]["detail"], v)
+        self.assertIn("state 'crashed'", v["extra"]["functions"]["detail"], v)
+
+    def test_multi_stop_word_golden_degenerate_path(self):
+        # G3c round-8 P2: a golden of 2+ raw tokens that are ALL stop
+        # words (e.g. "a, an") has no content token (_token_seq(g) == []),
+        # so the ordered-subsequence half is vacuous (empty needle ->
+        # _is_subseq True for ANY answer — the degenerate pinned below).
+        # It resolves via SUBSTRING containment of the literal instead
+        # (the round-15 degenerate branch, `g in a`). No M5 golden today
+        # is multi-stop-word, so this path is untested by the goldens —
+        # pin the OBSERVABLE behavior: the literal "a, an" and any answer
+        # that SUBSTRING-contains it match; an answer without the literal
+        # (even with both stop-words present separately) does not.
+        self.assertTrue(m5._match("a, an", "a, an"), "exact literal")
+        self.assertTrue(m5._match("there is a, an error", "a, an"), "substring-padded")
+        self.assertFalse(
+            m5._match("a an error", "a, an"), "comma-less differs (no literal)"
+        )
+        self.assertTrue(
+            m5._match("a, another one", "a, an"),
+            "substring 'a, an' present in 'a, another one' -> True",
+        )
 
     def test_missing_suite_run_in_tool_log_scores_2_3(self):
         import tempfile

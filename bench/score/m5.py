@@ -11,12 +11,31 @@ Scoring (auto, per-question binary — S5.3 "machine-scored"):
     ``bench/goldens/m5/qa.json``: PASS when the normalized golden answer
     appears in the normalized subagent answer (exact match is a special
     case of containment; the subagent may pad the answer with prose, so
-    containment — not equality — is the match rule).
-  * normalization: case-fold, keep only alphanumerics + underscores +
-    commas + spaces collapsed (the golden answers are short tokens:
-    "PTQ_1_0", "80", "M1, M2, M7" — the normalization is tolerant of
-    case, surrounding punctuation, and extra whitespace, but NOT of a
-    different value).
+    containment — not equality — is the match rule). The match is
+    TOLERANT of conjunction / word-boundary phrasing (the 2026-09-27
+    post-live-run amendment, H8: the live M5 miss was golden "M1, M2,
+    M7" vs answer "M1, M2, and M7" — a conjunction the strict substring
+    containment did not tolerate, while the long-context read itself
+    worked): common particles (and/or/the/a/an) are dropped from both
+    sides, and the rule is ordered containment OR every golden token
+    present in the answer's token sequence, IN GOLDEN ORDER (a missing
+    fact still fails; a reordered fact list — "M7, M2, M1" vs "M1, M2,
+    M7" — also fails; G3c round-6 P1: "tolerant of phrasing" = extra
+    words / case / punctuation / stop-words between the facts, the facts
+    keep their golden order).
+  * normalization (``_normalize``): case-fold, keep only alphanumerics +
+    underscores + commas + spaces (everything else collapses to a space).
+    It does NOT strip stop-words / conjunctions — that is the token-set
+    half's job: the token-set scorer (``_tokens`` + ``_match``) case-folds
+    and drops the conjunction/word-boundary particles via the ``_STOP``
+    constant ("and", "or", "the", "a", "an") so "M1 and M2" matches the
+    golden "M1, M2, M7". ``_normalize`` alone is therefore tolerant of
+    case, surrounding punctuation, and extra whitespace, but NOT of
+    "and"-phrasing (that tolerance is the token-set half).
+  * the golden answers are short tokens: "PTQ_1_0", "80", "M1, M2, M7" —
+    the scoring is tolerant of case, surrounding punctuation, extra
+    whitespace, and "and"-phrasing (token-set half), but NOT of a
+    different value.
   * ``pass`` = all 5 questions correct (the S5.2 "5 QA questions, each
     binary-scored" rubric: the long-context read is right when all 5 of
     the scattered facts are retrieved).
@@ -41,6 +60,21 @@ EXPECTED_QUESTIONS = 5
 
 _NORM_RE = re.compile(r"[^a-z0-9_,\s]+")
 _WS_RE = re.compile(r"\s+")
+# H8 (post-live-run): the conjunction / word-boundary particles dropped
+# from both sides before matching (the live miss: "M1, M2, M7" vs
+# "M1, M2, and M7" — the "and" the strict containment did not tolerate).
+# Matched as whole words only (a value like "an80" keeps its "an" — the
+# _NORM_RE already bounds tokens by punctuation/word characters).
+_STOP = frozenset({"and", "or", "the", "a", "an"})
+# G3c round-2 P2 (H8 hardening): token extraction for the H8 tolerant
+# half. The normalized string keeps commas ("m1, m2, m7"), and a naive
+# split() would leave the comma attached to the token ("m1," != "m1"),
+# so the token-set half only matched when the answer used the EXACT
+# same comma placement — the live regression was saved only because the
+# conjunction was "and" and the tokens happened to align. Extracting the
+# alnum/underscore runs treats commas as word boundaries, so
+# "M1, M2, M7" and "M1 M2 M7" tokenize identically.
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
 
 def _normalize(s: str) -> str:
@@ -50,13 +84,70 @@ def _normalize(s: str) -> str:
     return s
 
 
+def _token_seq(s: str) -> list[str]:
+    """The ORDERED non-stop tokens (G3c round-2 P2: the alnum/underscore
+    runs, commas / punctuation as word boundaries, stop particles
+    dropped). G3c round-6 P1: the multi-value match is an ordered
+    subsequence, not a bare set-subset — a golden "M1, M2, M7" must not
+    match an answer that lists the facts out of order ("M7, M2, M1").
+    'Tolerant of phrasing' means extra words / case / punctuation / stop
+    words may appear BETWEEN the facts; the facts themselves keep their
+    golden order. G3c round-15 P2: the round-14 `_tokens` helper (the
+    order-insensitive twin, which after round-14 returned the same
+    list) is retired — this is the single extraction."""
+    return [t for t in _TOKEN_RE.findall(s) if t not in _STOP]
+
+
+def _is_subseq(needle: list[str], haystack: list[str]) -> bool:
+    """True when every needle token appears in the haystack IN ORDER
+    (not necessarily adjacent)."""
+    i = 0
+    for h in haystack:
+        if i < len(needle) and h == needle[i]:
+            i += 1
+    return i == len(needle)
+
+
 def _match(answer: str, golden: str) -> bool:
     a = _normalize(answer)
     g = _normalize(golden)
     if not g:
         return False
-    # exact match or containment (the subagent may pad the answer).
-    return a == g or g in a
+    # G3c round-7 P1: a SINGLE-VALUE golden — exactly one RAW token, whether
+    # or not that token is itself a stop word ("80", "5", "PTQ_1_0", OR the
+    # bare stop words "a"/"the"/"an") — matches as a WHOLE WORD, not a
+    # substring. The routing MUST use the RAW (pre stop-word-filter) token
+    # count: a bare stop word like "a" has _token_seq(g) == [] (the stop word
+    # is dropped), so a post-filter count would misroute it to the `g in a`
+    # substring fast-path below, and "banana" would match golden "a". The
+    # whole-word regex is the correct matcher for BOTH "80" (must not match
+    # "800", G3c round-5 P2) and "a" (must not match "banana", this round).
+    # No current M5 golden is a bare stop word; this hardens the degenerate
+    # path while keeping the round-5 single-value whole-word behavior.
+    if len(_TOKEN_RE.findall(g)) == 1:
+        return re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", a) is not None
+    # G3c round-15 P1 + P2: the round-2 bare `g in a` fast path was over-
+    # permissive — it let the golden be a strict-PREFIX substring of the
+    # answer ("m1, m2" in "m1, m22"), so the last golden token ("m2")
+    # substring-matched a longer answer word ("m22") and the question
+    # falsely passed. The ORDERED whole-token subsequence is the correct
+    # matcher for a normal multi-token golden: every golden content token
+    # must appear as a WHOLE token, IN GOLDEN ORDER ("m1, m2" does NOT
+    # match "m1, m22"; exact-equality is the subsequence's special case;
+    # padded answers / stop-words / comma-placement still pass — the
+    # H8 "tolerant of phrasing" contract, round-6).
+    g_seq = _token_seq(g)
+    if g_seq:
+        # normal multi-token golden (has >= 1 content token).
+        return _is_subseq(g_seq, _token_seq(a))
+    # a golden of 2+ raw tokens that are ALL stop words (e.g. "a, an" —
+    # no M5 golden today is like this): no content token, so the
+    # subsequence is vacuous (empty needle -> _is_subseq True for ANY
+    # answer — the degenerate the G3c round-8 P2 regression test pins
+    # against). The pinned observable behavior (round-8/10) is substring
+    # containment of the literal: "a, an" / "there is a, an error" /
+    # "a, another one" match; "a an error" (no comma) does not.
+    return g in a
 
 
 def score(payload: dict, root=None) -> dict:

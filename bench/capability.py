@@ -55,6 +55,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import tempfile
 import time
 from contextlib import redirect_stdout
@@ -136,8 +137,9 @@ def _stage_m10_workdir(root: str | None) -> Path:
 
 def stage_workdir(sid: str, root: str | None = None) -> Path:
     """The S5.2 fixture workdir for one capability scenario (M9 or M10).
-    Caller owns the workdir lifetime (the driver cleans it on the live
-    path; the mock path stages it itself for the scorer's file check)."""
+    The LIVE driver (``run_mode``) cleans it in its ``finally``; the
+    hermetic mock path (``tests/fixtures/bench_mock.mock_cap``) stages it
+    itself and the scorer's file check reads it while it exists."""
     if sid == "M9":
         return _stage_m9_workdir(root)
     if sid == "M10":
@@ -219,11 +221,35 @@ def _timing_from_result(result: dict, elapsed_ms: float) -> dict:
 # --------------------------------------------------------------------------
 # the live seam (the harness tool loop)
 # --------------------------------------------------------------------------
+# The per-tool step timeout the driver writes into the harness config it
+# spawns with (the worker's S3.4 per-tool bound). G3c round-2 P1 (H1
+# wait-window): the terminal-poll margin is derived from THIS bound — the
+# task's --deadline is re-checked by the worker at every loop boundary
+# AND right after each chat step returns, so the task is terminal by
+# `deadline + one in-flight step` at the latest; that in-flight step is
+# bounded by tool_timeout_s (a tool exec) or the worker's chat socket cap
+# (both 60 s). The margin must EXCEED that bound, not equal it.
+TOOL_TIMEOUT_S = 60.0
+
+
 def default_deadline_s(sid: str) -> float:
     """The S5.2 scenario budget for the capability task's ``--deadline``
     (the tool-loop bound is the harness's ``task_max_steps``, not the
     bench's — the deadline is the backstop)."""
     return _DEFAULT_DEADLINE_S.get(sid, 300.0)
+
+
+def default_wait_s(deadline_s: float) -> float:
+    """The terminal-poll window for a capability task with the given
+    ``--deadline`` (H1 post-live-run + G3c round-2 P1): the deadline
+    backstop PLUS one in-flight step that can still be running past the
+    deadline. The worker re-checks the deadline at every loop boundary
+    AND right after each chat step returns, so the task is terminal by
+    ``deadline + one in-flight step`` at the latest; that in-flight step
+    is bounded by the tool/chat timeout (``TOOL_TIMEOUT_S``). The margin
+    EXCEEDS that bound (a +30 s slack) rather than equalling it, so a
+    legitimate deadline-boundary overrun can't trip "not terminal"."""
+    return deadline_s + TOOL_TIMEOUT_S + 30.0
 
 
 def capability_loop_spec(sid: str, root: str | None = None) -> tuple[list, dict]:
@@ -309,7 +335,7 @@ def run_mode(
     root: str | None = None,
     deadline_s: float | None = None,
     max_steps: int = 16,
-    wait_s: float = 120.0,
+    wait_s: float | None = None,
     instance_port: int = 30101,
     main_endpoint: str | None = None,
     engine_yaml: str | Path | None = None,
@@ -348,6 +374,15 @@ def run_mode(
     non-zero spawn exit or a non-terminal task within ``wait_s`` raises
     :class:`CapabilityError` (the caller records the failed row — the
     S5.4 "failure is data" rule).
+
+    wait_s: the terminal-poll window. None (the default) = the task's own
+    ``deadline_s`` + the in-flight step bound (``TOOL_TIMEOUT_S`` = 60 s)
+    + a 30 s slack (the post-live-run amendment, S5.2/S5.9 #5: the live M9
+    crash was a hardcoded 120 s window racing a 300/600 s task deadline
+    — the driver must cover the backstop, not a constant smaller than
+    it; G3c round-2 P1 made the margin EXCEED the in-flight bound rather
+    than equal it, so the default is deadline + 90 s, not deadline + 60
+    s). An explicit ``wait_s`` wins (the hermetic seam).
     """
     if tool_execution not in ("host", "engine"):
         raise CapabilityError(
@@ -356,6 +391,12 @@ def run_mode(
     if main_endpoint is None:
         main_endpoint = f"http://127.0.0.1:{instance_port}"
     deadline_s = deadline_s or default_deadline_s(sid)
+    if wait_s is None:
+        # H1 (post-live-run) + G3c round-2 P1: see ``default_wait_s`` —
+        # the margin exceeds the in-flight step bound (tool/chat timeout)
+        # rather than equalling it, so a legitimate deadline-boundary
+        # overrun can't trip "not terminal".
+        wait_s = default_wait_s(deadline_s)
 
     H = _load_harness()
 
@@ -375,7 +416,7 @@ def run_mode(
         "workspace_dir": str(tmp / "workspaces"),
         "tool_execution": tool_execution,
         "tool_python_bin": "/usr/bin/python3",
-        "tool_timeout_s": 60,
+        "tool_timeout_s": int(TOOL_TIMEOUT_S),
         "task_max_steps": max_steps,
     }
     cfg_path.write_text("\n".join(f"{k}: {v}" for k, v in data.items()) + "\n")
@@ -485,6 +526,11 @@ def run_mode(
         return out
     finally:
         _tmp.cleanup()
+        # H6 (post-live-run): the staged fixture workdir is the driver's
+        # to clean — every live capability call leaked a
+        # /tmp/bonsai2-m{9,10}-* dir (confirmed in the first live run,
+        # the staged M9 workdir survived the crash).
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _m10_canned_report() -> str:

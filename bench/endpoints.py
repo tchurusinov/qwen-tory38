@@ -17,8 +17,12 @@ The resolved endpoint is a small dict the executor consumes:
 ``{"kind": "subagent"|"main", "port": int, "url": str, "alias": str,
 "api_key": str, "index": int}``. The subagent alias + api_key are the
 S1.3 wire identity (the same values the taskworker's
-``load_engine_identity`` reads); the main endpoint has no api_key by
-default (the S3.2 main-probe convention: 401-walled is still UP).
+``load_engine_identity`` reads); the main endpoint's api_key comes from
+``harness.yaml`` ``main_api_key`` when present (the 2026-09-27
+post-live-run amendment, H3 / S3.6: the live main stack is key-walled —
+no-key completions 401; the S3.2 main-probe "401-walled is still UP"
+convention applies to the HEALTH PROBE, not to completions). Empty or
+absent = keyless (today's behavior, back-compatible).
 
 Pure + hermetic: given the two YAML dicts (or the loaded engine/harness
 identities) the resolver returns the endpoints with no I/O. The file
@@ -29,6 +33,7 @@ wrapper over the S3.6/S1.6 conventions (PyYAML at the edge, the box dep).
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -52,8 +57,13 @@ def subagent_ports(engine: dict) -> tuple[int, list[dict]]:
     """The S1.6 pool: (N, [endpoint per instance]). N = instances.count
     (the S1.4 clamp 0..8); ports from instances.port_base + i with the
     optional per-instance ``ports`` override (same map the S1.7 validator
-    checks). Each endpoint carries the S1.3 alias + api_key (the wire
-    identity) + its index. An N=0 pool (main-only) returns ([], N)."""
+    checks). Each endpoint dict carries the full executor shape:
+    ``{"kind": "subagent", "port": int, "url": "http://127.0.0.1:<port>",
+    "alias": <S1.3 alias>, "api_key": <wire key>, "index": i}`` — the
+    ``url`` is built here (always an explicit-port 127.0.0.1 authority;
+    the S1.6 pool is local-only), so consumers (the bench executor, the
+    H13 warmup) may POST to ``ep["url"]`` directly. An N=0 pool
+    (main-only) returns ``(0, [])``."""
     inst = engine.get("instances", {})
     count = inst.get("count", 0)
     if not isinstance(count, int) or isinstance(count, bool):
@@ -88,22 +98,97 @@ def subagent_ports(engine: dict) -> tuple[int, list[dict]]:
 
 def main_endpoint(harness: dict) -> dict:
     """The main-only endpoint (M6 control, M8 main half): from
-    ``harness.yaml`` main_endpoint (the S3.6 convention). No api_key by
-    default (the S3.2 main-probe: 401-walled is still UP)."""
+    ``harness.yaml`` main_endpoint (the S3.6 convention). The api_key
+    comes from ``harness.yaml`` ``main_api_key`` when present (the
+    2026-09-27 post-live-run amendment, H3: the live main stack is
+    key-walled — completions need the key; the 401-walled-is-still-UP
+    main-PROBE convention is for the health probe, not completions).
+    Absent/empty key = keyless (back-compatible: no Authorization
+    header, today's behavior)."""
     url = harness.get("main_endpoint", "http://localhost:30001")
+    api_key = harness.get("main_api_key", "")
+    if not isinstance(api_key, str):
+        # G3c round-4 P2: a non-string key (a number, a list, …) is a
+        # CONFIG ERROR, not a "keyless" signal. We coerce to "" (keyless)
+        # rather than raise — main-PROBE tolerates a keyless main (the
+        # health probe is 401-tolerant) and the completions endpoint may
+        # genuinely be keyless — but a MIS-TYPED key (e.g. a bare number
+        # instead of a string) is silently dropped here. G3c round-8 P2:
+        # name it at RUNTIME (not just in this comment) so a numeric-key
+        # typo in harness.yaml is diagnosed where it is read — a single
+        # stderr WARN, not an exception (the hermetic / no-key path keeps
+        # working; the bench stdout JSON stays one-object-per-run).
+        print(
+            f"bench: WARN main_api_key is {type(api_key).__name__!r}, not str — "
+            "coercing to keyless (''); a mis-typed key in harness.yaml should "
+            "be a string",
+            file=sys.stderr,
+        )
+        api_key = ""
     port = 30001
     # parse the port out of the url for the record (best-effort; the url is
-    # authoritative for the executor).
-    if ":" in url:
-        _, _, port_s = url.rpartition(":")
-        if port_s.isdigit():
-            port = int(port_s)
+    # authoritative for the executor). G3c round-6 P2: the 30001 default is
+    # a FALLBACK only — when the url carries an explicit port (e.g. an
+    # override or keepalive proxy on a non-standard port) the parsed value
+    # wins. The S3.1 contract says the endpoint dict carries the real port;
+    # this parser extracts it from the url string (the executor's source of
+    # truth), so the recorded port matches what the executor actually
+    # targets, not a hardcoded default.
+    # G3c round-9 P0: the executor POSTs to endpoint["url"] (exec.py), so a
+    # main URL with NO explicit port ("http://localhost", "http://x") would
+    # record port=30001 but actually target the default HTTP port 80 — the
+    # recorded port and the POST target disagree, and a key-walled main on a
+    # non-standard port 401s / 0-conns. Normalize: when the url has no
+    # explicit port, carry the default 30001 INTO the url so the target and
+    # the recorded port agree. (The subagent pool always builds
+    # http://127.0.0.1:<port> with an explicit port, so this is scoped to
+    # the main endpoint, whose url is operator-supplied and may omit the
+    # port.)
+    # G3c round-10 P2: the round-9 parse used urlparse, which misreads a
+    # SCHEMELESS url: urlparse("localhost") -> scheme="" / hostname=None,
+    # so the port normalization was skipped and the recorded port
+    # (30001) disagreed with the POST target (:80) on exactly the edge the
+    # P0 claimed to fix. The authority-aware split below is scheme-agnostic
+    # and path-aware: it first strips the scheme (if any) on "://", then
+    # takes the FIRST "/" as the host/path boundary (anything after that is
+    # a path, not a port), and splits the authority on ":" — an explicit
+    # port in either the "scheme://host:port" or the schemeless "host:port"
+    # shape. An authority with no ":" gets the default carried into the
+    # url so the recorded port and the POST target agree.
+    authority = url.split("://", 1)[-1] if "://" in url else url
+    authority = authority.split("/", 1)[0]
+    _, _, port_s = authority.rpartition(":")
+    if port_s.isdigit():
+        # an explicit numeric port after the LAST colon in the authority —
+        # the normal "scheme://host:port" or schemeless "host:port" shape.
+        port = int(port_s)
+    else:
+        # no explicit port in the authority -> carry the default INTO the
+        # authority (not at the end of the url) so the recorded port and
+        # the POST target agree, and a path (if any) stays AFTER the port.
+        # The round-9 naive `f"{url.rstrip('/')}:{port}"` appended the
+        # port at the END of the url — wrong for a portless url WITH a
+        # path ("http://localhost/served" became
+        # "http://localhost/served:30001" instead of
+        # "http://localhost:30001/served"). Split on the first "/" to
+        # keep the path out of the authority.
+        if "://" in url:
+            scheme, rest = url.split("://", 1)
+            auth, _, path = rest.partition("/")
+            url = (
+                f"{scheme}://{auth}:{port}/{path}"
+                if path
+                else f"{scheme}://{auth}:{port}"
+            )
+        else:
+            auth, sep, path = url.partition("/")
+            url = f"{auth}:{port}/{path}" if sep else f"{auth}:{port}"
     return {
         "kind": "main",
         "port": port,
         "url": url,
         "alias": "main",
-        "api_key": "",
+        "api_key": api_key,
         "index": -1,
     }
 

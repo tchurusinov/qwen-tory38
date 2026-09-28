@@ -82,6 +82,39 @@ class MainEndpointTest(unittest.TestCase):
         ep = endpoints.main_endpoint(_harness("http://localhost"))
         self.assertEqual(ep["port"], 30001)  # the documented default
 
+    # G3c round-14 P2: the schemeless+path edge the round-9/10 diff did
+    # not pin. "http://localhost/served" (portless WITH a path) must get
+    # the default port carried into the AUTHORITY ("http://localhost:30001/served"),
+    # not appended at the end of the url — the port must agree with the
+    # POST target, and a path stays AFTER the port.
+    def test_portless_url_with_path_normalizes_authority(self):
+        ep = endpoints.main_endpoint(_harness("http://localhost/served"))
+        self.assertEqual(ep["port"], 30001)
+        self.assertEqual(ep["url"], "http://localhost:30001/served")
+
+    def test_schemeless_portless_url_with_path_normalizes_authority(self):
+        ep = endpoints.main_endpoint(_harness("localhost/served"))
+        self.assertEqual(ep["port"], 30001)
+        self.assertEqual(ep["url"], "localhost:30001/served")
+
+    def test_schemeless_port_with_path_kept(self):
+        ep = endpoints.main_endpoint(_harness("localhost:30002/served"))
+        self.assertEqual(ep["port"], 30002)
+        self.assertEqual(ep["url"], "localhost:30002/served")
+
+    def test_main_api_key_flows_through(self):
+        # H3 (post-live-run): a key-walled main stack (no-key -> 401) needs
+        # the Bearer key for completions. main_endpoint reads
+        # harness.main_api_key into the endpoint dict's api_key; empty/absent
+        # = keyless (the pre-amendment behavior).
+        ep = endpoints.main_endpoint(
+            {"main_endpoint": "http://localhost:30001", "main_api_key": "sk-live-key"}
+        )
+        self.assertEqual(ep["api_key"], "sk-live-key")
+        # absent key -> keyless (the empty-string default)
+        ep2 = endpoints.main_endpoint({"main_endpoint": "http://localhost:30001"})
+        self.assertEqual(ep2["api_key"], "")
+
 
 class ResolveForScenarioTest(unittest.TestCase):
     def test_m6_is_main_only(self):

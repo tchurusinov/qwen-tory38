@@ -318,6 +318,28 @@ class M9M10CapabilityTest(MockRunTestBase):
 
 
 class RunnerExitCodeTest(MockRunTestBase):
+    def test_release_timeout_s_non_numeric_is_config_error_not_raw(self):
+        # G3c round-15 P2: the DIRECT run() path (which bypasses
+        # config.load's numeric validation) must name a non-numeric
+        # release_timeout_s as a config.ConfigError (the S5.4 exit-2
+        # path main() maps it to), not leak a raw ValueError (a
+        # non-numeric string) or TypeError (a list) from float().
+        import bench.config as bconfig
+
+        # "90" IS parseable (float("90") == 90.0) — config.load would have
+        # validated it, but the direct run() path accepts it too. The P2 is
+        # the UNPARSEABLE values: a non-numeric string (ValueError) and a
+        # list (TypeError).
+        cfg = {"results_dir": str(self.results), "release_timeout_s": "ninety"}
+        with self.assertRaises(bconfig.ConfigError) as ctx:
+            bench_run.run(cfg, scenario="M1", mock_spec=MOCK_SPEC)
+        self.assertIn("release_timeout_s", str(ctx.exception))
+        # a list is the other non-numeric shape (TypeError, not ValueError)
+        cfg2 = {"results_dir": str(self.results), "release_timeout_s": [90]}
+        with self.assertRaises(bconfig.ConfigError) as ctx2:
+            bench_run.run(cfg2, scenario="M1", mock_spec=MOCK_SPEC)
+        self.assertIn("release_timeout_s", str(ctx2.exception))
+
     def test_bad_config_exit_2(self):
         env = _env(self.tmp)
         p = self.tmp / "bad.yaml"
@@ -398,6 +420,180 @@ class RunnerExitCodeTest(MockRunTestBase):
         obj = json.loads(out.getvalue())
         self.assertEqual(obj["status"], "crash")
         self.assertIn("boom", obj["error"])
+
+
+class ReleaseFlagsTest(MockRunTestBase):
+    """H13 (post-live-run): the pool-release flags. Under --mock both
+    flags are no-ops RECORDED as such (the hermetic run never touches the
+    pool; the flag is exercised through the record). --release-between
+    fires at each scenario BOUNDARY (rows for scenario N are written
+    before the boundary release; scenario N+1's rows after)."""
+
+    def test_release_after_records_noop_under_mock(self):
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M1", "M2"], self.results)
+        rc, stdout = self._run_main(["--mock", MOCK_SPEC, "--release-after"], cfg, env)
+        self.assertEqual(rc, 0, stdout)
+        doc = json.loads(stdout)
+        self.assertIn("release_after", doc)
+        # a no-op under --mock, recorded with the S3.2 tier-2 shape.
+        self.assertTrue(doc["release_after"]["mock"])
+        self.assertEqual(doc["release_after"]["tier"], 2)
+
+    def test_release_between_fires_at_each_boundary(self):
+        # TWO scenarios -> ONE boundary (between M1 and M2). The record is
+        # present, no-opped under --mock, and one entry per boundary.
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M1", "M2"], self.results)
+        rc, stdout = self._run_main(
+            ["--mock", MOCK_SPEC, "--release-between"], cfg, env
+        )
+        self.assertEqual(rc, 0, stdout)
+        doc = json.loads(stdout)
+        self.assertIn("release_between", doc)
+        self.assertEqual(len(doc["release_between"]), 1)  # one boundary
+        self.assertTrue(doc["release_between"][0]["mock"])
+        self.assertEqual(doc["release_between"][0]["kind"], "between")
+
+    def test_release_flags_off_keeps_pre_hotfix_stdout_shape(self):
+        # default OFF: no release_* keys on the stdout JSON (the pre-hotfix
+        # shape stays byte-identical for the unflagged path).
+        env = _env(self.tmp)
+        cfg = _write_bench_yaml(self.tmp, ["M1"], self.results)
+        rc, stdout = self._run_main(["--mock", MOCK_SPEC], cfg, env)
+        self.assertEqual(rc, 0, stdout)
+        doc = json.loads(stdout)
+        self.assertNotIn("release_after", doc)
+        self.assertNotIn("release_between", doc)
+
+    def test_pool_release_unload_84_is_skipped_not_aborted(self):
+        # H13 honest failure path: manager down -> unload exit 84 -> the
+        # record is "skipped (84)" and the run CONTINUES (release is an
+        # optimization, not a correctness gate). Drive the real
+        # _pool_release with a fake unload script that exits 84.
+        # G3c round-1 P1: the release path now execs the S3.2 script by its
+        # OWN shebang/interpreter, so the fake must be a launchable
+        # python3-shebang .py (the pre-install S3.2 shape) with the exec
+        # bit — a bare no-shebang / no-exec-bit file would hit the new
+        # "not launchable" skip edge, not the 84 path.
+        script = self.tmp / "fake_unload.py"
+        script.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(84)\n")
+        import os as _os
+
+        _os.chmod(str(script), 0o755)
+        rec = bench_run._pool_release("after", str(script), None, mock=False)
+        self.assertEqual(rec["note"], "skipped (84)")
+        self.assertEqual(rec["unload_exit"], 84)
+        self.assertEqual(rec["tier"], 2)
+
+    def test_pool_release_bash_wrapper_is_executed_by_shebang(self):
+        # G3c round-1 P1: post-install the S3.2 scripts may be bash
+        # wrappers (S3.2); the release path must exec the path directly
+        # (its shebang), not run it under the bench's python. A bash
+        # wrapper that prints a marker + exits 0 must come back "done",
+        # not crash (the old [sys.executable, bin] shape would have run
+        # the bash wrapper under python -> exit 1).
+        wrapper = self.tmp / "fake_unload_wrapper"
+        wrapper.write_text("#!/usr/bin/env bash\necho 'wrapper ok'\nexit 0\n")
+        import os as _os
+
+        _os.chmod(str(wrapper), 0o755)
+        rec = bench_run._pool_release("after", str(wrapper), None, mock=False)
+        self.assertEqual(rec["unload_exit"], 0)
+        self.assertEqual(rec["note"], "done")
+
+    def test_release_after_is_unload_only_not_reloaded(self):
+        # G3c round-10 P1 (disposition): an "after" release is
+        # UNLOAD-ONLY (S4.3 tier-2 "pool left main-only") — it must NOT
+        # run the reload + warmup path even when a reload bin is present.
+        # The `if kind == "between" and reload_bin:` guard (run.py)
+        # excludes "after"; this regression test pins that by passing
+        # BOTH bins and asserting the record has no reload/warmup keys
+        # and the reload script was never executed. The fake reload
+        # script APPENDS a marker to a log file; if the guard regressed
+        # and the after-release reloaded, the log would be non-empty.
+        log = self.tmp / "reload_log.txt"
+        log.write_text("")
+        unload = self.tmp / "fake_unload.py"
+        unload.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        reload_bin = self.tmp / "fake_reload.py"
+        reload_bin.write_text(
+            "#!/usr/bin/env python3\n"
+            f"open({str(log)!r}, 'a').write('RELOADED\\n')\n"
+            "import sys\nsys.exit(0)\n"
+        )
+        import os as _os
+
+        _os.chmod(str(unload), 0o755)
+        _os.chmod(str(reload_bin), 0o755)
+        rec = bench_run._pool_release("after", str(unload), str(reload_bin), mock=False)
+        # the record is unload-only: no reload_exit / reload_s / warmup_s,
+        # and the reload: false marker is set at record creation.
+        self.assertEqual(rec["unload_exit"], 0)
+        self.assertEqual(rec["reload"], False)
+        self.assertNotIn("reload_exit", rec, "after-release must not reload")
+        self.assertNotIn("reload_s", rec, "after-release must not reload")
+        self.assertNotIn("warmup_s", rec, "after-release must not warmup")
+        self.assertEqual(log.read_text(), "", "the reload script was executed")
+
+    def test_release_between_does_reload(self):
+        # The contrast to test_release_after_is_unload_only_not_reloaded:
+        # a "between" release (a scenario boundary) DOES reload + warmup
+        # (the next scenario still needs the pool). With a fake reload
+        # script that APPENDS a marker, the log must be non-empty after
+        # the call — proving the `kind == "between" and reload_bin` guard
+        # routes the reload path for "between" (and only "between").
+        log = self.tmp / "reload_log_between.txt"
+        log.write_text("")
+        unload = self.tmp / "fake_unload_b.py"
+        unload.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        reload_bin = self.tmp / "fake_reload_b.py"
+        reload_bin.write_text(
+            "#!/usr/bin/env python3\n"
+            f"open({str(log)!r}, 'a').write('RELOADED\\n')\n"
+            "import sys\nsys.exit(0)\n"
+        )
+        import os as _os
+
+        _os.chmod(str(unload), 0o755)
+        _os.chmod(str(reload_bin), 0o755)
+        # monkeypatch the warmup (the hermetic test never wants to hit the
+        # real instance ports for the 16-token warmup).
+        orig_warmup = bench_run._warmup_instances
+        bench_run._warmup_instances = lambda engine=None: True
+        try:
+            rec = bench_run._pool_release(
+                "between", str(unload), str(reload_bin), mock=False
+            )
+        finally:
+            bench_run._warmup_instances = orig_warmup
+        self.assertEqual(rec["unload_exit"], 0)
+        self.assertEqual(rec["reload_exit"], 0)
+        self.assertIn("reload_s", rec, "between-release must reload")
+        self.assertIn("warmup_s", rec, "between-release must warmup")
+        self.assertEqual(
+            log.read_text(), "RELOADED\n", "the reload script was NOT executed"
+        )
+
+    def test_pool_release_not_launchable_is_a_named_skip(self):
+        # G3c round-1 P1 edge: a present-but-not-launchable script (exec
+        # bit stripped) is a named skip, not an abort — the run continues
+        # (H13: release is an optimization, not a correctness gate).
+        script = self.tmp / "fake_unload_noperm"
+        script.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        import os as _os
+
+        _os.chmod(str(script), 0o644)
+        rec = bench_run._pool_release("after", str(script), None, mock=False)
+        self.assertIn("not launchable", rec["note"])
+        self.assertIsNone(rec["unload_exit"])
+        self.assertEqual(rec["tier"], 2)
+
+    def test_pool_release_no_bin_is_skipped(self):
+        # pre-install checkout without bin/ (or the flag pointed at a missing
+        # script): the record is "skipped (no bin)", the run continues.
+        rec = bench_run._pool_release("after", None, None, mock=False)
+        self.assertEqual(rec["note"], "skipped (no bin)")
 
 
 if __name__ == "__main__":
