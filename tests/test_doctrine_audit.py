@@ -620,6 +620,46 @@ class CliTest(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
 
+    def test_s47_3_two_synthetic_loss_scenarios_via_cli_no_yaml(self):
+        # S4.7 #3 through the real CLI path with NO PyYAML: two synthetic
+        # "loss" task shapes, each on a scenario with 2 consecutive bench
+        # losses, no documented exception -> the audit flags both stale
+        # rows, exit 1. Runs under _NoYaml (the bare-box-python3 path the
+        # gate uses: the stdlib fallback reads the flow-sequence
+        # scenarios line). The bench.yaml must list M4/M5 (the helper's
+        # default only names M1/M2/M9/M10), or the citations fail as
+        # missing before the recompute.
+        d = Path(tempfile.mkdtemp(prefix="da-cli-"))
+        by = d / "bench.yaml"
+        by.write_text("scenarios: [M1, M2, M4, M5, M9, M10]\n")
+        cl = self._claims_file(
+            [
+                {"task_shape": "Shape A", "allocation": "subagent", "bench": "M4"},
+                {"task_shape": "Shape B", "allocation": "subagent", "bench": "M5"},
+            ]
+        )
+        rd = self._results_dir(
+            [
+                _row("M4", "2", "fail"),
+                _row("M4", "1", "fail"),
+                _row("M5", "2", "fail"),
+                _row("M5", "1", "fail"),
+            ]
+        )
+        with _NoYaml():
+            rc = doctrine_audit.main(
+                [
+                    "check",
+                    "--bench-yaml",
+                    str(by),
+                    "--claims",
+                    str(cl),
+                    "--results-dir",
+                    str(rd),
+                ]
+            )
+        self.assertEqual(rc, 1)
+
     def test_missing_claims_exits_2(self):
         by = self._bench_yaml()
         with self._with_yaml({"scenarios": ["M1", "M2", "M9", "M10"]}):
