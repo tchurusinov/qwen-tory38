@@ -23,7 +23,12 @@ Spec shapes (response-queue entries, consumed in order):
                                          tests)
 
 Queue exhaustion: the LAST entry repeats — deterministic overrun cases
-(tool_invalid_max bad calls, --max-steps exhaustion).
+(tool_invalid_max bad calls, --max-steps exhaustion). A `final` entry
+that is NOT last advances to the next entry after it is served (MAP 5.7
+multi-task queue: one scripted instance serves a SEQUENCE of tasks —
+one task's final answer is followed by the next task's entries,
+consumed in task order, one completion per request). The last entry's
+repeat semantics are unchanged (it has no successor).
 
 `request_log` records every /v1/chat/completions body (tests assert WHAT
 the taskworker sent: the tools array, the message-history growth).
@@ -67,6 +72,12 @@ class ToolEngine:
     ):
         self.responses = list(responses or [])
         self._idx = 0
+        # MAP 5.7: the queue cursor is read/modified per request, and the
+        # ThreadingHTTPServer serves CONCURRENT requests (the M2/M3
+        # fan-out: 8 slots, 10 tasks). Without this lock two in-flight
+        # requests would race on `self._idx` — one verdict served twice,
+        # one skipped. The lock makes the next-entry hand-off atomic.
+        self._lock = threading.Lock()
         self.alias = alias
         self.api_key = api_key
         self.tools_response = tools_response or {"success": True, "output": "ok"}
@@ -86,13 +97,30 @@ class ToolEngine:
         uses a `sleep` key, so the overrun cases (single-entry, no
         sleep) never hit the repeat path — the documented hazard is
         latent. If a future test adds `sleep` to a single-entry spec that
-        must overrun, expect the suite to stall for N*sleep seconds."""
+        must overrun, expect the suite to stall for N*sleep seconds.
+
+        MAP 5.7 (multi-task queue): a `final` entry that is NOT last
+        advances to the next entry after it is served — one scripted
+        instance serves a SEQUENCE of tasks (one task's final answer is
+        followed by the next task's entries, consumed in task order,
+        one completion per request). The last entry's repeat semantics
+        are unchanged (it has no successor)."""
         if not self.responses:
             return {"kind": "final", "content": "done"}
-        self._idx = min(self._idx, len(self.responses) - 1)
-        spec = self.responses[self._idx]
-        if spec.get("kind") != "final":
-            self._idx += 1
+        idx = min(self._idx, len(self.responses) - 1)
+        with self._lock:
+            # re-read under the lock (the caller's clamp above may be
+            # stale after a concurrent hand-off); atomically take the
+            # entry at the CURRENT cursor and advance it.
+            idx = min(self._idx, len(self.responses) - 1)
+            spec = self.responses[idx]
+            # a tool step or a NON-LAST final advances off the cursor
+            # (the next task's script starts / the next step of the same
+            # loop); the LAST final stays (the repeat semantics for the
+            # overrun cases — single-entry queues, or a task that keeps
+            # requesting after its final).
+            if spec.get("kind") != "final" or idx < len(self.responses) - 1:
+                self._idx = idx + 1
         return spec
 
     @staticmethod

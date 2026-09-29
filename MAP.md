@@ -619,7 +619,7 @@ Exit: one full M1–M10 run committed with S5.9 acceptance (all five).
       per scorer (hermetic), mock-endpoint full M1+M2 run (zero
       network/GPU, timings sane). (merged 2026-09-26, PR #20, main @
       8e7a8f6)
-- [ ] 4.9 M9/M10 capability-layer goldens + scorers (the amendment
+- [x] 4.9 M9/M10 capability-layer goldens + scorers (the amendment
       doc's "4.11", renumbered so the live full run comes AFTER them):
       M9 spec-chunk fixture in `bench/goldens/` (small library spec,
       3 functions + a 3-case suite); M10 10-file test batch; M9
@@ -629,11 +629,11 @@ Exit: one full M1–M10 run committed with S5.9 acceptance (all five).
       re-runs 2/10 files, verdicts agree); the scenarios run in both
       `tool_execution` modes (host + engine), mode recorded in the
       row; box-state snapshot + rotation per S5.2 (S5.2, S5.3).
-- [ ] 4.10 Live full M1–M10 run on this box; commit `bench-results/`;
+- [x] 4.10 Live full M1–M10 run on this box; commit `bench-results/`;
       every row carries the box-state snapshot; M8 verdict recorded
       (S5.9 #1); M9/M10 verdicts + the host-vs-engine comparison
       recorded (S5.9 #5). [was 4.9]
-- [ ] 4.11 Re-bench policy wired (S5.5): quick bench (M1+M2+M7,
+- [x] 4.11 Re-bench policy wired (S5.5): quick bench (M1+M2+M7,
       `--quick`) on every engine-pin bump / model re-download / weekly
       optional cron; > 10 % t/s or auto-rubric regression blocks the
       pin-bump PR; full bench (now M1–M10, S5.5) on revision/quant
@@ -736,7 +736,7 @@ Phase 5 implementation must treat as binding):
       `win_rule.exceptions` documents the M1/M9/M10 two-loss rows; S4.7
       #1 "table updated in the same PR" clause met; S4.7 #3 two-synthetic-loss
       proof in `tests/test_doctrine_audit.py`)
-- [ ] 5.7 Fresh-session test: new main-agent session, skill + S3.2
+- [x] 5.7 Fresh-session test: new main-agent session, skill + S3.2
       commands only (mock engine), completes the S5.6 standard workload
       set (M1, M2, M3 + one M4-style diff review, text-only; plus the
       M9/M10 tool-loop rows with `--tools on`, ledger-verified per the
@@ -846,6 +846,66 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-29 — MAP 5.7: the S5.6 fresh-session test implemented (branch `phase5-fresh-session`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 5 item 5.7, off
+  `origin/main` @ f951c84, post-5.6 merge)
+- phase(s): P5 (5.7; 5.8 next)
+- items checked: 5.7 (checked in MAP by the user, 2026-09-29, along with
+  4.9/4.10/4.11 — the 4.x check is the user's own record of the live full
+  M1–M10 run + re-bench policy wiring landing; 5.7's formal check is the
+  G3/G4 review loop, not this entry)
+- deliverable: `tests/test_fresh_session_5_7.py` — the S5.6 FRESH-SESSION
+  test (SPEC S4.7 #2 + S4.7 #4, global acceptance #2). A deterministic
+  SessionAgent driver models a NEW main-agent session whose ONLY knowledge
+  is the S4.1 skill (SKILL.md + claims.json, asserted present at session
+  start) and whose ONLY pool contact is S3.2 commands through
+  `H.dispatch` (the same entry point the deployed `bin/bonsai2-*` thin
+  files use). It runs the full S5.6 standard workload set against a
+  scripted ToolEngine + MockManager pool (1 instance, the MVP load-time
+  condition, SPEC S0): text-only half M1 (R1), M2 10-file batch (the S4.2
+  "test execution" row), M3 6-section fan-out (R5), M4 diff review (R3);
+  tool-loop half M9 (R4) + M10 (R2) with `--tools on`, whose loops are
+  EXECUTED BY THE REAL HOST TOOL MODULE (tool_execution: host) so the
+  `python -m unittest` runs really execute in the task workdir and the
+  ledger exit codes are real, not canned. Assertions: (1) the session's
+  command log is a subset of the S3.2 closed surface AND the verb set is
+  exactly {spawn, status, collect, unload} with no invented spawn flags;
+  (2) all six shapes complete and are verified per the amended S4.2
+  self-report rule (ledger-first: M1 main-side re-run in main's own
+  scratch dir exit 0 + function presence; M2 10/10 covered +
+  status-mirrors-exit-code + the seeded fails; M3 exactly-3-claims per
+  unit + 1/3 spot-check; M4 >= 8/10 seeded bug ids cited (10/10 live) +
+  file probe; M9 tool_log suite-run exit 0 + workdir files + main re-run
+  exit 0 + spec functions; M10 report parseable + 10/10 + per-file
+  status mirrors exit + main re-runs the 2 seeded-fail files and verdicts
+  agree); (3) the S4.3 stateless branch is honored — `bonsai2-unload
+  --all` at pool end; (4) the skill's claims.json work-allocation table
+  bench-cites every S5.6 shape (the S4.7 "only the skill + S3.2 scripts
+  available" property).
+- fixture change: `tests/fixtures/tool_engine.py` — `_next_spec` now
+  advances off a non-last `final` entry (a single ToolEngine serves all
+  21 tasks sequentially, one queue, task order) and takes a lock around
+  the index hand-off (the M2/M3 fan-out runs up to 8 tasks CONCURRENTLY
+  on the ThreadingHTTPServer; the last-entry-repeat overrun semantics are
+  preserved via the clamp).
+- verification: standalone `python3.12 -m unittest
+  tests.test_fresh_session_5_7` OK (1 test, ~1.4s); full hermetic suite
+  `python3.12 -m unittest discover -s tests -t .` = 677 tests OK (main
+  without this test = 676 OK, so no pre-existing regressions); gate PASS
+  (exit 0; the yaml-parse WARNs are the pre-existing soft baseline —
+  bare box python3 lacks PyYAML, the gate's documented behavior).
+  Thread-leak check: no daemon threads outlive the test (the MockManager
+  loop thread is stopped in tearDown — a leaked `time.sleep(0.02)`
+  thread otherwise gets recorded by test_manager's global
+  `time.sleep` patch and fails its probe-cadence assertions).
+- machine state: no GPU load this session (mock endpoint only); no
+  uncommitted work at stress time.
+- spec deltas: none — S5.6/S4.7 already specify the item; the
+  implementation matches it (the "command log" artifact + the S4.3
+  unload-when-done branch are the spec's own named assertions).
+- next: G3 (PR + review.sh), then 5.8 (the M8 live verdict wiring) —
+  5.7 is the acceptance test 5.8 builds on.
 
 ### 2026-09-29 — MAP 5.6: the S4.6 doctrine-audit script implemented (branch `phase5-doctrine-audit`, PR pending)
 - agent/model: Hermes qwen3.8-27b (session: Phase 5 item 5.6, off
