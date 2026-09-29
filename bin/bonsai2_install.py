@@ -1134,22 +1134,35 @@ def rollback(
             "error": "state file has no subagent-engine.yaml config block - cannot restore",
         }
     # units: re-render from the restored engine yaml + re-install the
-    # manager unit (the S6.4 unit-diff path)
-    engine_text = (etc / "subagent-engine.yaml").read_text()
-    inst_vals = _block_values(_block_text(engine_text, "instances") or "")
-    img_tag = (
-        _block_scalar(_block_text(engine_text, "image") or "", "tag")
-        or "bonsai2-server:1.0"
-    )
-    model_file = (
-        _block_scalar(_block_text(engine_text, "model") or "", "file")
-        or "bonsai-2-27b-gguf-PQ2_0.gguf"
-    )
-    port_base = int(inst_vals.get("port_base", 30101))
-    n = int(inst_vals.get("count", 0))
-    ctx = int(inst_vals.get("ctx_size", 262144))
-    par = int(inst_vals.get("max_num_seqs", 8))
-    budget = float(inst_vals.get("per_instance_budget_gb", 14.78))
+    # manager unit (the S6.4 unit-diff path). P2 (G3c r4): the restored
+    # blob was written by THIS function's tmp+os.replace path a moment ago,
+    # but a corrupt blob in the state file can still carry an unreadable or
+    # malformed instances block — an unguarded read_text()/int()/float()
+    # would raise OSError/ValueError to main() -> exit 1, outside the S6.3
+    # closed set {0,2,3,4}. Guard the whole parse section with a clean
+    # EXIT_CONFIG.
+    try:
+        engine_text = (etc / "subagent-engine.yaml").read_text()
+        inst_vals = _block_values(_block_text(engine_text, "instances") or "")
+        img_tag = (
+            _block_scalar(_block_text(engine_text, "image") or "", "tag")
+            or "bonsai2-server:1.0"
+        )
+        model_file = (
+            _block_scalar(_block_text(engine_text, "model") or "", "file")
+            or "bonsai-2-27b-gguf-PQ2_0.gguf"
+        )
+        port_base = int(inst_vals.get("port_base", 30101))
+        n = int(inst_vals.get("count", 0))
+        ctx = int(inst_vals.get("ctx_size", 262144))
+        par = int(inst_vals.get("max_num_seqs", 8))
+        budget = float(inst_vals.get("per_instance_budget_gb", 14.78))
+    except (OSError, ValueError) as exc:
+        _log(f"rollback: restored engine yaml unreadable: {exc}")
+        return EXIT_CONFIG, {
+            "status": "error",
+            "error": f"restored engine yaml unreadable: {exc}",
+        }
     kv = _top_scalar_str(engine_text, "kv_cache") or "q4_0"
     alias = _top_scalar_str(engine_text, "alias") or "qwen38-27b-subagent"
     api_key = _top_scalar_str(engine_text, "api_key") or "bonsai2-local"
@@ -1184,18 +1197,44 @@ def rollback(
             _log(f"rollback: removed {u.name}")
     manager_src = seams.repo_root / "units" / "bonsai2-sglang.service"
     (unit_dir / "bonsai2-sglang.service").write_text(manager_src.read_text())
+    warnings: list[str] = []
     rc = seams.sc(scope, "daemon-reload")
     _log(f"rollback: daemon-reload rc={rc}")
-    # P1 (G3c r3): a daemon-reload failure was previously only logged, so a
-    # failed reload followed by a successful restart reported "rolled-back"
-    # with no warning while the manager ran on a partially-reloaded table.
-    warnings: list[str] = []
     if rc != 0:
-        warnings.append(f"WARN_ROLLBACK: daemon-reload rc={rc}")
+        # P1 (G3c r3/r4): a failed daemon-reload was previously only logged,
+        # so a failed reload followed by a successful restart reported
+        # "rolled-back" with no warning. The S6.5 contract is "restores
+        # configs + restarts the manager" — if systemd did not accept the
+        # reloaded unit table, the contract is not met: exit EXIT_CONFIG
+        # (2) with the failure NAMED (the configs stay restored on disk;
+        # re-running the restart after `systemctl daemon-reload` is
+        # idempotent — S6.3 exit table: an install step's ERR_CONFIG maps
+        # to exit 2, same as install()).
+        _log("rollback: daemon-reload failed - configs restored, restart not accepted")
+        return EXIT_CONFIG, {
+            "status": "error",
+            "state": str(state_file),
+            "n": n,
+            "error": f"daemon-reload failed rc={rc} (configs restored, manager not restarted)",
+            "warnings": warnings,
+        }
     rc = seams.sc(scope, "restart", "bonsai2-sglang")
     _log(f"rollback: manager restart rc={rc}")
     if rc != 0:
-        warnings.append(f"WARN_ROLLBACK: manager restart rc={rc}")
+        # P1 (G3c r4): a failed restart was previously exit 0 + warning
+        # only, asymmetric with install() (whose failed restart rc lands in
+        # the report and exits 2). The manager did not restart -> the S6.5
+        # contract is not met -> EXIT_CONFIG with the failure named.
+        _log(
+            "rollback: manager restart failed - configs restored, manager not restarted"
+        )
+        return EXIT_CONFIG, {
+            "status": "error",
+            "state": str(state_file),
+            "n": n,
+            "error": f"manager restart failed rc={rc} (configs restored, manager not restarted)",
+            "warnings": warnings,
+        }
     # P2 (G3c r3): the state records the scope it was written under; rolling
     # back under a DIFFERENT CLI scope rewrites the units into the other
     # systemd tree. Name the mismatch so the operator sees it.

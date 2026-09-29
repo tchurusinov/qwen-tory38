@@ -509,29 +509,75 @@ class TestReviewRound1Fixes(_E2EBase):
         self.assertEqual(report["status"], "error")
         self.assertIn("subagent-engine.yaml", report["error"])
 
-    def test_rollback_daemon_reload_failure_warns(self):
-        """P1 r3 (FIXED): a failed daemon-reload (rc != 0) followed by a
-        successful restart now surfaces a WARN_ROLLBACK warning instead of
-        silently reporting 'rolled-back' on a partially-reloaded table."""
+    def test_rollback_daemon_reload_failure_exits_config(self):
+        """P1 r3/r4 (FIXED): a failed daemon-reload (rc != 0) means the
+        S6.5 contract ("restores configs + restarts the manager") is not
+        met -> EXIT_CONFIG (2) with the failure NAMED, not exit 0
+        'rolled-back' (round 3's exit-0+warning was superseded in round 4
+        when the reviewer flagged the asymmetry with install()'s
+        restart-failure -> exit 2)."""
         s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
         d = self.tmp / "statefiles"
         d.mkdir(parents=True, exist_ok=True)
         state = self._valid_state_with_engine(d, count=1, scope="user")
 
-        # a systemctl that FAILS daemon-reload (rc 5) but SUCCEEDS restart.
-        # Rebind s.sc to the new systemctl: make_seams' s.sc lambda captured
-        # the original FakeSystemd local, so assigning s.systemctl alone would
-        # leave s.sc pointing at the old (always-rc-0) fake.
+        # a systemctl that FAILS daemon-reload (rc 5). Rebind s.sc to the
+        # new systemctl: make_seams' s.sc lambda captured the original
+        # FakeSystemd local, so assigning s.systemctl alone would leave s.sc
+        # pointing at the old (always-rc-0) fake.
         def sysctl(args):
             return 5 if "daemon-reload" in args else 0
 
         s.systemctl = sysctl
         s.sc = lambda scope_, *args: sysctl([str(a) for a in args])
         code, report = inst.rollback(s, state, self.opt, "system")
-        self.assertEqual(code, 0, "still rolled back")
-        joined = " ".join(report["warnings"])
-        self.assertIn("daemon-reload rc=5", joined)
-        self.assertNotIn("restart rc=", joined)  # restart succeeded
+        self.assertEqual(code, 2, "EXIT_CONFIG when daemon-reload fails")
+        self.assertEqual(report["status"], "error")
+        self.assertIn("daemon-reload failed rc=5", report["error"])
+
+    def test_rollback_restart_failure_exits_config(self):
+        """P1 r4 (FIXED): a failed manager restart (rc != 0) now exits
+        EXIT_CONFIG with the failure named (round 3's exit-0 + warning was
+        asymmetric with install()'s restart-failure -> exit 2)."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        state = self._valid_state_with_engine(d, count=1, scope="user")
+
+        def sysctl(args):
+            return 7 if "restart" in args and "bonsai2-sglang" in args else 0
+
+        s.systemctl = sysctl
+        s.sc = lambda scope_, *args: sysctl([str(a) for a in args])
+        code, report = inst.rollback(s, state, self.opt, "system")
+        self.assertEqual(code, 2, "EXIT_CONFIG when the restart fails")
+        self.assertEqual(report["status"], "error")
+        self.assertIn("manager restart failed rc=7", report["error"])
+
+    def test_rollback_malformed_engine_blob_exits_config(self):
+        """P2 r4 (FIXED): a state whose engine blob carries a malformed
+        count (`count: abc`) used to make the int() cast raise ValueError
+        -> exit 1 (outside the S6.3 closed set). Now the parse section is
+        guarded -> clean EXIT_CONFIG."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "state-bad-count.yaml"
+        p.write_text(
+            inst._dump_yaml(
+                {
+                    "timestamp": "t",
+                    "n": 1,
+                    "scope": "user",
+                    "config": {"subagent-engine.yaml": "instances:\n  count: abc\n"},
+                }
+            )
+            + "\n"
+        )
+        code, report = inst.rollback(s, p, self.opt, "system")
+        self.assertEqual(code, 2, "EXIT_CONFIG, not an unhandled exit 1")
+        self.assertEqual(report["status"], "error")
+        self.assertIn("unreadable", report["error"])
 
     def test_rollback_scope_mismatch_warns(self):
         """P2 r3 (FIXED): rolling back under a DIFFERENT scope than the one
