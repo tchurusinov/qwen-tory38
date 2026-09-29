@@ -902,7 +902,14 @@ def check_health(
 
 
 def _doc_eq(a: dict, b: dict) -> bool:
-    """Structural equality of the settled fields (ignores timestamps)."""
+    """Full-document structural equality: `json.dumps(..., sort_keys=True)`
+    on BOTH documents. This is a STRICT equality over every field — the
+    docstring's old "ignores timestamps" claim was wrong (there is no
+    field-exclusion), so the "stable across two polls" check in
+    `check_health` depends on the manager NOT emitting a per-poll
+    timestamp/monotonic counter into health.json (the current S2.7 schema
+    does not; a future one would defeat stability detection — G3c r2 P2
+    note, deferred)."""
     return json.dumps(a, sort_keys=True, default=str) == json.dumps(
         b, sort_keys=True, default=str
     )
@@ -1082,7 +1089,23 @@ def rollback(
     if not state_file.is_file():
         _log(f"rollback: state file missing: {state_file}")
         return EXIT_CONFIG, {"status": "error", "error": "state file missing"}
-    state = _load_yaml_file(state_file)
+    try:
+        state = _load_yaml_file(state_file)
+    except Exception as exc:  # noqa: BLE001 - deliberately broad: a corrupt
+        # state file can surface as a PyYAML YAMLError OR a fallback-parse
+        # failure; both must exit EXIT_CONFIG, not crash with exit 1
+        # (outside the S6.3 closed set {0, 2, 3, 4} - G3c r2 P1).
+        _log(f"rollback: state file unreadable: {exc}")
+        return EXIT_CONFIG, {
+            "status": "error",
+            "error": f"state file unreadable: {exc}",
+        }
+    if not isinstance(state, dict):
+        _log("rollback: state file is empty or not a mapping - nothing to restore")
+        return EXIT_CONFIG, {
+            "status": "error",
+            "error": "state file is empty or not a mapping",
+        }
     cfg = state.get("config") or {}
     etc = opt_root / "etc"
     etc.mkdir(parents=True, exist_ok=True)

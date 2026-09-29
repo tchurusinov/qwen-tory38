@@ -432,6 +432,35 @@ class TestReviewRound1Fixes(_E2EBase):
             inst.subprocess.run = orig
         self.assertAlmostEqual(val, 200 / 1024**3, places=9)
 
+    def test_rollback_corrupt_state_file_exits_config_not_1(self):
+        """P1 r2 (FIXED): a malformed / partially-written state file used
+        to make rollback() raise an unhandled exception (exit 1, outside
+        the S6.3 closed set {0,2,3,4}). Now it returns EXIT_CONFIG (2) with
+        status 'error' + a named reason."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        bad = d / "state-corrupt.yaml"
+        bad.write_text("n: 2\nconfig:\n  serving.yaml: a: b\n")  # PyYAML ScannerError
+        code, report = inst.rollback(s, bad, self.opt, "system")
+        self.assertEqual(code, 2, "EXIT_CONFIG, not an unhandled exit 1")
+        self.assertEqual(report["status"], "error")
+        self.assertIn("unreadable", report["error"])
+
+    def test_rollback_empty_state_file_exits_config(self):
+        """P1 r2 companion: a state file that parses to a NON-mapping
+        (a top-level list, the case `_load_yaml_file` can return) also
+        exits cleanly with EXIT_CONFIG, not a crash on state.get()."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        listy = d / "state-list.yaml"
+        listy.write_text("- just\n- a list\n")
+        code, report = inst.rollback(s, listy, self.opt, "system")
+        self.assertEqual(code, 2)
+        self.assertEqual(report["status"], "error")
+        self.assertIn("not a mapping", report["error"])
+
 
 class TestInstallE2E(_E2EBase):
     """The S6.3 pipeline scenarios (the handoff's 12-scenario suite)."""

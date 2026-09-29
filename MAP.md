@@ -932,6 +932,48 @@ SPEC.md `status` → `active`.
   fed a stale plan (the observed de-hex-er / qwen-tory38 PR #20 pitfall).
 - spec deltas: none — no locked value moved, no SPEC section amended.
 
+### 2026-09-30 — Phase 6: PR #36 G3 review round 2 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 2)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
+  untouched). Branch now carries the round-2 fixes on top of f6956dd.
+- G3 round-2 review (0 P0 / 1 P1 / 3 P2) — builder dispositions:
+  * P1 #1 (rollback unhandled YAML parse exception -> exit 1, outside the
+    S6.3 closed set {0,2,3,4}) — VERIFIED REAL + FIXED. Probe: a state file
+    with a tab-indented mapping (`n: 2\n\tconfig: 1`) makes `yaml.safe_load`
+    raise `yaml.scanner.ScannerError` — a `YAMLError`, NOT caught by
+    `_load_yaml_file`'s `except ImportError`, so it propagated to `main()`
+    -> unhandled exception -> exit 1. Fix: `rollback()` now wraps
+    `_load_yaml_file` in `try/except Exception` -> clean `(EXIT_CONFIG,
+    {"status":"error","error":"state file unreadable: ..."})`; plus a
+    `not isinstance(state, dict)` guard for the top-level-list edge.
+    Pinned by `test_rollback_corrupt_state_file_exits_config_not_1` +
+    `test_rollback_empty_state_file_exits_config`.
+  * P2 #1 (`_doc_eq` docstring claims "ignores timestamps" but is full
+    JSON equality) — FIXED (docstring only): the docstring now states it is
+    STRICT full-document equality and names the dependency (the manager's
+    health.json must not carry a per-poll timestamp or stability detection
+    breaks). No behavior change.
+  * P2 #2 (`refresh_main` does not call `write_state`) — NOTED, deferred to
+    a follow-up (S6.5 "one state per install" is an install contract;
+    refresh is the upgrade procedure, and the follow-up can decide whether
+    refresh should rotate the state).
+  * P2 #3 (install.sh hardcodes /usr/bin/python3) — carried from round 1's
+    P2 #5, still NOTED, deferred to the S6.7 acceptance note.
+- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 36 tests ...
+  OK** (34 from round 1 + 2 round-2 regression tests). Gate
+  `./scripts/gate.sh` → **PASS exit 0** (ruff format+check clean after a
+  noqa on the deliberately-broad `except Exception`; yaml-parse soft-skip as
+  baseline; S4.6 doctrine audit pass).
+- next: G3b round-3 re-review (fresh isolated pi on the new commit) →
+  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
+  0 P1 or round 6, then G4.
+- blockers/intricacies: same as round 1 (~3 min suite; explicit plan file
+  `/tmp/plan-pr36-round3.md` passed to review.sh to dodge the stale
+  `.git/plan.md` pitfall).
+- spec deltas: none.
+
 ### 2026-09-29 — Phase 6: MAP 6.1–6.6 implemented + the S6.3 pipeline E2E suite (branch `phase6-one-command-install`, PR pending)
 - agent/model: Hermes qwen3.8-27b (session: Phase 6, off `origin/main`
   @ 0705670, post-5.8 merge; two sessions deep — the first built
