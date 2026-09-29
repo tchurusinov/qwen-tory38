@@ -461,6 +461,93 @@ class TestReviewRound1Fixes(_E2EBase):
         self.assertEqual(report["status"], "error")
         self.assertIn("not a mapping", report["error"])
 
+    def _valid_state_with_engine(
+        self, d: Path, *, count: int = 1, scope: str = "user"
+    ) -> Path:
+        """A state file whose config block carries a RESTORED engine yaml
+        (the happy-path shape, so rollback proceeds past the P0 guard)."""
+        engine = f"instances:\n  count: {count}\n"
+        p = d / f"state-valid-{count}-{scope}.yaml"
+        p.write_text(
+            inst._dump_yaml(
+                {
+                    "timestamp": "2026-01-01T00:00:00",
+                    "n": count,
+                    "scope": scope,
+                    "config": {"subagent-engine.yaml": engine + "\n"},
+                    "units": ["u"],
+                }
+            )
+            + "\n"
+        )
+        return p
+
+    def test_rollback_state_missing_engine_blob_exits_config(self):
+        """P0 r3 (FIXED): a state whose config block lacks
+        subagent-engine.yaml used to fall through to the STALE on-disk
+        engine, re-render units with the current N, and report exit 0
+        'rolled-back' with an inconsistent N. Now it exits EXIT_CONFIG
+        cleanly, restoring nothing."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        # config block present but no engine key
+        p = d / "state-no-engine.yaml"
+        p.write_text(
+            inst._dump_yaml(
+                {
+                    "timestamp": "t",
+                    "n": 1,
+                    "scope": "user",
+                    "config": {"serving.yaml": "footprint: 1"},
+                }
+            )
+            + "\n"
+        )
+        code, report = inst.rollback(s, p, self.opt, "system")
+        self.assertEqual(code, 2, "EXIT_CONFIG, not exit 0 'rolled-back'")
+        self.assertEqual(report["status"], "error")
+        self.assertIn("subagent-engine.yaml", report["error"])
+
+    def test_rollback_daemon_reload_failure_warns(self):
+        """P1 r3 (FIXED): a failed daemon-reload (rc != 0) followed by a
+        successful restart now surfaces a WARN_ROLLBACK warning instead of
+        silently reporting 'rolled-back' on a partially-reloaded table."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        state = self._valid_state_with_engine(d, count=1, scope="user")
+
+        # a systemctl that FAILS daemon-reload (rc 5) but SUCCEEDS restart.
+        # Rebind s.sc to the new systemctl: make_seams' s.sc lambda captured
+        # the original FakeSystemd local, so assigning s.systemctl alone would
+        # leave s.sc pointing at the old (always-rc-0) fake.
+        def sysctl(args):
+            return 5 if "daemon-reload" in args else 0
+
+        s.systemctl = sysctl
+        s.sc = lambda scope_, *args: sysctl([str(a) for a in args])
+        code, report = inst.rollback(s, state, self.opt, "system")
+        self.assertEqual(code, 0, "still rolled back")
+        joined = " ".join(report["warnings"])
+        self.assertIn("daemon-reload rc=5", joined)
+        self.assertNotIn("restart rc=", joined)  # restart succeeded
+
+    def test_rollback_scope_mismatch_warns(self):
+        """P2 r3 (FIXED): rolling back under a DIFFERENT scope than the one
+        the state was written under rewrites units into the other systemd
+        tree; now a WARN_ROLLBACK_SCOPE_MISMATCH names both scopes."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        state = self._valid_state_with_engine(d, count=1, scope="user")
+        code, report = inst.rollback(s, state, self.opt, "system")  # CLI scope=system
+        self.assertEqual(code, 0)
+        joined = " ".join(report["warnings"])
+        self.assertIn("WARN_ROLLBACK_SCOPE_MISMATCH", joined)
+        self.assertIn("'user'", joined)
+        self.assertIn("'system'", joined)
+
 
 class TestInstallE2E(_E2EBase):
     """The S6.3 pipeline scenarios (the handoff's 12-scenario suite)."""

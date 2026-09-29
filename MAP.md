@@ -932,6 +932,48 @@ SPEC.md `status` → `active`.
   fed a stale plan (the observed de-hex-er / qwen-tory38 PR #20 pitfall).
 - spec deltas: none — no locked value moved, no SPEC section amended.
 
+### 2026-09-30 — Phase 6: PR #36 G3 review round 3 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 3)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
+  untouched). Branch now carries the round-3 fixes on top of 9c93b65.
+- G3 round-3 review (1 P0 / 1 P1 / 1 P2) — all three findings in
+  `rollback()`, all verified real against the diff:
+  * P0 #1 (state's config block missing `subagent-engine.yaml` -> the loop
+    restores nothing, line 1124 reads the STALE on-disk engine, re-renders
+    units with the current N, and reports exit 0 "rolled-back" with an
+    inconsistent N) — VERIFIED REAL + FIXED. Fix: after the restore loop,
+    `if "subagent-engine.yaml" not in cfg:` -> clean
+    `(EXIT_CONFIG, {"status":"error","error":"...no subagent-engine.yaml
+    config block..."}). Pinned by
+    `test_rollback_state_missing_engine_blob_exits_config`.
+  * P1 #1 (daemon-reload rc not checked — a failed reload followed by a
+    successful restart reported "rolled-back" with no warning) — VERIFIED
+    REAL + FIXED. Fix: `warnings: list[str] = []` before the two sc()
+    calls; append `WARN_ROLLBACK: daemon-reload rc=<rc>` when rc != 0, and
+    the existing `WARN_ROLLBACK: manager restart rc=<rc>` when restart
+    rc != 0 (both warnings can fire now). Pinned by
+    `test_rollback_daemon_reload_failure_warns` (asserts the daemon-reload
+    warning fires and the restart warning does NOT, given restart rc=0).
+  * P2 #1 (state's scope not propagated — rolling back under a different
+    CLI scope rewrites units into the other systemd tree) — NOTED +
+    FIXED-as-warning. Fix: if the state's `scope` field is a string and
+    differs from the CLI scope, append
+    `WARN_ROLLBACK_SCOPE_MISMATCH: state was written under scope=<x>,
+    this rollback ran under scope=<y> - units land in the current scope's
+    tree`. Pinned by `test_rollback_scope_mismatch_warns`.
+- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 39 tests ...
+  OK** (36 from round 2 + 3 round-3 regression tests). Gate
+  `./scripts/gate.sh` → **PASS exit 0**.
+- next: G3b round-4 re-review (fresh isolated pi on the new commit) →
+  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
+  0 P1 or round 6, then G4.
+- blockers/intricacies: same as rounds 1-2 (~3 min suite; explicit plan
+  file `/tmp/plan-pr36-round4.md` passed to review.sh to dodge the stale
+  `.git/plan.md` pitfall).
+- spec deltas: none.
+
 ### 2026-09-30 — Phase 6: PR #36 G3 review round 2 reconciled (branch `phase6-one-command-install`)
 - agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 2)
 - phase(s): P6 (the review loop is G3, not a new MAP item)

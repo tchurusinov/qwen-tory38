@@ -1119,6 +1119,20 @@ def rollback(
         tmp.write_text(blob if isinstance(blob, str) else _dump_yaml(blob))
         os.replace(tmp, dst)
         _log(f"rollback: restored {name}")
+    # P0 (G3c r3): the unit/manager re-render below is driven by the RESTORED
+    # engine yaml. If the state's config block lacks subagent-engine.yaml,
+    # NOTHING was restored and (etc/subagent-engine.yaml) is the STALE on-disk
+    # file - falling through would re-render units from the current N and
+    # report "rolled-back" with an inconsistent N. Treat a missing engine
+    # blob as a clean EXIT_CONFIG error.
+    if "subagent-engine.yaml" not in cfg:
+        _log(
+            "rollback: state file has no subagent-engine.yaml config - nothing to restore"
+        )
+        return EXIT_CONFIG, {
+            "status": "error",
+            "error": "state file has no subagent-engine.yaml config block - cannot restore",
+        }
     # units: re-render from the restored engine yaml + re-install the
     # manager unit (the S6.4 unit-diff path)
     engine_text = (etc / "subagent-engine.yaml").read_text()
@@ -1172,9 +1186,26 @@ def rollback(
     (unit_dir / "bonsai2-sglang.service").write_text(manager_src.read_text())
     rc = seams.sc(scope, "daemon-reload")
     _log(f"rollback: daemon-reload rc={rc}")
+    # P1 (G3c r3): a daemon-reload failure was previously only logged, so a
+    # failed reload followed by a successful restart reported "rolled-back"
+    # with no warning while the manager ran on a partially-reloaded table.
+    warnings: list[str] = []
+    if rc != 0:
+        warnings.append(f"WARN_ROLLBACK: daemon-reload rc={rc}")
     rc = seams.sc(scope, "restart", "bonsai2-sglang")
     _log(f"rollback: manager restart rc={rc}")
-    warnings = [] if rc == 0 else [f"WARN_ROLLBACK: manager restart rc={rc}"]
+    if rc != 0:
+        warnings.append(f"WARN_ROLLBACK: manager restart rc={rc}")
+    # P2 (G3c r3): the state records the scope it was written under; rolling
+    # back under a DIFFERENT CLI scope rewrites the units into the other
+    # systemd tree. Name the mismatch so the operator sees it.
+    state_scope = state.get("scope")
+    if isinstance(state_scope, str) and state_scope != scope:
+        warnings.append(
+            f"WARN_ROLLBACK_SCOPE_MISMATCH: state was written under "
+            f"scope={state_scope!r}, this rollback ran under scope={scope!r} "
+            "- units land in the current scope's tree"
+        )
     _log("rollback: manager restarted")
     return EXIT_OK, {
         "status": "rolled-back",
