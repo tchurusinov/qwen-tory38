@@ -1133,6 +1133,34 @@ that loads text skills and can run bash; loaded on demand):
   answer contract (one paragraph: what was done, what was
   verified, what failed, the exact commands run).
 
+- **Recipes (delta, 2026-09-28):** beyond the per-row prompt
+  templates the skill carries a RECIPES section — worked examples for
+  different types of coding work and approaches to coding with
+  subagents, each recipe = task shape + bench citation + filled
+  prompt template + main's verification protocol + observed failure
+  modes + workflow branch to use. Sources: (a) the practical lessons
+  of the 2026-09-27/28 live runs (M1 reasoning-only content, M9
+  workdir-cleanup ordering, M10 report status semantics, main t/s
+  halving under loaded pool, KV growth / pool release), and (b)
+  external research on orchestrator-worker delegation (task
+  boundaries, output contracts, effort scaling — see
+  `docs/phase5-skill-preliminary-analysis-20260928.md` §6 for the
+  source list). A recipe without a bench citation is a review defect
+  (the S4.1 citation rule applies to recipes, not just to the S4.2
+  table).
+
+- **Harness-agnostic form (delta, 2026-09-28):** the skill is
+  harness-AGNOSTIC — it may be used by any agent runtime that loads
+  text skills and can run bash (Hermes, pi, or equivalent), pointed
+  at ANY pool that exposes the S3.2 surface (this box's bonsai2 pool
+  is the reference instance, not the only valid one). Form rule: the
+  box-specific facts (instance count, per-instance budget, calibrated
+  t/s constants, installed vs pre-install layout) live in ONE named
+  "This box" section of the skill; the doctrine, the S3.2 command
+  reference, the recipes, and the verification protocol are written
+  against the S3.2 surface, not against box internals. A different
+  box updates "This box" only.
+
 ### 4.2 Work-allocation table (v1 doctrine — recalibrated by S5, locked
 as the starting point per C-02/C-04)
 
@@ -1187,6 +1215,55 @@ sessions in check, we have limited instances, one sglang engine")
   prompt is the effective path. Cancel is for wrong-shape tasks, not
   impatience.
 
+**Session-economy doctrine from the live runs (delta, 2026-09-28 — the
+user's post-live-run directions, PR #21 comment 1037):**
+
+- **Main t/s halving:** while subagent instances are loaded and busy,
+  the main agent's effective t/s falls to roughly half (observed 30 →
+  15; the M8 bench guardrail measures this). The doctrine: plan the
+  work so the main sends subagents LARGE CLEARLY-PREDEFINED chunks and
+  then works on the next intelligence-critical task (planning,
+  architecture, verification of subagent output) that does not suffer
+  from the reduced t/s. Never do main-side token-heavy generation
+  while the pool is loaded; let the grunts do the grunt work.
+- **Two workflow branches, stateless DEFAULT:** the skill documents two
+  workflow branches, structurally identical (same S3.2 commands, same
+  S4.2 verification protocol), differing only in pool lifecycle:
+  - **Stateless (default):** understand → load (reload if needed) →
+    delegate a bounded, clearly-defined task → collect → UNLOAD →
+    verify at full main t/s → re-load only if more work is needed.
+    No context retention between delegations (a new task is a new
+    spawn, not a steer of the old task). Chosen as default because
+    load is relatively instantaneous (warm boot ~8-15 s; S2.8 reload
+    budget 30 s) and the unload keeps the pool's VRAM free between
+    delegations, which is what restores the main's full t/s.
+  - **Stateful:** load once, keep the instance loaded across related
+    steps; the subagent retains context from previous steps (its KV
+    state persists) and the main steers between steps instead of
+    re-spawning. Costs: the instance's VRAM stays allocated (main t/s
+    stays halved for the whole window) and the task's context grows
+    with each step. Use only for multi-step work where the subagent
+    must remember earlier steps; the default assumption is stateless.
+- **VRAM climb + release:** per-task VRAM climbs during a run as the
+  KV cache fills (observed 100 → 116 GiB box-wide on the 2-instance
+  live run, staying within the per-instance S1.4 budget — the climb
+  is KV growth, not a leak; it stays under the allocation tier by
+  construction). After a task/batch the pool's VRAM does NOT release
+  on its own (observed 117 GiB post-run with instances still loaded):
+  the main's doctrine is to `bonsai2-unload --all` (H13 tier 2) when
+  the pool is done, and the bench's `--release-after` /
+  `--release-between` are the same operation in the bench context.
+  In the stateless branch the unload is part of the normal loop; in
+  the stateful branch it happens at task completion.
+- **Reading the box meters:** high page-cache % (observed ~99 % with
+  main + 2 instances) is the OS reclaimable cache, not a problem —
+  judge headroom by `MemAvailable` / the H12 reclaimable-pool fields,
+  not by cache %. CPU at 4-20 % with GPU at ~96 % is the healthy
+  steady state: decode is GPU/memory-bandwidth-bound on the unified
+  LPDDR5X pool (see the 2026-09-28 analysis §6.4), so squeezing the
+  CPU further does not raise subagent decode t/s; it only speeds
+  prefill, which is already fast here.
+
 **Pool release (S4.2/S4.3 delta, 2026-09-27, H13):** two tiers,
 manager-mediated through the S3.2 closed set (`bin/bonsai2-unload` /
 `bin/bonsai2-reload`; the bench does not touch docker or the instances
@@ -1232,6 +1309,24 @@ quality becomes apparent from task success")
   + prefill_of_tool_results)` — the v1 estimate is 6 steps × (10 s +
   0.3 s), replaced by the M9/M10 measured per-step cost at the first
   full bench.
+
+> Delta (2026-09-28, Phase 5): the 2026-09-28 post-hotfix bench run
+> (commit b2cbe98) measured the constants on this pin — expected:
+> a-priori 29/4800; real: subagent decode 44.7–61.9 t/s single-task no
+> contention (MAP 1.8 @gpu live runs 2026-09-22), 3.7–19.3 t/s per-task
+> under 16-wide contention, tool-loop
+> wall dominated by tool execution (M9 413 s / 5 tool steps = 0.27 effective
+> t/s; M10 108 s / 10 tool steps = 2.33 — "tool steps" = the loop's
+> tool-call executions, which in these runs equal the S3.4 `steps`
+> total-completions count, not the scenario's file/function counts), main idle 8.52 t/s ([M6]); M8's 0.00
+> is a timing artifact — the planning number is the user's observed
+> 30 → 15 halving. The win/lose call therefore uses the
+> contention-adjusted t/s, and `t/s_prefill` stays a-priori (20 %
+> dispatch-side margin) — the first full bench did not measure prefill.
+> The calibrated constants + the `--tools on` term + the win rule live
+> in the skill's cost section (`skills/bonsai2-harness/SKILL.md`,
+> machine-readable copy in `skills/bonsai2-harness/claims.json`, the
+> S4.6 audit input). No locked acceptance number changed.
 - **Win rule:** dispatch iff `dispatch_cost < est_main_time_s(task)`
   (est_main_time_s = the time the same task would take on main,
   including main's own verification of the outcome) AND the task

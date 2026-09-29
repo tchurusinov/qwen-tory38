@@ -644,37 +644,100 @@ Exit: one full M1–M10 run committed with S5.9 acceptance (all five).
 Exit: S4.7 acceptance (all four). Skill is installed for Hermes/pi as
 `bonsai2-harness` (S4.1).
 
-- [ ] 5.1 `SKILL.md` skeleton: frontmatter, when-to-use, command
+Design inputs (2026-09-28, senior-architect preliminary analysis —
+`docs/phase5-skill-preliminary-analysis-20260928.md`, the report the
+Phase 5 implementation must treat as binding):
+- the user's post-live-run directions (PR #21 comment 1037) are baked
+  into SPEC S4.1 (recipes + harness-agnostic form) and S4.3 (main t/s
+  halving; two workflow branches, stateless default; VRAM climb +
+  release; box-meter reading) — see the SPEC delta notes 2026-09-28;
+- the 2026-09-28 re-run's bench rows are the calibration data for the
+  S4.4 t/s constants (contention-adjusted per-task t/s, tool-loop
+  wall-time profile, main-idle 8.52 t/s; M8 0.00 is a measurement
+  artifact — the user's 30→15 observation is the planning number);
+- three known live defects shape the recipes' failure-mode notes:
+  M1 reasoning-only content (H4 landed, rubric seam open), M9
+  workdir-cleanup-before-scoring ordering (H6 — sub-condition (c)
+  systematically unsatisfied live), M10 report status semantics
+  (per-file status must mirror the exit code, not the batch verdict).
+
+- [x] 5.1 `SKILL.md` skeleton: frontmatter, when-to-use, command
       reference = exactly S3.2 (the skill never invents commands) (S4.1),
       + the S4.1 prompt templates (one proven template per S4.2
       tool-loop row: workdir contract, definition of done = test
-      command + expected exit code, final-answer contract).
-- [ ] 5.2 Work-allocation table (S4.2): every row carries a `[M#]`
+      command + expected exit code, final-answer contract)
+      + the harness-agnostic form rule (S4.1 delta 2026-09-28: box-
+      specific facts confined to ONE "This box" section; doctrine /
+      command reference / recipes / verification written against the
+      S3.2 surface only — usable by any runtime that loads text skills
+      + bash, against any pool exposing S3.2). (implemented 2026-09-28
+      on `phase5-harness-skill-design`, PR pending)
+- [x] 5.2 Work-allocation table (S4.2): every row carries a `[M#]`
       citation from the Phase 4 run; self-report rule — amended
       "unverified claim WITH EVIDENCE" (`--tools on` results carry the
       tool_log ledger, S3.1; ledger-first verification: claimed suite
       ran with exit 0, claimed files exist in the workdir, then
       main re-runs the named check); the S4.2 tool-loop rows (spec-chunk
       [M9], test-batch [M10], browser-via-python-tool) included.
-- [ ] 5.3 Session economy (S4.3, incl. the amended steer guidance:
+      (implemented 2026-09-28 on `phase5-harness-skill-design`, PR
+      pending; machine-readable copy in
+      `skills/bonsai2-harness/claims.json`)
+- [x] 5.3 Session economy (S4.3, incl. the amended steer guidance:
       `--tools on` steer injected at the next step boundary; `--tools
-      off` steer advisory for the next attempt) + cost doctrine (S4.4)
-      with the re-benched t/s constants from Phase 4 replacing the
-      a-priori 29/4800 floors (UNCALIBRATED until then, 20% dispatch
-      margin) + the `--tools on` dispatch-cost term (steps_est ×
-      tool duration + prefill of tool results); win rule +
-      two-consecutive-loss flip.
-- [ ] 5.4 Failure doctrine (S4.5): one paragraph per S3.2 exit code.
-- [ ] 5.5 Doctrine audit script: `bench.yaml` scenario rows ↔ S4.2
+      off` steer advisory for the next attempt) + the live-run
+      doctrine (S4.3 delta 2026-09-28: main t/s halving under a
+      loaded pool — plan large clearly-predefined chunks, main works
+      intelligence-critical tasks in the window; TWO WORKFLOW BRANCHES
+      structurally identical, stateless = DEFAULT (spawn → collect →
+      unload → verify at full t/s → re-spawn if needed), stateful =
+      keep loaded + context-retained for multi-step work; VRAM climb
+      = KV growth within the S1.4 tier, release = `bonsai2-unload
+      --all` when the pool is done; box meters: cache % is reclaimable,
+      judge MemAvailable; CPU 4-20 % / GPU ~96 % is the healthy state)
+      + cost doctrine (S4.4) with the re-benched t/s constants from
+      Phase 4 replacing the a-priori 29/4800 floors (UNCALIBRATED
+      until then, 20% dispatch margin) + the `--tools on` dispatch-cost
+      term (steps_est × tool duration + prefill of tool results; the
+      M9/M10 live data: tool execution dominates wall time, not
+      decode) ; win rule + two-consecutive-loss flip. (implemented
+      2026-09-28 on `phase5-harness-skill-design`, PR pending; the S4.4
+      delta note records the a-priori → measured constant swap)
+- [x] 5.4 Failure doctrine (S4.5): one paragraph per S3.2 exit code.
+      (implemented 2026-09-28 on `phase5-harness-skill-design`, PR
+      pending)
+- [x] 5.5 Recipes section (S4.1 delta 2026-09-28; design: analysis
+      report §4): worked examples for different types of coding work /
+      approaches to coding with subagents, derived from (a) the bench +
+      live-run lessons (R1 single-file code-gen [M1] + content-
+      forcing; R2 test batch + report [M10] + per-file status
+      semantics; R3 diff review [M4] + draft→verify; R4 spec-chunk
+      implementation [M9] + the workdir-ordering failure mode; R5
+      fan-out analysis [M3] + spot-check drive; R6 long-context QA
+      [M5] + ctx sizing; R7 saturation fan-out [M7] +
+      contention-adjusted t/s) and (b) the orchestrator-worker
+      research findings (task boundaries, output contracts, effort
+      scaling — source list: report §9). Each recipe = task shape +
+      bench citation + filled prompt template + verification
+      protocol + failure modes + workflow branch; a recipe without a
+      bench citation is a review defect (S4.1). Note: R7's [M7] citation
+      is for the *load/concurrency* shape (saturation), not the per-unit
+      *template* shape — R7 runs R5-style (text-only, M3-class) or
+      R2-style (tool loop, M10-class) units; the 5.6 audit must not
+      require M7 to validate the R2-style sub-case. (implemented
+      2026-09-28
+      on `phase5-harness-skill-design`, PR pending; recipe citations
+      in `skills/bonsai2-harness/claims.json`)
+- [ ] 5.6 Doctrine audit script: `bench.yaml` scenario rows ↔ S4.2
       citations + win/lose recompute → `doctrine-audit.json`; failing
-      audit blocks the skill PR (S4.6).
-- [ ] 5.6 Fresh-session test: new main-agent session, skill + S3.2
+      audit blocks the skill PR (S4.6). Audit scope includes the
+      recipes section's citations (S4.1 delta 2026-09-28).
+- [ ] 5.7 Fresh-session test: new main-agent session, skill + S3.2
       commands only (mock engine), completes the S5.6 standard workload
       set (M1, M2, M3 + one M4-style diff review, text-only; plus the
       M9/M10 tool-loop rows with `--tools on`, ledger-verified per the
       amended S4.2 self-report rule — S5.6/S4.7 #4); command log ⊆
       S3.2, all results verified per S4.2 (S4.6, S5.6).
-- [ ] 5.7 S4.7 acceptance: audit passes (citations exist, win/lose
+- [ ] 5.8 S4.7 acceptance: audit passes (citations exist, win/lose
       recomputed or table updated in same PR); fresh-session workload
       complete; two synthetic loss scenarios → audit flags the stale
       row; tool-loop doctrine — the S4.2 tool-loop rows (M9/M10-cited)
@@ -778,6 +841,84 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-28 — MAP 5.1–5.5: the `bonsai2-harness` skill implemented (branch `phase5-harness-skill-design`, PR pending)
+- agent/model: Hermes qwen3.8-27b (session: Phase 5 implementation on
+  the existing `phase5-harness-skill-design` branch, off the
+  preliminary-analysis commit fe109c8)
+- phase(s): P5 (5.1–5.5; 5.6–5.8 next)
+- items checked: 5.1, 5.2, 5.3, 5.4, 5.5 (checked with the
+  "implemented … PR pending" note — the formal check is the G3/G4
+  review loop, not this entry)
+- machine state: no /opt/bonsai2 install (Phase 6); no GPU load this
+  session (docs + JSON only); the 2026-09-28 post-hotfix bench rows
+  (bench-results/, commit b2cbe98) are the calibration data transcribed
+  into the skill's "This box" + cost sections.
+- next: 5.6 (doctrine audit script — reads
+  `skills/bonsai2-harness/claims.json` + `etc/bench.yaml` +
+  bench-results rows; emits `doctrine-audit.json`, exit 0/1; failing
+  audit blocks the skill PR). The audit script should also verify the
+  SKILL.md citations against claims.json (single source of truth =
+  claims.json; SKILL.md prose is reviewed against it).
+- blockers/intricacies: (1) M1's two consecutive bench-confirmed losses
+  are engine-format losses (the [M6] control shows main fails the M1
+  shape too) — the skill documents the nuance in the win-rule section
+  rather than flipping the row; the rubric seam stays the bench's job.
+  (2) T3 (browser-via-python) has no S5.2 row yet — template marked
+  provisional in claims.json + the SKILL.md; the citation rule applies
+  when it is benched. (3) t/s_prefill stays a-priori (4800, 20 %
+  dispatch-side margin) — the first full bench did not measure prefill.
+- spec deltas: SPEC.md S4.4 delta note (2026-09-28, Phase 5): the
+  a-priori 29/4800 floor is replaced where the post-hotfix run measured
+  (contention-adjusted decode, tool-loop wall profile, main idle 8.52;
+  M8 0.00 = timing artifact, planning number = halved). No locked
+  acceptance number changed.
+
+### 2026-09-28 — Phase 5 preliminary analysis + user directions baked into SPEC/MAP (branch `phase5-harness-skill-design`)
+- agent/model: Hermes qwen3.8-27b (session: senior-architect
+  preliminary analysis for the Phase 5 skill, on a fresh branch
+  `phase5-harness-skill-design` cut from origin/main @ 283b200; the
+  parallel session on main was left untouched — main was clean at cut
+  time and stayed clean)
+- phase(s): P5 (design/analysis only; no implementation yet)
+- items checked: none (frontier is 5.1; this session produced the
+  design inputs + the SPEC/MAP amendments that 5.1-5.8 implement)
+- machine state: no /opt/bonsai2 install (Phase 6); no GPU load this
+  session; the 2026-09-28 post-hotfix bench rows (bench-results/, PR
+  #23) are the calibration data for S4.4; branch
+  `phase5-harness-skill-design` carries: this analysis report
+  (`docs/phase5-skill-preliminary-analysis-20260928.md`), the SPEC
+  S4.1/S4.3 deltas, and this MAP Phase 5 rewrite.
+- next: 5.1 (write the SKILL.md skeleton for `bonsai2-harness` per the
+  amended Phase 5 items; the analysis report §4 is the recipes design,
+  §5 is the harness-agnostic treatment, §3.4 is the live-run doctrine,
+  §2 is the calibrated-constants source). Before 5.1, decide the open
+  questions in the report §8 (M1 content-forcing = recipe-level or
+  rubric-level; M8 timing artifact = bench hotfix or doctrine note;
+  stateful-branch trigger criteria).
+- blockers/intricacies: (1) M9 workdir-cleanup ordering (H6 rmtree in
+  the driver's `finally` runs BEFORE the M9 scorer's workdir check →
+  sub-condition (c) `n_present: 0` systematically in live runs; the
+  recipe R4 verification protocol makes main's own-copy re-run the
+  authoritative check, but the bench-side ordering fix is a Phase 4
+  hotfix candidate, not a skill concern). (2) M10 report status
+  semantics (per-file `status` must mirror the exit code; the live
+  report had `claimed: None` for the spot files → 0/2 agreement). (3)
+  M8 0.00 t/s is a measurement artifact (the main's completions queued
+  behind subagent decodes on the shared engine in the timing window);
+  the user's 30→15 observation is the planning number. (4) The 2026-09-28
+  M3 row: spot-check seam driven by hand (`--spotcheck 1.00` re-run
+  row); a fresh-session test must drive the same seam.
+- spec deltas: SPEC.md amended this session — S4.1 (Recipes delta +
+  Harness-agnostic form delta, both 2026-09-28, citing PR #21 comment
+  1037 + the analysis report) + S4.3 (session-economy doctrine from the
+  live runs: main t/s halving; two workflow branches stateless-default
+  / stateful; VRAM climb + release; box-meter reading). No locked
+  acceptance numbers changed; the deltas are new doctrine + form
+  rules. MAP Phase 5: 5.1-5.4 rewritten to carry the amendments; new
+  item 5.5 (recipes section); old 5.5/5.6/5.7 → 5.6/5.7/5.8; the
+  design-inputs block at the top of the Phase 5 section names the
+  analysis report as binding.
 
 ### 2026-09-27 — Post-live-run hotfixes H1–H13 implemented on PR #22 (branch `hotfix-post-live-run-plan`)
 - agent/model: Hermes qwen3.8-27b (session: hotfix implementation on the
