@@ -883,6 +883,55 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 --->
 
+### 2026-09-30 — Phase 6: PR #36 G3 review round 1 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 1)
+- phase(s): P6 (6.1–6.6; the review loop is G3, not a new MAP item)
+- items checked: none new (the review dispositions land on the branch;
+  6.1–6.6 stay checked)
+- machine state: no /opt/bonsai2 install yet (unchanged); main stack
+  live at :30001 untouched. Branch `phase6-one-command-install` now
+  carries the round-1 fixes on top of the original 81d38bb commit.
+- G3 round-1 review (0 P0 / 2 P1 / 5 P2) — builder dispositions:
+  * P1 #1 (rollback `Seams` instance vs class methods) — WAIVED
+    (false positive): `sc`/`unit_dir` are plain INSTANCE methods
+    (`def sc(self, ...)`), so `seams.sc(...)` on a bare `Seams()` works.
+    The reviewer was misled by the surrounding `staticmethod` entries.
+    Pinned by `TestReviewRound1Fixes.test_rollback_on_bare_seams_instance`.
+  * P1 #2 (image digest prefix/empty) — FIXED: added `_as_sha256()` to
+    guarantee the `sha256:<64-hex>` form; applied at both digest-assignment
+    sites; the human report now renders "unpinned (no digest recorded)"
+    for the empty case. Pinned by `test_as_sha256_normalizes_forms` +
+    `test_report_renders_unpinned_digest_gracefully`.
+  * P2 #1 (check_health full without settling warning on N grow/shrink)
+    — FIXED: a settled healthy doc whose count differs from expected_n
+    now returns a `WARN_HEALTH_SETTLING` warning naming both counts.
+    Pinned by `test_check_health_full_names_count_mismatch`.
+  * P2 #2 (state written on timeout) — NOTED, deferred to a follow-up
+    (the state file records a consistent config+units snapshot regardless).
+  * P2 #3 (df -B1 decimal vs GiB convention) — FIXED: the disk floor now
+    uses the box-wide GiB (1024**3) convention, so MIN_DISK_FREE_GB=20.0
+    means 20 GiB. Pinned by `test_df_free_gb_uses_gib_convention`.
+  * P2 #4 (fallback parser units-block not exercised through
+    `_load_yaml_file`) — FIXED (test coverage): added
+    `test_load_yaml_file_fallback_path_covers_units` which forces the
+    ImportError branch under a PyYAML-present box python.
+  * P2 #5 (install.sh hardcodes /usr/bin/python3) — NOTED, deferred to a
+    follow-up note in the S6.7 acceptance.
+- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 34 tests ...
+  OK** (28 baseline + 5 round-1-fix regression tests + 1 fallback-path
+  test). Gate `./scripts/gate.sh` → **PASS exit 0** (ruff format+check
+  clean, secret scan clean, yaml-parse soft-skip as baseline, S4.6
+  doctrine audit pass).
+- next: G3b round-2 re-review (fresh isolated pi on the new commit) →
+  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
+  0 P1 or round 6, then G4.
+- blockers/intricacies: the hermetic suite takes ~3 min (180 s of that is
+  one real-clock timeout-path poll, scenario 8). The `.git/plan.md` still
+  names Phase 5.8 (the previous PR) — round-2 review.sh is passed an
+  explicit plan file `/tmp/plan-pr36-round2.md` so the reviewer is not
+  fed a stale plan (the observed de-hex-er / qwen-tory38 PR #20 pitfall).
+- spec deltas: none — no locked value moved, no SPEC section amended.
+
 ### 2026-09-29 — Phase 6: MAP 6.1–6.6 implemented + the S6.3 pipeline E2E suite (branch `phase6-one-command-install`, PR pending)
 - agent/model: Hermes qwen3.8-27b (session: Phase 6, off `origin/main`
   @ 0705670, post-5.8 merge; two sessions deep — the first built

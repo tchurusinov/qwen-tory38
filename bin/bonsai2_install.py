@@ -185,7 +185,10 @@ def _df_free_gb_real(path: str = "/opt") -> float:
     if r.returncode != 0:
         return 0.0
     fields = r.stdout.splitlines()[-1].split()
-    return int(fields[3]) / 1e9 if len(fields) >= 4 else 0.0
+    # 1024**3 = GiB, the box-wide memory convention (S1.4 pool, the S6.2
+    # matrix) — so MIN_DISK_FREE_GB=20.0 means 20 GiB of free space, not
+    # 20 decimal GB. (df -B1 reports 1-byte blocks; fields[3] = available.)
+    return int(fields[3]) / 1024**3 if len(fields) >= 4 else 0.0
 
 
 def _mem_total_bytes_real() -> float:
@@ -329,6 +332,23 @@ class Seams:
         S2.2 unit shape this box runs; the documented @gpu convention)."""
         prefix = [] if scope == "system" else ["--user"]
         return self.systemctl(prefix + list(args))
+
+
+def _as_sha256(value: str) -> str:
+    """Guarantee the `sha256:<64-hex>` form the S1.6 image pin uses, for the
+    stack-ready report slice and the re-rendered engine YAML. Every reachable
+    source already carries the prefix (the tracked template pin, the local
+    `docker inspect` id, the builder's normalize_digest); this is the explicit
+    guarantee the report slice + the pin write rely on. A bare 64-hex digest
+    gets the prefix; an empty value stays empty (never fabricate a digest)."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.lower().startswith("sha256:"):
+        return v
+    if re.fullmatch(r"[0-9a-fA-F]{64}", v):
+        return f"sha256:{v.lower()}"
+    return v
 
 
 # ---------------------------------------------------------------------------
@@ -829,7 +849,19 @@ def check_health(
                 # polling until the budget
             elif stack == "healthy" and all(s == "healthy" for s in states):
                 _log(f"health: {n_running} instances healthy, stack settled")
-                return "full", doc, []
+                hwarn: list[str] = []
+                if n_running != expected_n:
+                    # the healthy document carries a DIFFERENT count than
+                    # expected_n: a re-install moved N (grew 2->3, or shrank)
+                    # and the manager's next rewrite has not landed yet. The
+                    # running set is what the box actually serves; name both
+                    # counts so the S6.3 report is explicit (S6.4/S6.3 step 8).
+                    hwarn.append(
+                        f"WARN_HEALTH_SETTLING: the settled document runs "
+                        f"{n_running} instance(s) but this install expects "
+                        f"{expected_n} - the manager will re-converge the pool"
+                    )
+                return "full", doc, hwarn
             elif stable:
                 # unchanged across two polls and not all-healthy: a
                 # settled partial (the S1.4 allocation-tier shortfall)
@@ -1369,7 +1401,7 @@ def install(
     pinned = (img_sha_rec or "").lower().replace("sha256:", "")
     local_norm = (local_id or "").lower().replace("sha256:", "")
     image_action = "skipped (digest match)"
-    image_digest = f"sha256:{local_norm}" if local_norm else img_sha_rec
+    image_digest = _as_sha256(f"sha256:{local_norm}" if local_norm else img_sha_rec)
     if local_norm and pinned and local_norm == pinned:
         _log(f"image: {img_tag} present, digest match - skip (S6.4)")
     else:
@@ -1418,7 +1450,7 @@ def install(
             img_sha_new = (
                 _block_scalar(_block_text(eng_text, "image") or "", "sha256") or ""
             )
-            image_digest = img_sha_new or image_digest
+            image_digest = _as_sha256(img_sha_new or image_digest)
             image_action = "built (digest re-recorded)"
             _log(f"image: {image_action} at {image_digest[:24]}...")
 
@@ -1799,7 +1831,13 @@ def _print_report_human(report: dict) -> None:
             f"i={e['i']}:{e['port']}({e['state']})" for e in report["instances"]
         ),
         f"  main          : {report['main']['endpoint']} (footprint {report['main']['footprint_gb']} GB via {report['main']['detected_by']})",
-        f"  image         : {report['image']['tag']} @ {report['image']['digest'][:24]}... [{report['image']['action']}]",
+        f"  image         : {report['image']['tag']} @ "
+        + (
+            f"{report['image']['digest'][:24]}..."
+            if report["image"]["digest"]
+            else "unpinned (no digest recorded)"
+        )
+        + f" [{report['image']['action']}]",
         f"  config        : {'; '.join(report['config']['actions']) or '-'}",
         f"  units         : {'; '.join(report['units']['actions']) or '-'}",
         f"  scope         : {report['scope']}",

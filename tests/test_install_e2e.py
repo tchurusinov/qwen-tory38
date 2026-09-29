@@ -30,6 +30,7 @@ Run: `python3 -m unittest tests.test_install_e2e` from the repo root.
 
 import contextlib
 import importlib.util
+import io
 import json
 import re
 import sys
@@ -315,6 +316,121 @@ class TestPrereqs(_E2EBase):
         joined = " ".join(report["warnings"])
         self.assertIn("WARN_MEMORY_BELOW_MATRIX", joined)
         self.assertIn("WARN_OS_VERSION", joined)
+
+
+class TestReviewRound1Fixes(_E2EBase):
+    """Regression tests for the G3c round-1 disposition (PR #36, 2026-09-30).
+    One test pins each fixed finding so a later re-review cannot re-flag it."""
+
+    def test_rollback_on_bare_seams_instance(self):
+        """P1 r1 (WAIVED-false-positive, pinned): rollback() calls
+        seams.sc(...) / seams.unit_dir(...) as INSTANCE methods on a real
+        Seams instance. make_seams masked the (non-)bug by assigning a
+        bound s.sc lambda; the REAL CLI path is a bare Seams(). Drive
+        rollback() with an un-patched instance: no AttributeError, and
+        sc() reaches the (faked) systemctl."""
+        s1, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        _write_health(self.run_dir, _full_doc(1))
+        code, _ = self.install(s1, instances=1)
+        self.assertEqual(code, 0)
+        state_a = self.state_files()[0]
+
+        s_bare = inst.Seams()  # the un-patched real instance
+        calls: list[list[str]] = []
+        s_bare.systemctl = lambda args: (calls.append(list(args)), 0)[1]
+        s_bare.system_unit_dir = self.tmp / "units-bare"
+        code, report = inst.rollback(s_bare, state_a, self.opt, "system")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "rolled-back")
+        self.assertTrue(
+            any("daemon-reload" in c for c in calls), "seams.sc reached systemctl"
+        )
+        self.assertTrue(any("restart" in c and "bonsai2-sglang" in c for c in calls))
+
+    def test_as_sha256_normalizes_forms(self):
+        """P1 r2 (FIXED): _as_sha256 guarantees the sha256: prefix the
+        report slice + the pin write rely on. Empty stays empty; a bare
+        64-hex digest gets the prefix; an already-prefixed digest is
+        unchanged."""
+        bare64 = "6b4cd79f492d12ed72661022d8803fe91cf2bc94fb0963b05a6bdafac969ea53"
+        self.assertEqual(inst._as_sha256(""), "")
+        self.assertEqual(inst._as_sha256(f"sha256:{bare64}"), f"sha256:{bare64}")
+        self.assertEqual(inst._as_sha256(bare64), f"sha256:{bare64}")
+
+    def test_report_renders_unpinned_digest_gracefully(self):
+        """P1 r2 (FIXED): the human report render must not crash or show a
+        bare '@ ...' when the image digest is empty (a no-local-image
+        first install with an unpinned template)."""
+        report = {
+            "status": "stack-ready",
+            "n_instances": 1,
+            "n_auto": 1,
+            "n_override": None,
+            "budget_gb_remaining": 0.0,
+            "instances": [{"i": 0, "port": 30101, "state": "planned"}],
+            "main": {
+                "endpoint": "http://localhost:30001",
+                "footprint_gb": 69.52,
+                "detected_by": "sglang log",
+            },
+            "image": {"tag": "bonsai2-server:1.0", "digest": "", "action": "skipped"},
+            "model": {"action": "verified"},
+            "config": {"actions": ["unchanged"]},
+            "units": {"actions": []},
+            "health": {},
+            "warnings": [],
+            "commands": {"status": "bonsai2-status"},
+            "config_paths": ["/opt/bonsai2/etc/subagent-engine.yaml"],
+            "scope": "system",
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out):
+            inst._print_report_human(report)
+        self.assertIn("unpinned (no digest recorded)", out.getvalue())
+
+    def test_check_health_full_names_count_mismatch(self):
+        """P2 r1 (FIXED): a settled HEALTHY document whose instance count
+        differs from expected_n (a re-install moved N, the manager has not
+        re-converged yet) still returns 'full', but the warning names both
+        counts so the S6.3 report is explicit."""
+        d = self.run_dir
+        d.mkdir(parents=True, exist_ok=True)
+        doc = {
+            "stack": "healthy",
+            "instances": [{"i": 0, "port": 30101, "state": "healthy"}],
+            "main_healthy": True,
+        }
+        (d / "health.json").write_text(json.dumps(doc))
+        outcome, _doc, warns = inst.check_health(
+            health_dir=d,
+            expected_n=3,
+            main_url="http://localhost:30001",
+            main_probe_path="/v1/models",
+            main_probe=lambda *a, **k: True,
+            sleep=lambda s: None,
+        )
+        self.assertEqual(outcome, "full")
+        joined = " ".join(warns)
+        self.assertIn("WARN_HEALTH_SETTLING", joined)
+        self.assertIn("1", joined)  # the running count
+        self.assertIn("3", joined)  # the expected count
+
+    def test_df_free_gb_uses_gib_convention(self):
+        """P2 r3 (FIXED): the disk floor uses the box-wide GiB (1024**3)
+        convention (S1.4 pool, the S6.2 matrix), not 1e9 decimal GB —
+        otherwise MIN_DISK_FREE_GB=20.0 would mean 18.63 GiB."""
+
+        class _R:
+            returncode = 0
+            stdout = "Filesystem 1B-blocks Used Avail Use% Mounted\n /dev/x 100 100 200 10% /opt\n"
+
+        orig = inst.subprocess.run
+        inst.subprocess.run = lambda *a, **k: _R()
+        try:
+            val = inst._df_free_gb_real("/opt")  # fields[3] = 200 bytes
+        finally:
+            inst.subprocess.run = orig
+        self.assertAlmostEqual(val, 200 / 1024**3, places=9)
 
 
 class TestInstallE2E(_E2EBase):
@@ -681,6 +797,18 @@ class TestCliWiring(_E2EBase):
         self.assertTrue(re.search(r"count: 1", self.engine_on_disk()))
 
 
+class _ImportBlocked:
+    """A sys.modules placeholder that makes `import yaml` raise
+    ImportError, forcing `_load_yaml_file` onto its stdlib fallback even
+    under the box python (where PyYAML is present)."""
+
+    def __init__(self):
+        self.name = "yaml"
+
+    def __getattr__(self, item):
+        raise ImportError("blocked for the S6.7 bare-box-python3 path")
+
+
 class TestStateRoundTrip(unittest.TestCase):
     """S6.5 state files must round-trip through BOTH readers: PyYAML when
     present and the stdlib fallback when it is not (the rollback path
@@ -737,6 +865,35 @@ class TestStateRoundTrip(unittest.TestCase):
             self.assertEqual(loaded["n"], 2)
             self.assertEqual(loaded["config"]["serving.yaml"], "footprint: 69.52")
             self.assertEqual(loaded["units"], state["units"])
+
+    def test_load_yaml_file_fallback_path_covers_units(self):
+        """P2 (review r1): the `_load_yaml_file` fallback path is only
+        reached when PyYAML is absent. Force the ImportError branch under
+        a PyYAML-present box python so the multi-line block-scalar `units`
+        list — the case most likely to diverge between the two readers —
+        is exercised through the ACTUAL file-load path that `rollback`
+        uses, not just the direct `_parse_state_yaml` call."""
+        import tempfile
+
+        state = self._state_like()
+        text = inst._dump_yaml(state) + "\n"
+        real_yaml = sys.modules.get("yaml")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "state-yaml-absent.yaml"
+            p.write_text(text)
+            sys.modules["yaml"] = _ImportBlocked()
+            try:
+                loaded = inst._load_yaml_file(p)  # hits the stdlib fallback
+            finally:
+                if real_yaml is not None:
+                    sys.modules["yaml"] = real_yaml
+                else:
+                    sys.modules.pop("yaml", None)
+            self.assertEqual(
+                loaded["units"], state["units"], "fallback read the units list"
+            )
+            self.assertIsNone(loaded["n_override"], "null round-trips to None")
+            self.assertEqual(loaded["config"]["serving.yaml"], "footprint: 69.52")
 
 
 if __name__ == "__main__":
