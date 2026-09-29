@@ -53,6 +53,23 @@
   "win_rule": {
     "dispatch_iff": "dispatch_cost < est_main_time_s(task) (est includes main's own verification; use main-t/s-halved while the pool is loaded) AND the task matches a bench-confirmed S4.2 row",
     "flip": "two consecutive bench-confirmed losses on a task shape flip that row to main until re-benched",
-    "m1_nuance": "M1 failed twice (pre-run + post-run) but the M6 control shows main fails the M1 shape too — the loss is engine-format (reasoning-only content at the pin), not an allocation loss; the row stays subagent with the content-forcing recipe until the rubric seam is closed and re-benched"
+    "m1_nuance": "M1 failed twice (pre-run + post-run) but the M6 control shows main fails the M1 shape too — the loss is engine-format (reasoning-only content at the pin), not an allocation loss; the row stays subagent with the content-forcing recipe until the rubric seam is closed and re-benched",
+    "exceptions": [
+      {
+        "scenario": "M1",
+        "shape": "Single-file code-gen chunk (new function / test file / boilerplate)",
+        "reason": "engine-format loss, not an allocation loss: the pin's deepseek reasoning format lands the whole answer in reasoning_content (1 content token) so the strict rubric sees 0/3 artifacts — but the M6 main-only control fails the SAME shape (per_shape.M1 = false, 2026-09-28 run), so main does not win this shape either. The content-forcing mitigation (H4 prompt + recipe R1 \"Do NOT use reasoning\") is recipe-level; the rubric seam (scoring reasoning_content when content is empty) is the bench's job. Stays subagent until the seam is closed and re-benched. Supersedes m1_nuance (kept for the pre-exception history)."
+      },
+      {
+        "scenario": "M9",
+        "shape": "Spec-chunk implementation (bounded, self-contained, with a test suite to run)",
+        "reason": "capability-layer proven, rubric seam open: BOTH subagent-side sub-conditions pass live (main-side re-run exit 0 + tool_log shows the suite run with exit 0); the 3rd (spec functions present in the workdir) fails systematically on the 2026-09-28 host+engine rows due to the driver's workdir-cleanup-ordering defect (H6: the driver rmtree's the workdir before the M9 scorer's file check — MAP 4.9 note). The loop works; the rubric measures an artifact the driver deletes. Stays subagent --tools on until the ordering hotfix lands and the M9 row is re-benched (the main's own-copy re-run is the authoritative check per recipe R4 in the meantime)."
+      },
+      {
+        "scenario": "M10",
+        "shape": "Test execution batch with a report (run N tests, structure the results)",
+        "reason": "mechanics proven, report-status semantics open: the batch ran correctly (10/10 files covered, exit codes in the ledger) but the report's per-file status did not mirror the exit code (0/2 spot verdicts agree on the 2026-09-28 host+engine rows) — a status-SEMANTICS defect in the subagent's report, which recipe R2 now pins (\"status must reflect the ACTUAL exit code, not the batch verdict\"). Stays subagent --tools on until the pinned report schema is re-benched."
+      }
+    ]
   }
 }

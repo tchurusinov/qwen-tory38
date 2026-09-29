@@ -1365,7 +1365,12 @@ quality becomes apparent from task success")
   the allocation (the audit is a script: `bench.yaml` scenario rows ↔
   S4.2 table, citation check +
   win/lose recompute → a `doctrine-audit.json`; a failing audit blocks
-  the skill PR).
+  the skill PR). (implemented 2026-09-29 on `phase5-doctrine-audit`,
+  PR pending — `bench/doctrine_audit.py` + `scripts/gate.sh` step 6;
+  the win/lose recompute reads the S5.2 run rows' consecutive losses
+  and the `claims.json` `win_rule.exceptions` (M1/M9/M10 two-loss rows
+  documented, S4.7 #1 "table updated in the same PR" clause); S4.7 #3's
+  two-synthetic-loss proof is a live CLI run in the audit's tests.)
 - **Fresh-session test:** a new main-agent session in any agent runtime
   that loads the S4.1 skill (pi, Hermes, or equivalent — fresh
   session, only the skill + S3.2 scripts available, mock engine) must

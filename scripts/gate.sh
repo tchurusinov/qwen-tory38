@@ -19,6 +19,9 @@
 #      too, so the tripwire and the formal gate run the same lint contract)
 #   4) secret scan on the PR diff (gitleaks substitute)
 #   5) yaml parse every tracked .yaml/.yml
+#   6) S4.6 doctrine audit (bench/doctrine_audit.py check — MAP 5.6; the
+#      skill's claims.json must stay in sync with the bench; a failing
+#      audit blocks the skill PR)
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -107,6 +110,24 @@ for f in "${YAMLFILES[@]}"; do
     echo "  WARN  $f (yaml parse):"; sed 's/^/    /' /tmp/gate-yaml-err.txt
   fi
 done
+
+# 6) S4.6 doctrine audit (MAP 5.6) — the skill's doctrine claims
+#    (skills/bonsai2-harness/claims.json: the S4.2 table + recipes + prompt
+#    templates) must stay in sync with the bench: every [M#] citation names
+#    a bench.yaml scenario, and no subagent-side row has >= 2 consecutive
+#    bench losses without a documented win_rule exception. A failing audit
+#    blocks the skill PR (S4.6 "a failing audit blocks the skill PR").
+#    Runs on the bare box python3 (no PyYAML needed: the module has a
+#    stdlib fallback for the template's flow-sequence scenarios line).
+echo "[gate] S4.6 doctrine audit (bench/doctrine_audit.py check)"
+if python3 bench/doctrine_audit.py check > /tmp/gate-doctrine-audit.txt 2>&1; then
+  echo "  ok    $(cat /tmp/gate-doctrine-audit.txt)"
+else
+  rc=$?
+  echo "  FAIL  doctrine audit (exit $rc — S4.6: a failing audit blocks the skill PR):"
+  sed 's/^/    /' /tmp/gate-doctrine-audit.txt
+  FAIL=1
+fi
 
 if [ $FAIL -eq 0 ]; then
   echo "[gate] PASS"

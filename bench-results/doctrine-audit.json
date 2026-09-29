@@ -1,0 +1,336 @@
+{
+  "generated_ts": "2026-09-29T08:52:00Z",
+  "bench_yaml": "etc/bench.yaml",
+  "claims": "skills/bonsai2-harness/claims.json",
+  "results_dir": "bench-results",
+  "spec_ref": "S4.6 (MAP 5.6)",
+  "bench_yaml_scenarios": [
+    "M1",
+    "M10",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "M6",
+    "M7",
+    "M8",
+    "M9"
+  ],
+  "flip_loss_threshold": 2,
+  "rows_checked": {
+    "M1": {
+      "n_rows": 2,
+      "latest_verdict": "fail",
+      "consecutive_losses": 2
+    },
+    "M10": {
+      "n_rows": 2,
+      "latest_verdict": "fail",
+      "consecutive_losses": 2
+    },
+    "M2": {
+      "n_rows": 2,
+      "latest_verdict": "pass",
+      "consecutive_losses": 0
+    },
+    "M3": {
+      "n_rows": 3,
+      "latest_verdict": "pass",
+      "consecutive_losses": 0
+    },
+    "M4": {
+      "n_rows": 2,
+      "latest_verdict": "pass",
+      "consecutive_losses": 0
+    },
+    "M5": {
+      "n_rows": 2,
+      "latest_verdict": "pass",
+      "consecutive_losses": 0
+    },
+    "M6": {
+      "n_rows": 2,
+      "latest_verdict": "fail",
+      "consecutive_losses": 2
+    },
+    "M7": {
+      "n_rows": 2,
+      "latest_verdict": "pass",
+      "consecutive_losses": 0
+    },
+    "M8": {
+      "n_rows": 1,
+      "latest_verdict": "fail",
+      "consecutive_losses": 1
+    },
+    "M9": {
+      "n_rows": 2,
+      "latest_verdict": "fail",
+      "consecutive_losses": 2
+    }
+  },
+  "work_allocation": [
+    {
+      "task_shape": "Multi-step plan / architecture / cross-file refactor coherence",
+      "allocation": "main",
+      "bench": null,
+      "citation_exists": null,
+      "latest_verdict": null,
+      "n_rows": 0,
+      "consecutive_losses": 0,
+      "is_subagent_side": false,
+      "documented_exception": false,
+      "status": "no-citation",
+      "reason": "no [M#] citation (main by construction / provisional)"
+    },
+    {
+      "task_shape": "Single-file code-gen chunk (new function / test file / boilerplate)",
+      "allocation": "subagent",
+      "bench": "M1",
+      "citation_exists": true,
+      "latest_verdict": "fail",
+      "n_rows": 2,
+      "consecutive_losses": 2,
+      "is_subagent_side": true,
+      "documented_exception": true,
+      "status": "documented-exception",
+      "reason": "engine-format loss, not an allocation loss: the pin's deepseek reasoning format lands the whole answer in reasoning_content (1 content token) so the strict rubric sees 0/3 artifacts \u2014 but the M6 main-only control fails the SAME shape (per_shape.M1 = false, 2026-09-28 run), so main does not win this shape either. The content-forcing mitigation (H4 prompt + recipe R1 \"Do NOT use reasoning\") is recipe-level; the rubric seam (scoring reasoning_content when content is empty) is the bench's job. Stays subagent until the seam is closed and re-benched. Supersedes m1_nuance (kept for the pre-exception history)."
+    },
+    {
+      "task_shape": "Per-file / per-section analysis (review notes, doc summaries, data transforms)",
+      "allocation": "fan-out N",
+      "bench": "M3",
+      "citation_exists": true,
+      "latest_verdict": "pass",
+      "n_rows": 3,
+      "consecutive_losses": 0,
+      "is_subagent_side": true,
+      "documented_exception": false,
+      "status": "match",
+      "reason": "[M3] supports the subagent-side allocation (0 consecutive loss(es), < 2)"
+    },
+    {
+      "task_shape": "Diff review of a PR-sized diff",
+      "allocation": "subagent draft -> main verifies",
+      "bench": "M4",
+      "citation_exists": true,
+      "latest_verdict": "pass",
+      "n_rows": 2,
+      "consecutive_losses": 0,
+      "is_subagent_side": true,
+      "documented_exception": false,
+      "status": "match",
+      "reason": "[M4] supports the subagent-side allocation (0 consecutive loss(es), < 2)"
+    },
+    {
+      "task_shape": "Long-context reading of repo docs / transcripts (>= ~30K tokens)",
+      "allocation": "main",
+      "bench": "M5",
+      "citation_exists": true,
+      "latest_verdict": "pass",
+      "n_rows": 2,
+      "consecutive_losses": 0,
+      "is_subagent_side": false,
+      "documented_exception": false,
+      "status": "match",
+      "reason": "main-side allocation; [M5] is supporting evidence (0 consecutive loss(es))"
+    },
+    {
+      "task_shape": "Test execution / lint / build-check",
+      "allocation": "subagent",
+      "bench": "M2",
+      "citation_exists": true,
+      "latest_verdict": "pass",
+      "n_rows": 2,
+      "consecutive_losses": 0,
+      "is_subagent_side": true,
+      "documented_exception": false,
+      "status": "match",
+      "reason": "[M2] supports the subagent-side allocation (0 consecutive loss(es), < 2)"
+    },
+    {
+      "task_shape": "Draft writing (docs, summaries, commit messages at scale)",
+      "allocation": "subagent",
+      "bench": "M3",
+      "citation_exists": true,
+      "latest_verdict": "pass",
+      "n_rows": 3,
+      "consecutive_losses": 0,
+      "is_subagent_side": true,
+      "documented_exception": false,
+      "status": "match",
+      "reason": "[M3] supports the subagent-side allocation (0 consecutive loss(es), < 2)"
+    },
+    {
+      "task_shape": "Anything requiring live tool feedback loops (iterative debugging, interactive exploration)",
+      "allocation": "main",
+      "bench": null,
+      "citation_exists": null,
+      "latest_verdict": null,
+      "n_rows": 0,
+      "consecutive_losses": 0,
+      "is_subagent_side": false,
+      "documented_exception": false,
+      "status": "no-citation",
+      "reason": "no [M#] citation (main by construction / provisional)"
+    },
+    {
+      "task_shape": "Verification of a subagent's claimed success (file exists? test passed? diff applies?)",
+      "allocation": "main",
+      "bench": null,
+      "citation_exists": null,
+      "latest_verdict": null,
+      "n_rows": 0,
+      "consecutive_losses": 0,
+      "is_subagent_side": false,
+      "documented_exception": false,
+      "status": "no-citation",
+      "reason": "no [M#] citation (main by construction / provisional)"
+    },
+    {
+      "task_shape": "Spec-chunk implementation (bounded, self-contained, with a test suite to run)",
+      "allocation": "subagent --tools on",
+      "bench": "M9",
+      "citation_exists": true,
+      "latest_verdict": "fail",
+      "n_rows": 2,
+      "consecutive_losses": 2,
+      "is_subagent_side": true,
+      "documented_exception": true,
+      "status": "documented-exception",
+      "reason": "capability-layer proven, rubric seam open: BOTH subagent-side sub-conditions pass live (main-side re-run exit 0 + tool_log shows the suite run with exit 0); the 3rd (spec functions present in the workdir) fails systematically on the 2026-09-28 host+engine rows due to the driver's workdir-cleanup-ordering defect (H6: the driver rmtree's the workdir before the M9 scorer's file check \u2014 MAP 4.9 note). The loop works; the rubric measures an artifact the driver deletes. Stays subagent --tools on until the ordering hotfix lands and the M9 row is re-benched (the main's own-copy re-run is the authoritative check per recipe R4 in the meantime)."
+    },
+    {
+      "task_shape": "Test execution batch with a report (run N tests, structure the results)",
+      "allocation": "subagent --tools on",
+      "bench": "M10",
+      "citation_exists": true,
+      "latest_verdict": "fail",
+      "n_rows": 2,
+      "consecutive_losses": 2,
+      "is_subagent_side": true,
+      "documented_exception": true,
+      "status": "documented-exception",
+      "reason": "mechanics proven, report-status semantics open: the batch ran correctly (10/10 files covered, exit codes in the ledger) but the report's per-file status did not mirror the exit code (0/2 spot verdicts agree on the 2026-09-28 host+engine rows) \u2014 a status-SEMANTICS defect in the subagent's report, which recipe R2 now pins (\"status must reflect the ACTUAL exit code, not the batch verdict\"). Stays subagent --tools on until the pinned report schema is re-benched."
+    },
+    {
+      "task_shape": "Anything that must see a rendered page / browser state (camoufox)",
+      "allocation": "main or subagent --tools on via the python tool",
+      "bench": null,
+      "citation_exists": null,
+      "latest_verdict": null,
+      "n_rows": 0,
+      "consecutive_losses": 0,
+      "is_subagent_side": true,
+      "documented_exception": false,
+      "status": "no-citation",
+      "reason": "no [M#] citation (main by construction / provisional)"
+    }
+  ],
+  "recipes": [
+    {
+      "id": "R1",
+      "task_shape": "single-file code-gen",
+      "bench": "M1",
+      "template": "inline (R1 section)",
+      "tools": "off",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M1] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "R2",
+      "task_shape": "test batch with structured report",
+      "bench": "M10",
+      "template": "T2",
+      "tools": "on",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M10] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "R3",
+      "task_shape": "diff review",
+      "bench": "M4",
+      "template": "inline (R3 section)",
+      "tools": "off",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M4] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "R4",
+      "task_shape": "spec-chunk implementation",
+      "bench": "M9",
+      "template": "T1",
+      "tools": "on",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M9] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "R5",
+      "task_shape": "fan-out analysis",
+      "bench": "M3",
+      "template": "inline (R5 section)",
+      "tools": "off",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M3] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "R6",
+      "task_shape": "long-context QA",
+      "bench": "M5",
+      "template": "inline (R6 section)",
+      "tools": "off",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M5] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "R7",
+      "task_shape": "saturation / high-concurrency fan-out",
+      "bench": "M7",
+      "template": "per-unit (R5-style or R2-style)",
+      "tools": "off (R5-style text-only) or on (R2-style tool loop) \u2014 follows the per-unit template; the [M7] citation is for the load/concurrency shape, not the template shape",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M7] is a valid bench.yaml scenario"
+    }
+  ],
+  "prompt_templates": [
+    {
+      "id": "T1",
+      "s4_2_row": "spec-chunk implementation",
+      "bench": "M9",
+      "tools": "on",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M9] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "T2",
+      "s4_2_row": "test execution batch with a report",
+      "bench": "M10",
+      "tools": "on",
+      "citation_exists": true,
+      "citation_status": "ok",
+      "citation_reason": "[M10] is a valid bench.yaml scenario"
+    },
+    {
+      "id": "T3",
+      "s4_2_row": "browser task via the python tool",
+      "bench": null,
+      "tools": "on",
+      "note": "provisional \u2014 no S5.2 row yet",
+      "citation_exists": null,
+      "citation_status": "provisional",
+      "citation_reason": "provisional \u2014 no S5.2 row yet"
+    }
+  ],
+  "missing_citations": [],
+  "stale_rows": [],
+  "pass": true,
+  "reasons": []
+}

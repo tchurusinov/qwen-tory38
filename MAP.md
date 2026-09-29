@@ -727,10 +727,15 @@ Phase 5 implementation must treat as binding):
       2026-09-28
       on `phase5-harness-skill-design`, PR pending; recipe citations
       in `skills/bonsai2-harness/claims.json`)
-- [ ] 5.6 Doctrine audit script: `bench.yaml` scenario rows ↔ S4.2
+- [x] 5.6 Doctrine audit script: `bench.yaml` scenario rows ↔ S4.2
       citations + win/lose recompute → `doctrine-audit.json`; failing
       audit blocks the skill PR (S4.6). Audit scope includes the
-      recipes section's citations (S4.1 delta 2026-09-28).
+      recipes section's citations (S4.1 delta 2026-09-28). (implemented
+      2026-09-29 on `phase5-doctrine-audit`, PR pending — `bench/
+      doctrine_audit.py` + `scripts/gate.sh` step 6; `claims.json`
+      `win_rule.exceptions` documents the M1/M9/M10 two-loss rows; S4.7
+      #1 "table updated in the same PR" clause met; S4.7 #3 two-synthetic-loss
+      proof in `tests/test_doctrine_audit.py`)
 - [ ] 5.7 Fresh-session test: new main-agent session, skill + S3.2
       commands only (mock engine), completes the S5.6 standard workload
       set (M1, M2, M3 + one M4-style diff review, text-only; plus the
@@ -841,6 +846,47 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-29 — MAP 5.6: the S4.6 doctrine-audit script implemented (branch `phase5-doctrine-audit`, PR pending)
+- agent/model: Hermes qwen3.8-27b (session: Phase 5 item 5.6, off
+  `origin/main` @ 2296675, post-5.1–5.5 merge)
+- phase(s): P5 (5.6; 5.7–5.8 next)
+- items checked: 5.6 (checked with the "implemented … PR pending" note
+  — the formal check is the G3/G4 review loop, not this entry)
+- machine state: no /opt/bonsai2 install (Phase 6); no GPU load this
+  session (docs + JSON + Python only; VRAM audit at G0: main stack
+  asleep, ~49 GiB free). New: `bench/doctrine_audit.py` (the S4.6 audit,
+  stdlib core + PyYAML-at-the-edge + a narrow stdlib fallback so the
+  gate runs on bare box python3), `tests/test_doctrine_audit.py` (50
+  hermetic tests), `scripts/gate.sh` step 6 (the audit now blocks the
+  skill PR), `bench-results/doctrine-audit.json` (committed audit
+  output, pass=true), `skills/bonsai2-harness/claims.json`
+  `win_rule.exceptions` (M1/M9/M10 two-loss rows documented — the S4.7
+  #1 "table updated in the same PR" clause; generalizes the existing
+  m1_nuance), MAP 5.6 + SPEC S4.6 "implemented" notes.
+- next: 5.7 (fresh-session test: new main-agent session, skill + S3.2
+  commands only, mock engine, completes the S5.6 standard workload set
+  with the M9/M10 tool-loop rows `--tools on`, ledger-verified per the
+  amended S4.2 self-report rule).
+- blockers/intricacies: (1) the audit groups bench rows by the row's
+  INTERNAL `scenario` field, not the filename suffix — the engine-mode
+  capability rows are named `_<sid>_engine.json` but carry
+  `scenario: <sid>` internally. (2) the S5.4 runner records one row
+  per scenario (M9/M10 in both tool_execution modes share a
+  scenario id); the consecutive-loss count is per scenario, so M9's
+  host-mode + engine-mode rows interleave — the 2026-09-28 run's M9/M10
+  losses are each counted once across the two modes' rows. (3) the
+  hermetic suite's documented interpreter is `~/prod/.venv/bin/python`
+  (bare `python3` lacks PyYAML and the pre-existing harness tests error
+  on `import yaml`); the audit itself is bare-python3-clean via the
+  stdlib fallback, which is what the gate uses. (4) M1/M9/M10's
+  exceptions are RUBRIC/MECHANISM seams (the allocation stands), not
+  allocation losses — the wording matters for the audit's "documented
+  exception" check (it requires a reason string, which the audit
+  prints in its fail output).
+- spec deltas: SPEC S4.6 "implemented" note only (the audit half; no
+  locked acceptance number changed). No new SPEC text — S4.6/S4.7
+  already specified this item; the implementation matches it.
 
 ### 2026-09-28 — MAP 5.1–5.5: the `bonsai2-harness` skill implemented (branch `phase5-harness-skill-design`, PR pending)
 - agent/model: Hermes qwen3.8-27b (session: Phase 5 implementation on
