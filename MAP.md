@@ -853,6 +853,16 @@ SPEC.md `status` → `active`.
 - phase(s): P5 (5.6; 5.7–5.8 next)
 - items checked: 5.6 (checked with the "implemented … PR pending" note
   — the formal check is the G3/G4 review loop, not this entry)
+- G3 loop result (2026-09-29): PR #33 open. Round 1: 0 P0, 1 P1, 1 P2
+  (one real defect — audit_row's reported latest_verdict used
+  rows[-1] = glob order, not the newest row; probe-proven, fixed in
+  c8925b4 via max(rows, key=row_timestamp)). Round 2: 0 P0, 0 P1,
+  1 P2 (dual-allocation is_subagent_side flip semantics — real but
+  conservative-by-design; the current dual row is no-citation; P2-noted,
+  no code change). Loop clean; gate PASS on c8925b4; full suite 676
+  tests OK under the venv python; 51/51 audit tests green on bare
+  python3; ruff clean. G4 record posted to the PR; awaiting the user
+  merge gate.
 - machine state: no /opt/bonsai2 install (Phase 6); no GPU load this
   session (docs + JSON + Python only; VRAM audit at G0: main stack
   asleep, ~49 GiB free). New: `bench/doctrine_audit.py` (the S4.6 audit,
