@@ -883,6 +883,135 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 --->
 
+### 2026-09-30 — Phase 6: PR #36 G3 review round 4 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 4)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
+  untouched). Branch now carries the round-4 fixes on top of 1af346b.
+- G3 round-4 review — the reviewer's SUMMARY line said "1 P0, 4 P1, 4 P2"
+  but only 4 findings were enumerated (1 P1 + 3 P2, no P0 lines). The
+  builder parsed the finding lines as authoritative: 0 P0 / 1 P1 / 3 P2
+  (the miscount is recorded in the raw-review post, comment 1234).
+  Dispositions:
+  * P1 #1 (rollback exits 0 "rolled-back" with only a warning on a failed
+    daemon-reload or restart — asymmetric with install()'s failed-restart
+    -> exit 2, and below the S6.5 contract "restores configs + restarts
+    the manager") — VERIFIED REAL + FIXED. Both failed systemctl calls now
+    return `(EXIT_CONFIG, status=error, named error)`; the round-3
+    WARN_ROLLBACK warnings were superseded by the exit-code contract.
+    Pinned by `test_rollback_daemon_reload_failure_exits_config` +
+    `test_rollback_restart_failure_exits_config` (the round-3
+    daemon-reload test was updated to the new contract).
+  * P2 #1 (unguarded read_text() on the restored engine -> OSError ->
+    exit 1) — VERIFIED REAL + FIXED: the parse section is now wrapped in
+    `try/except (OSError, ValueError)` -> clean EXIT_CONFIG.
+  * P2 #2 (int()/float() casts on the restored engine block can
+    ValueError -> exit 1) — VERIFIED REAL + FIXED by the same guard
+    (one guard covers both: the cast happens inside the try).
+    Pinned by `test_rollback_malformed_engine_blob_exits_config`
+    (a state with `count: abc` -> clean EXIT_CONFIG, not exit 1).
+  * P2 #3 (install.sh hardcodes /usr/bin/python3) — carried from round
+    1's P2 #5, still NOTED, deferred to the S6.7 acceptance note.
+- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 41 tests ...
+  OK** (39 from round 3 + 2 new round-4 tests; the round-3 daemon-reload
+  test was updated to the new exit-2 contract). Gate `./scripts/gate.sh`
+  → **PASS exit 0**.
+- next: G3b round-5 re-review (fresh isolated pi on the new commit) →
+  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
+  0 P1 or round 6 (round 6 = post-only stop), then G4.
+- blockers/intricacies: same as rounds 1-3 (~3 min suite; explicit plan
+  file `/tmp/plan-pr36-round5.md` passed to review.sh to dodge the stale
+  `.git/plan.md` pitfall).
+- spec deltas: none.
+
+
+### 2026-09-30 — Phase 6: PR #36 G3 review round 3 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 3)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
+  untouched). Branch now carries the round-3 fixes on top of 9c93b65.
+- G3 round-3 review (1 P0 / 1 P1 / 1 P2) — all three findings in
+  `rollback()`, all verified real against the diff:
+  * P0 #1 (state's config block missing `subagent-engine.yaml` -> the loop
+    restores nothing, line 1124 reads the STALE on-disk engine, re-renders
+    units with the current N, and reports exit 0 "rolled-back" with an
+    inconsistent N) — VERIFIED REAL + FIXED. Fix: after the restore loop,
+    `if "subagent-engine.yaml" not in cfg:` -> clean
+    `(EXIT_CONFIG, {"status":"error","error":"...no subagent-engine.yaml
+    config block..."}). Pinned by
+    `test_rollback_state_missing_engine_blob_exits_config`.
+  * P1 #1 (daemon-reload rc not checked — a failed reload followed by a
+    successful restart reported "rolled-back" with no warning) — VERIFIED
+    REAL + FIXED. Fix: `warnings: list[str] = []` before the two sc()
+    calls; append `WARN_ROLLBACK: daemon-reload rc=<rc>` when rc != 0, and
+    the existing `WARN_ROLLBACK: manager restart rc=<rc>` when restart
+    rc != 0 (both warnings can fire now). Pinned by
+    `test_rollback_daemon_reload_failure_warns` (asserts the daemon-reload
+    warning fires and the restart warning does NOT, given restart rc=0).
+  * P2 #1 (state's scope not propagated — rolling back under a different
+    CLI scope rewrites units into the other systemd tree) — NOTED +
+    FIXED-as-warning. Fix: if the state's `scope` field is a string and
+    differs from the CLI scope, append
+    `WARN_ROLLBACK_SCOPE_MISMATCH: state was written under scope=<x>,
+    this rollback ran under scope=<y> - units land in the current scope's
+    tree`. Pinned by `test_rollback_scope_mismatch_warns`.
+- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 39 tests ...
+  OK** (36 from round 2 + 3 round-3 regression tests). Gate
+  `./scripts/gate.sh` → **PASS exit 0**.
+- next: G3b round-4 re-review (fresh isolated pi on the new commit) →
+  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
+  0 P1 or round 6, then G4.
+- blockers/intricacies: same as rounds 1-2 (~3 min suite; explicit plan
+  file `/tmp/plan-pr36-round4.md` passed to review.sh to dodge the stale
+  `.git/plan.md` pitfall).
+- spec deltas: none.
+
+
+### 2026-09-30 — Phase 6: PR #36 G3 review round 2 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 2)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
+  untouched). Branch now carries the round-2 fixes on top of f6956dd.
+- G3 round-2 review (0 P0 / 1 P1 / 3 P2) — builder dispositions:
+  * P1 #1 (rollback unhandled YAML parse exception -> exit 1, outside the
+    S6.3 closed set {0,2,3,4}) — VERIFIED REAL + FIXED. Probe: a state file
+    with a tab-indented mapping (`n: 2\n\tconfig: 1`) makes `yaml.safe_load`
+    raise `yaml.scanner.ScannerError` — a `YAMLError`, NOT caught by
+    `_load_yaml_file`'s `except ImportError`, so it propagated to `main()`
+    -> unhandled exception -> exit 1. Fix: `rollback()` now wraps
+    `_load_yaml_file` in `try/except Exception` -> clean `(EXIT_CONFIG,
+    {"status":"error","error":"state file unreadable: ..."})`; plus a
+    `not isinstance(state, dict)` guard for the top-level-list edge.
+    Pinned by `test_rollback_corrupt_state_file_exits_config_not_1` +
+    `test_rollback_empty_state_file_exits_config`.
+  * P2 #1 (`_doc_eq` docstring claims "ignores timestamps" but is full
+    JSON equality) — FIXED (docstring only): the docstring now states it is
+    STRICT full-document equality and names the dependency (the manager's
+    health.json must not carry a per-poll timestamp or stability detection
+    breaks). No behavior change.
+  * P2 #2 (`refresh_main` does not call `write_state`) — NOTED, deferred to
+    a follow-up (S6.5 "one state per install" is an install contract;
+    refresh is the upgrade procedure, and the follow-up can decide whether
+    refresh should rotate the state).
+  * P2 #3 (install.sh hardcodes /usr/bin/python3) — carried from round 1's
+    P2 #5, still NOTED, deferred to the S6.7 acceptance note.
+- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 36 tests ...
+  OK** (34 from round 1 + 2 round-2 regression tests). Gate
+  `./scripts/gate.sh` → **PASS exit 0** (ruff format+check clean after a
+  noqa on the deliberately-broad `except Exception`; yaml-parse soft-skip as
+  baseline; S4.6 doctrine audit pass).
+- next: G3b round-3 re-review (fresh isolated pi on the new commit) →
+  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
+  0 P1 or round 6, then G4.
+- blockers/intricacies: same as round 1 (~3 min suite; explicit plan file
+  `/tmp/plan-pr36-round3.md` passed to review.sh to dodge the stale
+  `.git/plan.md` pitfall).
+- spec deltas: none.
+
+
 ### 2026-09-30 — Phase 6: PR #36 G3 review round 1 reconciled (branch `phase6-one-command-install`)
 - agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 1)
 - phase(s): P6 (6.1–6.6; the review loop is G3, not a new MAP item)
@@ -931,132 +1060,6 @@ SPEC.md `status` → `active`.
   explicit plan file `/tmp/plan-pr36-round2.md` so the reviewer is not
   fed a stale plan (the observed de-hex-er / qwen-tory38 PR #20 pitfall).
 - spec deltas: none — no locked value moved, no SPEC section amended.
-
-### 2026-09-30 — Phase 6: PR #36 G3 review round 3 reconciled (branch `phase6-one-command-install`)
-- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 3)
-- phase(s): P6 (the review loop is G3, not a new MAP item)
-- items checked: none new
-- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
-  untouched). Branch now carries the round-3 fixes on top of 9c93b65.
-- G3 round-3 review (1 P0 / 1 P1 / 1 P2) — all three findings in
-  `rollback()`, all verified real against the diff:
-  * P0 #1 (state's config block missing `subagent-engine.yaml` -> the loop
-    restores nothing, line 1124 reads the STALE on-disk engine, re-renders
-    units with the current N, and reports exit 0 "rolled-back" with an
-    inconsistent N) — VERIFIED REAL + FIXED. Fix: after the restore loop,
-    `if "subagent-engine.yaml" not in cfg:` -> clean
-    `(EXIT_CONFIG, {"status":"error","error":"...no subagent-engine.yaml
-    config block..."}). Pinned by
-    `test_rollback_state_missing_engine_blob_exits_config`.
-  * P1 #1 (daemon-reload rc not checked — a failed reload followed by a
-    successful restart reported "rolled-back" with no warning) — VERIFIED
-    REAL + FIXED. Fix: `warnings: list[str] = []` before the two sc()
-    calls; append `WARN_ROLLBACK: daemon-reload rc=<rc>` when rc != 0, and
-    the existing `WARN_ROLLBACK: manager restart rc=<rc>` when restart
-    rc != 0 (both warnings can fire now). Pinned by
-    `test_rollback_daemon_reload_failure_warns` (asserts the daemon-reload
-    warning fires and the restart warning does NOT, given restart rc=0).
-  * P2 #1 (state's scope not propagated — rolling back under a different
-    CLI scope rewrites units into the other systemd tree) — NOTED +
-    FIXED-as-warning. Fix: if the state's `scope` field is a string and
-    differs from the CLI scope, append
-    `WARN_ROLLBACK_SCOPE_MISMATCH: state was written under scope=<x>,
-    this rollback ran under scope=<y> - units land in the current scope's
-    tree`. Pinned by `test_rollback_scope_mismatch_warns`.
-- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 39 tests ...
-  OK** (36 from round 2 + 3 round-3 regression tests). Gate
-  `./scripts/gate.sh` → **PASS exit 0**.
-- next: G3b round-4 re-review (fresh isolated pi on the new commit) →
-  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
-  0 P1 or round 6, then G4.
-- blockers/intricacies: same as rounds 1-2 (~3 min suite; explicit plan
-  file `/tmp/plan-pr36-round4.md` passed to review.sh to dodge the stale
-  `.git/plan.md` pitfall).
-- spec deltas: none.
-
-### 2026-09-30 — Phase 6: PR #36 G3 review round 2 reconciled (branch `phase6-one-command-install`)
-- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 2)
-- phase(s): P6 (the review loop is G3, not a new MAP item)
-- items checked: none new
-- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
-  untouched). Branch now carries the round-2 fixes on top of f6956dd.
-- G3 round-2 review (0 P0 / 1 P1 / 3 P2) — builder dispositions:
-  * P1 #1 (rollback unhandled YAML parse exception -> exit 1, outside the
-    S6.3 closed set {0,2,3,4}) — VERIFIED REAL + FIXED. Probe: a state file
-    with a tab-indented mapping (`n: 2\n\tconfig: 1`) makes `yaml.safe_load`
-    raise `yaml.scanner.ScannerError` — a `YAMLError`, NOT caught by
-    `_load_yaml_file`'s `except ImportError`, so it propagated to `main()`
-    -> unhandled exception -> exit 1. Fix: `rollback()` now wraps
-    `_load_yaml_file` in `try/except Exception` -> clean `(EXIT_CONFIG,
-    {"status":"error","error":"state file unreadable: ..."})`; plus a
-    `not isinstance(state, dict)` guard for the top-level-list edge.
-    Pinned by `test_rollback_corrupt_state_file_exits_config_not_1` +
-    `test_rollback_empty_state_file_exits_config`.
-  * P2 #1 (`_doc_eq` docstring claims "ignores timestamps" but is full
-    JSON equality) — FIXED (docstring only): the docstring now states it is
-    STRICT full-document equality and names the dependency (the manager's
-    health.json must not carry a per-poll timestamp or stability detection
-    breaks). No behavior change.
-  * P2 #2 (`refresh_main` does not call `write_state`) — NOTED, deferred to
-    a follow-up (S6.5 "one state per install" is an install contract;
-    refresh is the upgrade procedure, and the follow-up can decide whether
-    refresh should rotate the state).
-  * P2 #3 (install.sh hardcodes /usr/bin/python3) — carried from round 1's
-    P2 #5, still NOTED, deferred to the S6.7 acceptance note.
-- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 36 tests ...
-  OK** (34 from round 1 + 2 round-2 regression tests). Gate
-  `./scripts/gate.sh` → **PASS exit 0** (ruff format+check clean after a
-  noqa on the deliberately-broad `except Exception`; yaml-parse soft-skip as
-  baseline; S4.6 doctrine audit pass).
-- next: G3b round-3 re-review (fresh isolated pi on the new commit) →
-  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
-  0 P1 or round 6, then G4.
-- blockers/intricacies: same as round 1 (~3 min suite; explicit plan file
-  `/tmp/plan-pr36-round3.md` passed to review.sh to dodge the stale
-  `.git/plan.md` pitfall).
-- spec deltas: none.
-
-### 2026-09-30 — Phase 6: PR #36 G3 review round 4 reconciled (branch `phase6-one-command-install`)
-- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 4)
-- phase(s): P6 (the review loop is G3, not a new MAP item)
-- items checked: none new
-- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
-  untouched). Branch now carries the round-4 fixes on top of 1af346b.
-- G3 round-4 review — the reviewer's SUMMARY line said "1 P0, 4 P1, 4 P2"
-  but only 4 findings were enumerated (1 P1 + 3 P2, no P0 lines). The
-  builder parsed the finding lines as authoritative: 0 P0 / 1 P1 / 3 P2
-  (the miscount is recorded in the raw-review post, comment 1234).
-  Dispositions:
-  * P1 #1 (rollback exits 0 "rolled-back" with only a warning on a failed
-    daemon-reload or restart — asymmetric with install()'s failed-restart
-    -> exit 2, and below the S6.5 contract "restores configs + restarts
-    the manager") — VERIFIED REAL + FIXED. Both failed systemctl calls now
-    return `(EXIT_CONFIG, status=error, named error)`; the round-3
-    WARN_ROLLBACK warnings were superseded by the exit-code contract.
-    Pinned by `test_rollback_daemon_reload_failure_exits_config` +
-    `test_rollback_restart_failure_exits_config` (the round-3
-    daemon-reload test was updated to the new contract).
-  * P2 #1 (unguarded read_text() on the restored engine -> OSError ->
-    exit 1) — VERIFIED REAL + FIXED: the parse section is now wrapped in
-    `try/except (OSError, ValueError)` -> clean EXIT_CONFIG.
-  * P2 #2 (int()/float() casts on the restored engine block can
-    ValueError -> exit 1) — VERIFIED REAL + FIXED by the same guard
-    (one guard covers both: the cast happens inside the try).
-    Pinned by `test_rollback_malformed_engine_blob_exits_config`
-    (a state with `count: abc` -> clean EXIT_CONFIG, not exit 1).
-  * P2 #3 (install.sh hardcodes /usr/bin/python3) — carried from round
-    1's P2 #5, still NOTED, deferred to the S6.7 acceptance note.
-- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 41 tests ...
-  OK** (39 from round 3 + 2 new round-4 tests; the round-3 daemon-reload
-  test was updated to the new exit-2 contract). Gate `./scripts/gate.sh`
-  → **PASS exit 0**.
-- next: G3b round-5 re-review (fresh isolated pi on the new commit) →
-  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
-  0 P1 or round 6 (round 6 = post-only stop), then G4.
-- blockers/intricacies: same as rounds 1-3 (~3 min suite; explicit plan
-  file `/tmp/plan-pr36-round5.md` passed to review.sh to dodge the stale
-  `.git/plan.md` pitfall).
-- spec deltas: none.
 
 ### 2026-09-29 — Phase 6: MAP 6.1–6.6 implemented + the S6.3 pipeline E2E suite (branch `phase6-one-command-install`, PR pending)
 - agent/model: Hermes qwen3.8-27b (session: Phase 6, off `origin/main`
