@@ -238,7 +238,9 @@ def audit_row(
     rec.update(
         {
             "citation_exists": exists,
-            "latest_verdict": row_verdict(rows[-1]) if rows else None,
+            "latest_verdict": row_verdict(max(rows, key=row_timestamp))
+            if rows
+            else None,
             "n_rows": len(rows),
             "consecutive_losses": losses,
             "is_subagent_side": sub_side,
