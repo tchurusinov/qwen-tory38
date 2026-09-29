@@ -1016,6 +1016,48 @@ SPEC.md `status` → `active`.
   `.git/plan.md` pitfall).
 - spec deltas: none.
 
+### 2026-09-30 — Phase 6: PR #36 G3 review round 4 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 4)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged (no /opt/bonsai2, main stack live at :30001
+  untouched). Branch now carries the round-4 fixes on top of 1af346b.
+- G3 round-4 review — the reviewer's SUMMARY line said "1 P0, 4 P1, 4 P2"
+  but only 4 findings were enumerated (1 P1 + 3 P2, no P0 lines). The
+  builder parsed the finding lines as authoritative: 0 P0 / 1 P1 / 3 P2
+  (the miscount is recorded in the raw-review post, comment 1234).
+  Dispositions:
+  * P1 #1 (rollback exits 0 "rolled-back" with only a warning on a failed
+    daemon-reload or restart — asymmetric with install()'s failed-restart
+    -> exit 2, and below the S6.5 contract "restores configs + restarts
+    the manager") — VERIFIED REAL + FIXED. Both failed systemctl calls now
+    return `(EXIT_CONFIG, status=error, named error)`; the round-3
+    WARN_ROLLBACK warnings were superseded by the exit-code contract.
+    Pinned by `test_rollback_daemon_reload_failure_exits_config` +
+    `test_rollback_restart_failure_exits_config` (the round-3
+    daemon-reload test was updated to the new contract).
+  * P2 #1 (unguarded read_text() on the restored engine -> OSError ->
+    exit 1) — VERIFIED REAL + FIXED: the parse section is now wrapped in
+    `try/except (OSError, ValueError)` -> clean EXIT_CONFIG.
+  * P2 #2 (int()/float() casts on the restored engine block can
+    ValueError -> exit 1) — VERIFIED REAL + FIXED by the same guard
+    (one guard covers both: the cast happens inside the try).
+    Pinned by `test_rollback_malformed_engine_blob_exits_config`
+    (a state with `count: abc` -> clean EXIT_CONFIG, not exit 1).
+  * P2 #3 (install.sh hardcodes /usr/bin/python3) — carried from round
+    1's P2 #5, still NOTED, deferred to the S6.7 acceptance note.
+- suite: `python3 -m unittest tests.test_install_e2e` → **Ran 41 tests ...
+  OK** (39 from round 3 + 2 new round-4 tests; the round-3 daemon-reload
+  test was updated to the new exit-2 contract). Gate `./scripts/gate.sh`
+  → **PASS exit 0**.
+- next: G3b round-5 re-review (fresh isolated pi on the new commit) →
+  G3b-post raw → G3c reconcile → G3c-post disposition; loop until 0 P0 /
+  0 P1 or round 6 (round 6 = post-only stop), then G4.
+- blockers/intricacies: same as rounds 1-3 (~3 min suite; explicit plan
+  file `/tmp/plan-pr36-round5.md` passed to review.sh to dodge the stale
+  `.git/plan.md` pitfall).
+- spec deltas: none.
+
 ### 2026-09-29 — Phase 6: MAP 6.1–6.6 implemented + the S6.3 pipeline E2E suite (branch `phase6-one-command-install`, PR pending)
 - agent/model: Hermes qwen3.8-27b (session: Phase 6, off `origin/main`
   @ 0705670, post-5.8 merge; two sessions deep — the first built
