@@ -749,6 +749,15 @@ Phase 5 implementation must treat as binding):
       complete the standard workload set with `--tools on` in a fresh
       session, every result ledger-verified per the amended S4.2
       self-report rule; command set still S3.2-only (S4.7 #4).
+      (implemented 2026-09-29 on `phase5-s47-acceptance`, PR pending —
+      `tests/test_s47_acceptance.py`, all four S4.7 clauses asserted as
+      a set on the live repo state: #1 live audit pass + recompute
+      agrees with the table + CLI exit 0; #2 fresh session completes
+      the S5.6 set, S4.2-verified, S3.2-only; #3 two synthetic loss
+      scenarios → both rows stale, exit 1 (real CLI, no-yaml fallback
+      branch); #4 M9/M10 fresh-session `--tools on`, ledger re-verified
+      off the session's own task records, S3.2-only. 5.6/5.7 pieces
+      composed, not re-proven; suite 677 → 685 OK; gate PASS.)
 
 ### Phase 6 — GB10 packaging: one-command install (SPEC S6)
 
@@ -846,6 +855,69 @@ SPEC.md `status` → `active`.
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
 -->
+
+### 2026-09-29 — MAP 5.8: the S4.7 acceptance test implemented (branch `phase5-s47-acceptance`)
+- agent/model: Hermes qwen3.8-27b (session: Phase 5 item 5.8, off
+  `origin/main` @ 5c61f65, post-5.7 merge)
+- phase(s): P5 (5.8; Phase 6 next)
+- items checked: none yet — 5.8's formal check is the G3/G4 review loop
+  (this entry records the implementation; the item check lands with G4)
+- deliverable: `tests/test_s47_acceptance.py` — the runnable S4.7
+  acceptance (all four clauses, SPEC S4.7 #1–#4), the missing piece on
+  top of the unit-level pieces the 5.6/5.7 work already proved:
+  (1) S4.7 #1 — the live doctrine audit: run_audit over the tracked
+  claims.json + bench.yaml + bench-results/ rows passes (no missing
+  citations, no stale rows); the recompute AGREES WITH THE TABLE —
+  the M1/M9/M10 two-loss rows are the claims.json
+  win_rule.exceptions (documented-exception, the S4.7 #1 "table
+  updated in the same PR" clause proven against the live data) and
+  the other cited rows recompute to `match`; plus the real CLI
+  (`bench/doctrine_audit.py check`, DEFAULT paths = the gate's
+  one-liner) exits 0 on the live state; (2) S4.7 #2 — a FRESH session
+  agent (this test's own — new agent, new session) completes the
+  S5.6 standard workload set against the 5.7 mock rig, every result
+  verified per S4.2 by the 5.7 driver's inherited ledger-first
+  _run_m* assertions, and the acceptance-level command-set
+  re-assertion: log subset of S3.2 + the S5.6-minimum verb set
+  {spawn,status,collect,unload}; (3) S4.7 #3 — two synthetic loss
+  scenarios (each scenario 2 consecutive bench losses, no documented
+  exception) through the audit's real CLI (doctrine_audit.main) under
+  the no-yaml stdlib-fallback branch (the gate's bare-box-python3
+  path): BOTH rows flagged stale, exit 1; (4) S4.7 #4 — the tool-loop
+  rows (M9/M10) complete in a FRESH session with `--tools on`, every
+  result ledger-verified per the amended S4.2 self-report rule, with
+  the ledger re-verification read off the SESSION'S OWN task records
+  (results_dir/tasks/<task_id>.json via the harness's
+  iter_tasks/read_result — the S3.1 surface, not the driver's
+  in-memory collect payloads): M9 ledger suite-run exit 0 + workdir
+  files + main-side scratch re-run exit 0 + spec functions; M10
+  report 10/10 + status-mirrors-exit-code + seeded-fail verdicts
+  agree with main's re-runs; command set S3.2-only, every spawn
+  `--tools on`, no invented flags.
+- design note: the 5.7/5.6 pieces are COMPOSED, not re-proven — the
+  5.7 SessionAgent + canned scripts + ledger-first _run_m* verification
+  are inherited (the 5.7 rig + the 5.7 session driver, the S4.2
+  self-report rule), and the synthetic-loss half reuses the
+  test_doctrine_audit S4.7-#3 CLI convention. The acceptance's own
+  assertions are the S4.7-level ones (live recompute vs the table,
+  command-set re-assertion, both-rows-stale, ledger re-verification on
+  the task records).
+- verification: standalone `python3.12 -m unittest
+  tests.test_s47_acceptance` OK (8 tests, ~4.9s); full hermetic suite
+  `python3.12 -m unittest discover -s tests -t .` = 685 tests OK
+  (main without this module = 677 OK, so no pre-existing
+  regressions); gate PASS (exit 0; the yaml-parse WARNs are the
+  pre-existing soft baseline — bare box python3 lacks PyYAML, the
+  gate's documented behavior); ruff format --check + ruff check clean
+  on the new module.
+- machine state: no GPU load this session (mock endpoint only; the
+  audit half is pure I/O over the tracked repo files + temp synthetic
+  inputs); no uncommitted work at stress time (VRAM audit at G0: main
+  stack asleep).
+- spec deltas: none — S4.7 already specifies the item verbatim; the
+  implementation asserts it as a set, against the live repo state,
+  without touching the spec or the audit.
+- next: G3 (PR + review.sh), then G4. After G4: Phase 6 (6.1).
 
 ### 2026-09-29 — MAP 5.7: the S5.6 fresh-session test implemented (branch `phase5-fresh-session`)
 - agent/model: Hermes qwen3.8-27b (session: Phase 5 item 5.7, off
