@@ -883,6 +883,36 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 --->
 
+### 2026-09-30 — Phase 6: PR #36 G3 review round 5 reconciled (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 5)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged. Branch now carries the round-5 fixes on top
+  of e8c43c2 (commit 54261f4 + the MAP-ordering commit 424125d).
+- review verdict: 0 P0 / 3 P1 / 4 P2 (SUMMARY consistent this round).
+  All three P1s verified by execution before dispositioning:
+  (1) check_health deadline loop used raw time.monotonic() while sleep
+  was faked — TestPrereqs.test_all_rows_pass measured EXACTLY 180.0 s of
+  wall time (the whole hermetic suite burned the real S2.7 budget);
+  (2) a DICT-valued engine blob in the state file dumps flat via
+  _dump_yaml (no top-level instances: key) → N silently fell back to 0;
+  (3) do_rewrite gate asymmetry — reviewer self-demoted to P2 (clarity).
+- dispositions: P1 #1 → `now=time.monotonic` seam in check_health +
+  install() passes seams.now (suite wall time 180.1 s → 0.12 s; the
+  shared test Clock gained a peek() so the deadline loop polls without
+  consuming the +120 s advance). P1 #2 → N falls back to the state's
+  own S6.5-recorded `n`, not 0. P1 #3 → gate mirrors the srv side.
+  P2s: EXIT_CONFIG boundary now wraps the top-level scalar/tools reads
+  too; the --refresh-main state-file deferral is recorded in the code
+  docstring; main() guards all three dispatches (OSError/ValueError →
+  clean exit 2, never traceback+1 outside the S6.3 closed set {0,2,3,4}).
+- tests: +4 regression tests (45 total): the faked-clock budget test
+  (asserts the 180 s budget completes in <5 s of wall), the dict-blob
+  N-fallback test, the missing-serving-only-rewrite test, the
+  main()-OSError-exit-2 test.
+- gate: PASS (exit 0). suite: Ran 45 tests in 0.129 s, OK.
+- spec deltas: none.
+
 ### 2026-09-30 — Phase 6: PR #36 G3 review round 4 reconciled (branch `phase6-one-command-install`)
 - agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 4)
 - phase(s): P6 (the review loop is G3, not a new MAP item)
