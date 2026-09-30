@@ -883,6 +883,29 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 --->
 
+### 2026-09-30 — Phase 6: PR #36 G3 review round 6 — CLEAN (branch `phase6-one-command-install`)
+- agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 6)
+- phase(s): P6 (the review loop is G3, not a new MAP item)
+- items checked: none new
+- machine state: unchanged. Branch head 28edf8e (round-5 fixes 54261f4 +
+  the MAP entries). No new code committed this round — the reviewer came
+  back clean.
+- review verdict: **REVIEW CLEAN — 0 P0 / 0 P1 / 0 P2.** This is the
+  stop condition the user set (0 P0 + 0 P1, or the round-6 cap; both hit
+  on the same round). Per the user's instruction, only the round-6 raw
+  review was posted to the PR; no disposition / fix round followed.
+- stop rationale: rounds 1-5 each returned actionable P0/P1 findings that
+  were verified by execution and fixed; round 6 (fresh isolated pi, full
+  origin/main...branch diff, explicit round-6 plan) returned nothing
+  actionable. The reviewer's own note that the install.sh python3 path is
+  a carried/deferred note, not a stopper, was recorded in the plan.
+- gate: PASS (exit 0) on 28edf8e (unchanged). suite: Ran 45 tests in
+  0.129 s, OK (unchanged).
+- spec deltas: none.
+- next: PR #36 is ready for the G4 human merge gate. The branch is
+  `phase6-one-command-install` on `blckwell/qwen-tory38` (Gitea
+  `http://localhost:3001/blckwell/qwen-tory38/pulls/36`).
+
 ### 2026-09-30 — Phase 6: PR #36 G3 review round 5 reconciled (branch `phase6-one-command-install`)
 - agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 5)
 - phase(s): P6 (the review loop is G3, not a new MAP item)
