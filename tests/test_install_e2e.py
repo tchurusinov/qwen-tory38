@@ -35,6 +35,7 @@ import json
 import re
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -86,13 +87,20 @@ IMAGE_SHA = (
 
 class Clock:
     """A seam now() that advances so consecutive installs get distinct
-    state-file timestamps (S6.5 rotation needs distinct ts tags)."""
+    state-file timestamps (S6.5 rotation needs distinct ts tags).
+
+    P1 (G3c r5): `peek()` returns the current value WITHOUT advancing —
+    the check_health deadline loop must poll the clock without consuming
+    the +120 s advance; only the fake `sleep` advances the fake clock."""
 
     def __init__(self, start: float = 1_759_000_000.0):
         self._t = start
 
     def __call__(self) -> float:
         self._t += 120.0
+        return self._t
+
+    def peek(self) -> float:
         return self._t
 
 
@@ -593,6 +601,123 @@ class TestReviewRound1Fixes(_E2EBase):
         self.assertIn("WARN_ROLLBACK_SCOPE_MISMATCH", joined)
         self.assertIn("'user'", joined)
         self.assertIn("'system'", joined)
+
+    def test_check_health_budget_runs_on_faked_clock(self):
+        """P1 r5 (FIXED): check_health's deadline loop used RAW
+        time.monotonic() while `sleep` was faked to a no-op — every
+        non-settling doc burned the REAL 180 s budget in hermetic tests
+        (TestPrereqs.test_all_rows_pass measured exactly 180.0 s of wall
+        time). Now the deadline runs on the injectable `now` seam; with a
+        faked clock the full 180 s budget + timeout must complete in a
+        fraction of a second."""
+        d = self.run_dir
+        d.mkdir(parents=True, exist_ok=True)
+        # no health.json at all: the loop runs the full budget -> timeout
+        fake = [0.0]
+        polls = [0]
+
+        def now():
+            return fake[0]
+
+        def sleep(x):
+            fake[0] += x
+            polls[0] += 1
+            self.assertLessEqual(polls[0], 500, "runaway poll loop")
+
+        t0 = time.monotonic()
+        outcome, _doc, warns = inst.check_health(
+            health_dir=d,
+            expected_n=2,
+            main_url="http://localhost:30001",
+            main_probe_path="/v1/models",
+            main_probe=lambda *a, **k: True,
+            sleep=sleep,
+            now=now,
+        )
+        wall = time.monotonic() - t0
+        self.assertEqual(outcome, "timeout")
+        self.assertIn("WARN_HEALTH_TIMEOUT", " ".join(warns))
+        self.assertGreater(polls[0], 0, "the budget ran on the fake clock")
+        self.assertLess(wall, 5.0, f"180 s budget on real clock: {wall:.1f} s")
+
+    def test_rollback_dict_engine_blob_uses_state_n_not_zero(self):
+        """P1 r5 (FIXED): a state whose engine blob was stored as a DICT
+        (a partial/flat mapping) gets written by _dump_yaml WITHOUT a
+        top-level `instances:` key — the old code fell back to N=0, a
+        silent zero-instance rollback. Now N falls back to the state's
+        own S6.5-recorded `n`."""
+        s, _sc, _run, _clock = make_seams(self.tmp, clock=Clock())
+        d = self.tmp / "statefiles"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "state-dict-engine.yaml"
+        p.write_text(
+            inst._dump_yaml(
+                {
+                    "timestamp": "t",
+                    "n": 2,
+                    "scope": "system",
+                    "config": {"subagent-engine.yaml": {"count": 2}},
+                }
+            )
+            + "\n"
+        )
+        code, report = inst.rollback(s, p, self.opt, "system")
+        self.assertEqual(code, 0, "a dict blob must not abort or zero out N")
+        self.assertEqual(report["n"], 2, "N from the state file, not 0")
+        self.assertTrue((self.tmp / "units" / "bonsai2-server@1.service").exists())
+
+    def test_missing_serving_only_still_rewrites(self):
+        """P1 r5 -> P2 (clarity): a re-run where ONLY serving.yaml is
+        missing (the engine is present and matches) must still trigger a
+        full config rewrite. The reviewer self-demoted this to P2 (the
+        drift list already forces the rewrite); the gate now mirrors the
+        srv side so it reads the same way — this test pins the semantics."""
+        s1, _sc, _run, _clock = make_seams(self.tmp)
+        _write_health(self.run_dir, _full_doc(2))
+        code, _r = self.install(s1)
+        self.assertEqual(code, 0)
+        eng_before = self.engine_on_disk()
+        (self.opt / "etc" / "serving.yaml").unlink()
+        s2, _sc2, _run2, _clock2 = make_seams(self.tmp)
+        _write_health(self.run_dir, _full_doc(2))
+        code, report = self.install(s2)
+        self.assertEqual(code, 0)
+        self.assertTrue((self.opt / "etc" / "serving.yaml").exists())
+        self.assertEqual(
+            self.engine_on_disk(), eng_before, "the matching engine is untouched"
+        )
+        joined = " ".join(report["config"]["actions"])
+        self.assertIn("serving.yaml: written", joined)
+
+    def test_main_unhandled_oserror_exits_2_not_1(self):
+        """P2 r5 (FIXED): an unhandled OSError/ValueError in the
+        non-rollback paths used to surface as a traceback + exit 1,
+        outside the S6.3 closed set {0,2,3,4}. main() now guards all
+        three dispatches -> clean exit 2 (ERR_CONFIG)."""
+        s, _sc, _run, _clock = make_seams(self.tmp)
+        s.repo_root = self.tmp / "no-such-repo"  # no etc/ templates -> OSError
+
+        @contextlib.contextmanager
+        def _swap():
+            real = inst.Seams
+            inst.Seams = lambda: s
+            try:
+                yield
+            finally:
+                inst.Seams = real
+
+        with _swap():
+            code = inst.main(
+                [
+                    "--opt-root",
+                    str(self.opt),
+                    "--health-dir",
+                    str(self.run_dir),
+                    "--scope",
+                    "system",
+                ]
+            )
+        self.assertEqual(code, 2, "closed set {0,2,3,4}, not a traceback + 1")
 
 
 class TestInstallE2E(_E2EBase):

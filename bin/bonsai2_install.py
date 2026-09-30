@@ -796,6 +796,7 @@ def check_health(
     budget_s: float = HEALTH_BUDGET_S,
     poll_s: float = 2.0,
     sleep=time.sleep,
+    now=time.monotonic,
 ) -> tuple[str, dict, list[str]]:
     """Wait for the S2.7 probe outcome on health.json.
 
@@ -822,10 +823,13 @@ def check_health(
     states both. (The manager rewrites health.json within one
     health_poll_s of the config change anyway.)
     """
-    deadline = time.monotonic() + budget_s
+    # P1 (G3c r5): the deadline loop must use the injectable `now` seam,
+    # NOT raw time.monotonic() — a faked `sleep` that advances nothing
+    # would otherwise burn the REAL 180 s budget in hermetic tests.
+    deadline = now() + budget_s
     last: dict = {}
     prev: dict | None = None
-    while time.monotonic() < deadline:
+    while now() < deadline:
         doc = read_health(health_dir)
         if doc is not None:
             last = doc
@@ -1153,23 +1157,32 @@ def rollback(
             or "bonsai-2-27b-gguf-PQ2_0.gguf"
         )
         port_base = int(inst_vals.get("port_base", 30101))
-        n = int(inst_vals.get("count", 0))
+        # P1 (G3c r5): if the restored blob was stored as a DICT (a
+        # partial/flat mapping), _dump_yaml writes it without a top-level
+        # `instances:` key and inst_vals comes back empty — N must fall
+        # back to the state's own S6.5-recorded `n` (the install-time
+        # count), NOT to 0 (a silent zero-instance rollback).
+        n = int(inst_vals.get("count", state.get("n") or 0))
         ctx = int(inst_vals.get("ctx_size", 262144))
         par = int(inst_vals.get("max_num_seqs", 8))
         budget = float(inst_vals.get("per_instance_budget_gb", 14.78))
+        # P2 (G3c r5): the top-level scalar / tools reads operate on the
+        # SAME already-in-memory engine_text — keep them inside the guard
+        # so the EXIT_CONFIG boundary is consistent (the r4 guard wrapped
+        # read_text + the instances parse but not these lines).
+        kv = _top_scalar_str(engine_text, "kv_cache") or "q4_0"
+        alias = _top_scalar_str(engine_text, "alias") or "qwen38-27b-subagent"
+        api_key = _top_scalar_str(engine_text, "api_key") or "bonsai2-local"
+        reasoning = _top_scalar_str(engine_text, "reasoning_format") or "deepseek"
+        tools_block = _block_text(engine_text, "tools") or ""
+        tools = (_block_scalar(tools_block, "enabled") or "false").lower() == "true"
+        tools_set = _block_list(tools_block, "set") if tools else None
     except (OSError, ValueError) as exc:
         _log(f"rollback: restored engine yaml unreadable: {exc}")
         return EXIT_CONFIG, {
             "status": "error",
             "error": f"restored engine yaml unreadable: {exc}",
         }
-    kv = _top_scalar_str(engine_text, "kv_cache") or "q4_0"
-    alias = _top_scalar_str(engine_text, "alias") or "qwen38-27b-subagent"
-    api_key = _top_scalar_str(engine_text, "api_key") or "bonsai2-local"
-    reasoning = _top_scalar_str(engine_text, "reasoning_format") or "deepseek"
-    tools_block = _block_text(engine_text, "tools") or ""
-    tools = (_block_scalar(tools_block, "enabled") or "false").lower() == "true"
-    tools_set = _block_list(tools_block, "set") if tools else None
     unit_dir = seams.unit_dir(scope)
     unit_dir.mkdir(parents=True, exist_ok=True)
     for i in range(n):
@@ -1679,7 +1692,17 @@ def install(
             else:
                 drift.append("serving.yaml differs from rendered")
 
-    do_rewrite = force_config or bool(drift) or not eng_on_disk.is_file()
+    # P2 (G3c r5): the `or not eng_on_disk.is_file()` alone was the
+    # asymmetric gate the reviewer flagged — mirror the srv side too so
+    # the "first install" drift message and the rewrite gate read the
+    # same way (the drift list already covers both, so this is clarity,
+    # not behavior).
+    do_rewrite = (
+        force_config
+        or bool(drift)
+        or not eng_on_disk.is_file()
+        or not srv_on_disk.is_file()
+    )
     if do_rewrite:
         for name, text in (
             ("subagent-engine.yaml", engine_rendered),
@@ -1768,6 +1791,7 @@ def install(
             main_probe_path=main_probe_path,
             main_probe=seams.main_probe,
             sleep=seams.sleep,
+            now=seams.now,
         )
         plan.warnings.extend(hwarns)
     else:
@@ -1960,7 +1984,15 @@ def refresh_main(
     recompute N, re-run the quick bench (M1/M2/M7). The quick bench is
     run via bin/bonsai2-bench --quick against the installed tree (the
     bench resolves its config from /opt/bonsai2/etc via the BONSAI2_*
-    env vars)."""
+    env vars).
+
+    P2 (G3c r2, deferred): a refresh run rewrites the config but does
+    NOT write a new state file (one state per install, S6.5). The
+    deferral is recorded here, not just in the PR: `--rollback` always
+    targets an install-time state, and a refresh-main that moves the
+    footprint/N is a config-change event whose next full install will
+    record the new state. (Review r5 P2 #6: the deferral note belongs
+    in the code, not only in the disposition.)"""
     scope = scope or ("system" if seams.is_root() else "user")
     srv_text = (opt_root / "etc" / "serving.yaml").read_text()
     eng_text = (opt_root / "etc" / "subagent-engine.yaml").read_text()
@@ -2093,30 +2125,63 @@ def main(argv: list[str] | None = None) -> int:
     python = args.python or sys.executable
 
     if args.rollback:
-        code, report = rollback(
-            seams,
-            Path(args.rollback),
-            opt_root,
-            args.scope or ("system" if seams.is_root() else "user"),
-        )
+        try:
+            code, report = rollback(
+                seams,
+                Path(args.rollback),
+                opt_root,
+                args.scope or ("system" if seams.is_root() else "user"),
+            )
+        except (OSError, ValueError) as exc:
+            # P2 (G3c r5): an unexpected OSError/ValueError in a
+            # non-guarded section must exit the S6.3 closed set {0,2,3,4},
+            # never a traceback + exit 1.
+            _log(f"ERR_CONFIG (unhandled {type(exc).__name__}): {exc}")
+            code, report = (
+                EXIT_CONFIG,
+                {
+                    "status": "error",
+                    "error": f"unhandled {type(exc).__name__}: {exc}",
+                },
+            )
     elif args.refresh_main:
-        code, report = refresh_main(
-            seams,
-            opt_root=opt_root,
-            python=python,
-            scope=args.scope,
-        )
+        try:
+            code, report = refresh_main(
+                seams,
+                opt_root=opt_root,
+                python=python,
+                scope=args.scope,
+            )
+        except (OSError, ValueError) as exc:
+            _log(f"ERR_CONFIG (unhandled {type(exc).__name__}): {exc}")
+            code, report = (
+                EXIT_CONFIG,
+                {
+                    "status": "error",
+                    "error": f"unhandled {type(exc).__name__}: {exc}",
+                },
+            )
     else:
-        code, report = install(
-            seams,
-            opt_root=opt_root,
-            health_dir=health_dir,
-            scope=args.scope,
-            python=python,
-            instances=args.instances,
-            force_config=args.force_config,
-            dry_run=args.dry_run,
-        )
+        try:
+            code, report = install(
+                seams,
+                opt_root=opt_root,
+                health_dir=health_dir,
+                scope=args.scope,
+                python=python,
+                instances=args.instances,
+                force_config=args.force_config,
+                dry_run=args.dry_run,
+            )
+        except (OSError, ValueError) as exc:
+            _log(f"ERR_CONFIG (unhandled {type(exc).__name__}): {exc}")
+            code, report = (
+                EXIT_CONFIG,
+                {
+                    "status": "error",
+                    "error": f"unhandled {type(exc).__name__}: {exc}",
+                },
+            )
     # S3.1 style: the one JSON object on stdout is the data; stderr is
     # the human log (already emitted).
     json.dump(report, sys.stdout, indent=2)
