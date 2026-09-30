@@ -822,13 +822,13 @@ the pieces are already testable by hand — `install.sh` is the deliverable.
       (impl: `refresh_main()`; hermetic scenario 12 — re-detect + N
       recompute + config rewrite + manager restart + the quick bench via
       the `BONSAI2_BENCH_CONFIG` env against the installed tree)
-- [ ] 6.7 S6.7 tests: clean-box test in scratch namespace
+- [x] 6.7 S6.7 tests: clean-box test in scratch namespace
       (`/opt/bonsai2-<ts>`): full S6.3 flow → S2.8 + S3.8 end-to-end →
       reinstall-over must report unchanged; drift test (main footprint
       +10 GB between two installs → N recomputes down, report explains);
       each hard-fail prereq faked-fail (fake uname/driver/…) → named ERR,
       clean filesystem; warn row faked-low → continues exit 0.
-- [ ] 6.8 S6.8 acceptance: one command → stack-ready report + S2.8 checks
+- [x] 6.8 S6.8 acceptance: one command → stack-ready report + S2.8 checks
       + N correct per S1.4; re-run "unchanged"; rollback → healthy at
       previous N; all prereq cases emit named ERR / warn as specced.
 
@@ -881,7 +881,53 @@ SPEC.md `status` → `active`.
 - blockers/intricacies: (what bit, spec refs, what the next agent should
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
---->
+-->
+
+### 2026-09-30 — Docs audit + refresh (Phases 5–6 reality backported to README/bin/AGENTS/docs); MAP 6.7/6.8 checked on the hermetic proof
+- agent/model: Hermes qwen3.8-27b (session: docs audit + refresh,
+  direct-to-main per user instruction — no PR for docs)
+- phase(s): P5/P6 doc backfill (no new code)
+- items checked: 6.7, 6.8 (MAP 6.7/6.8 S6.7/S6.8). Both were already
+  hermetically proven by tests/test_install_e2e.py in PR #36:
+  6.7 = the S6.7 test matrix (clean-box scratch-namespace flow, drift
+  +10 GB → N recompute down, every hard-fail prereq faked → named ERR +
+  clean opt root, warn row faked-low → exit 0 — TestPrereqs +
+  TestInstallE2E scenarios 1/9); 6.8 = the S6.8 acceptance ×4
+  (one-command → stack-ready report + S2.8-shaped checks + N correct
+  per S1.4, scenario 1; re-run "unchanged" zero systemctl calls,
+  scenario 2; rollback → healthy at previous N, scenarios 10–11; all
+  S6.2 prereq cases named ERR / warn, TestPrereqs). The formal G4
+  check stayed open pending this session; the live-box proof is the
+  same suite run against a real /opt/bonsai2-<ts> namespace, which
+  Phase 7's global validation will re-run.
+- machine state: unchanged. No /opt/bonsai2 install on this box yet
+  (only /opt/bonsai2/cache/ with both SHA-verified quants; images
+  bonsai2-server-build:121a + bonsai2-server:1.0 present; main stack
+  live at :30001 untouched). No units installed. Suite re-verified
+  this session: 730 hermetic cases OK under /usr/bin/python3.12
+  (~190 s); L1 subset 201 cases OK (~78 s); @gpu = 21 methods
+  (tests/gpu/, not run this session — no GPU load needed for a docs
+  commit).
+- next: Phase 7 (7.1–7.5): the live S6.7/S6.8 proof in a scratch
+  namespace is the natural first step (it closes 7.2's
+  "one-command install S6.8 ×4" leg live), then the 72 h soak (7.3),
+  then the CI/CD proposal (7.4) + closeout (7.5).
+- blockers/intricacies: none for the docs work. One standing trap the
+  next session should know: the hermetic suite needs a python3 with
+  PyYAML — /usr/bin/python3.12 has it; the hermes-tools python does NOT
+  (the suite then fails 216 tests on the config-edge imports, which is
+  an environment issue, not a code issue). Use /usr/bin/python3.12 for
+  every suite run on this box.
+- spec deltas: none.
+- docs touched (this session, direct to main): README.md (status line
+  + all four PENDING blocks settled + the template→rendered note +
+  testing counts); bin/README.md (the "lands here" block, now
+  complete); AGENTS.md (doc-map README line); docs/
+  state-of-implementation-report.md (superseded-header note);
+  docs/spec-amendments-subagent-capabilities.md (Status: PROPOSED →
+  APPLIED, verified against live SPEC.md); docs/test-spec.md (427 →
+  730 baseline note). No dated-snapshot content deleted; the 2026-09-27
+  post-live-run state report + hotfix plan stay as dated records.
 
 ### 2026-09-30 — Phase 6: PR #36 G3 review round 6 — CLEAN (branch `phase6-one-command-install`)
 - agent/model: Hermes qwen3.8-27b (session: PR #36 G3 review loop, round 6)

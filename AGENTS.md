@@ -17,9 +17,10 @@ disagree, fix the spec and record the delta). `MAP.md` = the
 implementation ledger — resume protocol, phased checkboxes, session log;
 the first unchecked item is the frontier. `ARTIFACTS.md` = where every
 external thing lives (weights, binaries, images, units, tools) — keep it
-current, full trackability. `README.md` = the public-facing overview
-(skeleton as of 2026-09-22; sections marked `PENDING` fill in as MAP
-phases land). `idea.txt` = original intent (history, not requirements).
+current, full trackability. `README.md` = the public-facing overview (settled through Phase 6,
+2026-09-30 — the remaining `PENDING` is the Phase 7.5 topology
+diagram; sections marked `PENDING` settle as the referenced MAP items
+close). `idea.txt` = original intent (history, not requirements).
 
 ## The target box (what we are building for)
 

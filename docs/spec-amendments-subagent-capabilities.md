@@ -1,7 +1,12 @@
 # qwen-tory38 — Spec amendments: subagent capability layer (tool loop)
 
-Status: PROPOSED. Apply these amendments to SPEC.md in a dedicated
-session (one PR, spec-follows-code delta notes included). Companion to
+Status: APPLIED. These amendments are back-integrated into SPEC.md
+(the S3.4 tool loop, the S3.6 `tool_execution`/`tool_*`/`task_max_steps`
+keys, the S5.2 M9/M10 capability-layer scenarios, and the S0 capability
+boundary) — confirmed present in the live SPEC.md as of the 2026-09-30
+doc audit. This file is kept as the record of what was proposed and
+the decision log (agreed 2026-09-25, owner: user); read SPEC.md for the
+authoritative text. Companion to
 `docs/state-of-implementation-report.md` (2026-09-25).
 
 This document contains ONLY spec amendments (reworded / added /

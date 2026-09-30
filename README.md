@@ -16,12 +16,16 @@ harness skill (`bonsai2-harness`) that encodes work-allocation doctrine.
 A bench framework measures where the subagents actually win. Everything
 installs by one command (`install.sh`).
 
-> **Status:** implementation in progress. Sections marked
-> `<!-- PENDING (MAP n.n) -->` are structural placeholders for work that
-> lands in a later phase — settle them as the referenced MAP items close.
-> The authoritative design is `SPEC.md` (locked); the authoritative
-> progress is `MAP.md` (the ledger). This README must not contradict
-> either; if it does, the spec/map wins and the README gets fixed.
+> **Status (2026-09-30):** Phases 0–6 are merged on main — the engine +
+> image (P1), the instance manager + units (P2), the S3.2 control
+> surface including the S3.4 tool loop (P3), the S5 bench framework
+> M1–M10 with two live runs (P4), the `bonsai2-harness` doctrine skill
+> + S4.6 doctrine audit (P5), and the one-command installer + S6.3
+> pipeline E2E suite (P6, PR #36). Remaining: Phase 7 (global
+> validation, 72 h soak, closeout). The authoritative design is
+> `SPEC.md` (locked); the authoritative progress is `MAP.md` (the
+> ledger). This README must not contradict either; if it does, the
+> spec/map wins and the README gets fixed.
 
 ## Doc map
 
@@ -163,7 +167,7 @@ The repo mirrors the host `/opt/bonsai2/` layout 1:1 so source and
 deploy paths never diverge; `install.sh` (Phase 6) is the deployer.
 
 ```
-install.sh                  # S6.3 one-command installer (Phase 6) — PENDING
+install.sh                  # S6.3 one-command installer (Phase 6, landed)
 bin/                        # -> /opt/bonsai2/bin/  (source tree)
     bonsai2_model_fetch.py  #   model download + SHA256 verify (MAP 1.3, done)
     bonsai2_build_image.py  #   runtime-image build orchestrator (MAP 1.4, done)
@@ -176,8 +180,11 @@ bin/                        # -> /opt/bonsai2/bin/  (source tree)
     bonsai2-health          #   S3.2 read family (MAP 3.2, done)
     bonsai2-spawn           #   spawn command (MAP 3.3, done)
     bonsai2-taskworker.py   #   detached worker child (MAP 3.3, done)
-    (S3.2 commands still to land: steer, cancel, collect, bench,
-     unload, reload — MAP 3.4-3.8 / 4.7)
+    bonsai2-unload          #   pool control, manager-mediated (MAP 3.8, done)
+    bonsai2-reload          #   pool control, manager-mediated (MAP 3.8, done)
+    bonsai2-bench           #   S5.4 bench wrapper (MAP 4.7, done)
+    bonsai2_tools.py        #   S3.4 host-side 4-tool module (MAP 3.13, done)
+    bonsai2_install.py      #   S6.3 installer core, behind install.sh (MAP 6.1-6.6, done)
 etc/                        # -> /opt/bonsai2/etc/ TEMPLATES; install.sh
     subagent-engine.yaml    #   renders the four runtime YAMLs from detected
     serving.yaml            #   box state (pins, hashes, N) — never hand-edit
@@ -188,7 +195,7 @@ units/                      # -> /etc/systemd/system/ (S2.2; MAP 2.4, done —
     bonsai2-server@.service
 image/                      # Dockerfiles: build pipeline + runtime image
 bench/                      # S5 bench framework source (run.py, score/,
-    goldens/                #   goldens + M4 seeded-bug fixture) — PENDING (MAP P4)
+    goldens/                #   goldens + M4 seeded-bug fixture; MAP P4, done)
 tests/                      # hermetic default: python3 -m unittest discover -s tests -t .
     fixtures/               #   mock-engine fixture (threaded http.server;
                             #   landed with MAP 3.1, ahead of MAP 3.10 —
@@ -219,219 +226,239 @@ hand-edit the deployed files; re-run the installer instead.
 - `etc/bench.yaml` (S5.7) — scenario matrix, quick set, repetitions,
   regression threshold, goldens dir.
 
-<!-- PENDING (MAP 1.5 done, but fill when install.sh lands, MAP 6.2): show a
-     snippet of the RE-NDERED (deployed) subagent-engine.yaml from a real
-     install, so readers see the difference between template and rendered. -->
+Template → rendered: `install.sh` writes the real files to
+`/opt/bonsai2/etc/` by re-writing specific keys in the templates with
+computed values (never a hand-edit). Concretely, per S6.3:
+
+- `subagent-engine.yaml` — `instances.count` is set to the N computed
+  by the S1.4 formula from the live main-stack footprint (e.g. this
+  box: 2); `image.pin.tag` + `image.pin.sha256` are written back from
+  the verified docker content digest (S6.3 step 2). Everything else —
+  engine pin, model files + SHA256, ctx/parallel/budget, sampling,
+  alias, api key, the S1.6 `tools:` block — carries through verbatim.
+- `serving.yaml` — `main_stack.footprint_gb` is set to the detected
+  SGLang-log footprint (the S6.4 drift-watch baseline; `boot_target_s`
+  stays untouched here — the manager writes it back from the measured
+  cold boot, S2.6).
+- `harness.yaml` + `bench.yaml` — the S3.6 tool-loop keys and the S5.7
+  scenario matrix carry through; results/bench dirs point at the
+  installed `/run/bonsai2/` layout.
+
+So the difference between `etc/` in the repo and `/opt/bonsai2/etc/`
+after an install is: computed N, the image digest, and the detected
+main-stack footprint — nothing else. An unchanged re-run reports
+"unchanged" with zero rewrites (S6.4).
 
 ## Installation
 
-<!-- PENDING (MAP P6 / SPEC S6): this is the one-command install, the Phase 6
-     deliverable. Fill in when install.sh exists. Settled shape (S6.3, S6.4):
+Landed in Phase 6 (MAP 6.1–6.6, PR #36): `install.sh` is a thin entry
+that execs `bin/bonsai2_install.py`, the S6.3 ordered pipeline. Verified
+hermetically by `tests/test_install_e2e.py` (S6.2 prereq rows faked,
+S6.3 pipeline scenarios 1–12, CLI wiring, S6.5 state-file round-trip
+through both readers); the live S6.7/S6.8 proof lands with Phase 7.
 
-       sudo ./install.sh            # idempotent; see S6.4
-       sudo ./install.sh --instances 1   # MVP single-instance rollout
-       sudo ./install.sh --instances N'  # load to N after MVP e2e
-       sudo ./install.sh --force-config  # regenerate YAMLs regardless of drift
-       sudo ./install.sh --refresh-main  # after a main-stack upgrade (S6.5)
-       sudo ./install.sh --rollback state-<ts>.yaml
+    ./install.sh                  # idempotent; see S6.4
+    ./install.sh --instances 1    # MVP single-instance rollout
+    ./install.sh --instances N'   # load to N after MVP e2e
+    ./install.sh --force-config   # regenerate YAMLs regardless of drift
+    ./install.sh --refresh-main   # after a main-stack upgrade (S6.5)
+    ./install.sh --rollback state-<ts>.yaml
 
-     Ordered steps: prereq checks → build-or-verify image + record digest →
-     download model (skip on SHA match) → detect main-stack fresh-load
-     footprint (SGLang log, read-only; fallbacks: live cgroup, then the
-     76.4 default + WARN_MAIN_STACK_DEAD) → compute N (S1.4, with S2.4
-     PTQ1_0/ctx-halve fallbacks) → write the four YAMLs → install units →
-     start manager → health checks (180 s budget) → stack-ready report.
-     Exit codes: 0 (full or main-only), 4 (live-margin OOM), 3 (arch
-     mismatch), 2 (config). Idempotent re-run with no drift reports
-     "unchanged" (zero restarts, zero downloads).
--->
+Ordered steps: prereq checks (S6.2: hard-fail rows → named ERR, exit ≠ 0,
+atomic; warn row → `WARN_MEMORY_BELOW_MATRIX`, exit 0, N recomputed) →
+build-or-verify image + record digest → download model (skip on SHA
+match) → detect main-stack fresh-load footprint (SGLang log, read-only;
+fallbacks: live cgroup, then the 76.4 default + `WARN_MAIN_STACK_DEAD`)
+→ compute N (S1.4, with S2.4 PTQ1_0/ctx-halve fallbacks) → write the
+four YAMLs → install units → start manager → health checks (180 s
+budget) → stack-ready report. Exit codes: 0 (full or main-only), 4
+(live-margin OOM), 3 (arch mismatch), 2 (config). Idempotent re-run with
+no drift reports "unchanged" (zero restarts, zero downloads).
 
 ## The main-agent API (S3.2 control scripts)
 
-<!-- In progress (MAP P3 / SPEC S3): the read family (status,
-     list-instances, health — MAP 3.2) and spawn + taskworker (MAP 3.3)
-     are merged on main. The remainder of the phase is actively underway
-     (per the MAP.md ledger, which is authoritative for the numbers):
-     3.4 slot model + deadline, 3.5 spawn dedup, 3.6 collect,
-     3.7 steer/cancel, 3.8 unload/reload, 3.9 exit-code closed-set audit,
-     3.10 mock-engine manager stub, 3.11 hermetic suite, 3.12 S3.8
-     acceptance. The surface below is the
-     LOCKED design (S3.2) and the commands still to land keep it verbatim.
-     Command surface (S3.2, all under /opt/bonsai2/bin/, config from
-     /opt/bonsai2/etc/harness.yaml, env overrides
-     BONSAI2_CONFIG / BONSAI2_RESULTS_DIR):
+All S3.2 commands are merged on main (MAP P3, incl. the S3.4 tool loop).
+The surface below is as built — every command under `/opt/bonsai2/bin/`,
+config from `/opt/bonsai2/etc/harness.yaml`, env overrides
+`BONSAI2_CONFIG` / `BONSAI2_RESULTS_DIR`:
 
-     bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
-                    [--ctx N] [--deadline SECS] [--out FILE]
-                    [--priority low|normal|high]
-                    -> JSON. Submits to the least-loaded healthy instance.
-     bonsai2-steer  <TASK_ID> -m MESSAGE [--wait SECS]
-     bonsai2-cancel <TASK_ID> [--graceful]
-     bonsai2-status
-     bonsai2-list-instances
-     bonsai2-collect <TASK_ID>  (task JSON + answer / reasoning / usage)
-     bonsai2-bench    [--scenario NAME] [--quick]
-     bonsai2-unload   [--all | --instances i[,i,...]]
-     bonsai2-reload   [--all | --instances i[,i,...]]
-     bonsai2-health   (raw /run/bonsai2/health.json, pretty)
+    bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
+                   [--ctx N] [--deadline SECS] [--max-steps N] [--workdir DIR]
+                   [--out FILE] [--priority low|normal|high]
+                   -> JSON. Submits to the least-loaded healthy instance.
+                   --tools on = the S3.4 agentic tool loop (bash/read_file/
+                   write_file/python confined to the workdir); off = a
+                   single completion. --max-steps bounds the loop.
+    bonsai2-steer  <TASK_ID> -m MESSAGE [--wait SECS]
+    bonsai2-cancel <TASK_ID>
+    bonsai2-status
+    bonsai2-list-instances
+    bonsai2-collect <TASK_ID>  (task JSON + answer / reasoning / usage /
+                                tool_log / steps / workdir)
+    bonsai2-bench    [--scenario NAME] [--quick]
+    bonsai2-unload   [--all | --instances i[,i,...]]
+    bonsai2-reload   [--all | --instances i[,i,...]]
+    bonsai2-health   (raw /run/bonsai2/health.json, pretty)
 
-     Output contract: stdout = one JSON object (machine); stderr = human
-     text, never parsed. Status schema:
+Output contract: stdout = one JSON object (machine); stderr = human
+text, never parsed. Status schema:
 
-       {"stack": "healthy|degraded|main-only",
-        "instances": [{"i": 0, "port": 30101,
-                       "state": "healthy|degraded|bdown|bfailed|bunloaded",
-                       "ctx": 262144, "ctx_reduced": false,
-                       "slots_in_use": 3, "slots_total": 8}],
-        "main_endpoint": "http://localhost:30001",
-        "main_healthy": true,
-        "main_only_reason": "budget_zero"}
+  {"stack": "healthy|degraded|main-only",
+   "instances": [{"i": 0, "port": 30101,
+                  "state": "healthy|degraded|bdown|bfailed|bunloaded",
+                  "ctx": 262144, "ctx_reduced": false,
+                  "slots_in_use": 3, "slots_total": 8}],
+   "main_endpoint": "http://localhost:30001",
+   "main_healthy": true,
+   "main_only_reason": "budget_zero"}
 
-     Exit-code closed set (12 codes, S3.2): 0 success/queued · 2
-     malformed args · 3 port conflict · 4 engine-level failure · 5 ctx
-     too long · 8 deadline/queue wait · 20 task done · 21 task failed ·
-     22 task timed out · 80 no subagent instances (main-only) · 82 main
-     endpoint unhealthy · 84 manager down. Any other code is a harness
-     bug — the hermetic suite asserts exactly this set.
+Exit-code closed set (12 codes, S3.2): 0 success/queued · 2
+malformed args · 3 port conflict · 4 engine-level failure · 5 ctx
+too long · 8 deadline/queue wait · 20 task done · 21 task failed ·
+22 task timed out · 80 no subagent instances (main-only) · 82 main
+endpoint unhealthy · 84 manager down. Any other code is a harness
+bug — the hermetic suite asserts exactly this set.
 
-     Routing: least-loaded, deadline-aware (fewest slots in use, tie-
-     break lowest i); queue FIFO with priority preemption up to
-     queue_wait_max_s; one slot per task for its whole lifetime; spawn
-     dedup on prompt hash + flags, 24 h TTL.
--->
+Routing: least-loaded, deadline-aware (fewest slots in use, tie-break
+lowest i); queue FIFO with priority preemption up to
+`queue_wait_max_s`; one slot per task for its whole lifetime; spawn
+dedup on prompt hash + flags, 24 h TTL.
 
 ## The harness skill (`bonsai2-harness`)
 
-<!-- Landed in Phase 5 (MAP 5.1-5.5): the doctrine skill is now in the repo
-     at `skills/bonsai2-harness/` (SKILL.md + claims.json, the
-     machine-readable claims file the S4.6 doctrine audit consumes).
-     Design as built:
+Landed in Phase 5 (MAP 5.1–5.8): the doctrine skill is in the repo at
+`skills/bonsai2-harness/` (SKILL.md + claims.json, the machine-readable
+claims file the S4.6 doctrine audit consumes). Design as built:
 
-     - A standard SKILL.md text skill, installable into Hermes / pi / any
-       agent runtime that loads text skills and runs bash. Loaded on
-       demand, in any session where the main agent may offload work.
-       Harness-agnostic by form (S4.1 delta 2026-09-28): box-specific
-       facts confined to ONE "This box" section; the doctrine, command
-       reference, recipes, and verification protocol are written against
-       the S3.2 surface only — usable by any runtime against any pool
-       exposing S3.2. A different box updates "This box" only.
-     - Its command reference is exactly the S3.2 surface (it never
-       invents commands), including the closed-set 12 exit codes.
-     - Work-allocation doctrine (S4.2): main = multi-step plans,
-       architecture, cross-file coherence, long-context reading, live
-       tool-feedback loops, and ALL verification of subagent claims.
-       Subagents = bounded code-gen, per-file analysis fan-out, test
-       execution, drafts, diff-review drafts, spec-chunk implementation
-       and test-batch-with-report (--tools on). Every doctrine row cites
-       a bench scenario id [M#] — no citation, no claim. The self-report
-       rule is the amended "unverified claim WITH EVIDENCE": --tools on
-       results carry the tool_log ledger; verification is ledger-first
-       (claimed suite ran with exit 0, claimed files exist in the
-       workdir, then main re-runs the named check on its own side).
-     - Session economy (S4.3): <= 6 of 8 slots busy per instance; batch
-       spawns in one turn then one collect loop; short main turns while
-       subagents run; steer instead of cancel+respawn past 50 %.
-       Live-run doctrine (S4.3 delta 2026-09-28): main t/s halves under
-       a loaded pool — main sends large clearly-predefined chunks and
-       does the intelligence-critical work in the window; TWO WORKFLOW
-       BRANCHES, stateless DEFAULT (spawn -> collect -> unload -> verify
-       at full t/s -> re-spawn if needed) and stateful (keep loaded +
-       context-retained for multi-step work); VRAM climb = KV growth
-       within the S1.4 tier, release = bonsai2-unload --all when the
-       pool is done; box meters — cache % is reclaimable (judge
-       MemAvailable), CPU 4-20 % / GPU ~96 % is the healthy state.
-     - Cost doctrine (S4.4): dispatch iff estimated dispatch cost
-       (prefill + decode + main-side verification) beats the same task
-       on main; two consecutive bench-confirmed losses on a task shape
-       flip that row to main until re-benched. The a-priori 29/4800
-       floors are replaced where the 2026-09-28 post-hotfix run measured
-       (subagent decode 44.7-61.9 t/s single-task, 3.7-19.3 per-task under
-       16-wide contention; tool-loop wall dominated by tool execution —
-       the --tools on dispatch-cost term is steps_est x tool duration +
-       prefill of tool results; main idle 8.52 t/s; main-under-load
-       planning number = halved). The win/lose call uses the
-       contention-adjusted t/s.
-     - Failure doctrine (S4.5): one paragraph per S3.2 exit code.
-     - Prompt templates: one proven template per S4.2 tool-loop row
-       (T1 spec-chunk [M9], T2 test batch + report [M10], T3
-       browser-via-python — provisional, no S5.2 row yet), each with the
-       workdir contract, the definition of done (test command + expected
-       exit code), and the final-answer contract.
-     - Recipes (S4.1 delta 2026-09-28): R1-R7 — worked examples for
-       different coding-work shapes (single-file code-gen, test batch +
-       report, diff review, spec-chunk implementation, fan-out analysis,
-       long-context QA, saturation fan-out), each = task shape + bench
-       citation + filled prompt template + main's verification protocol
-       + observed failure modes (from the 2026-09-27/28 live runs) +
-       workflow branch. A recipe without a bench citation is a review
-       defect.
-     - A doctrine-audit script (S4.6, MAP 5.6) keeps skill claims <->
-       bench rows consistent; a failing audit blocks the skill PR.
---->
+- A standard SKILL.md text skill, installable into Hermes / pi / any
+  agent runtime that loads text skills and runs bash. Loaded on demand,
+  in any session where the main agent may offload work. Harness-agnostic
+  by form (S4.1 delta 2026-09-28): box-specific facts confined to ONE
+  "This box" section; the doctrine, command reference, recipes, and
+  verification protocol are written against the S3.2 surface only —
+  usable by any runtime against any pool exposing S3.2. A different box
+  updates "This box" only.
+- Its command reference is exactly the S3.2 surface (it never invents
+  commands), including the closed-set 12 exit codes.
+- Work-allocation doctrine (S4.2): main = multi-step plans,
+  architecture, cross-file coherence, long-context reading, live
+  tool-feedback loops, and ALL verification of subagent claims.
+  Subagents = bounded code-gen, per-file analysis fan-out, test
+  execution, drafts, diff-review drafts, spec-chunk implementation
+  and test-batch-with-report (--tools on). Every doctrine row cites a
+  bench scenario id [M#] — no citation, no claim. The self-report rule
+  is the amended "unverified claim WITH EVIDENCE": --tools on results
+  carry the tool_log ledger; verification is ledger-first (claimed
+  suite ran with exit 0, claimed files exist in the workdir, then main
+  re-runs the named check on its own side).
+- Session economy (S4.3): <= 6 of 8 slots busy per instance; batch
+  spawns in one turn then one collect loop; short main turns while
+  subagents run; steer instead of cancel+respawn past 50 %.
+  Live-run doctrine (S4.3 delta 2026-09-28): main t/s halves under a
+  loaded pool — main sends large clearly-predefined chunks and does the
+  intelligence-critical work in the window; TWO WORKFLOW BRANCHES,
+  stateless DEFAULT (spawn -> collect -> unload -> verify at full t/s ->
+  re-spawn if needed) and stateful (keep loaded + context-retained for
+  multi-step work); VRAM climb = KV growth within the S1.4 tier,
+  release = bonsai2-unload --all when the pool is done; box meters —
+  cache % is reclaimable (judge MemAvailable), CPU 4-20 % / GPU ~96 %
+  is the healthy state.
+- Cost doctrine (S4.4): dispatch iff estimated dispatch cost
+  (prefill + decode + main-side verification) beats the same task on
+  main; two consecutive bench-confirmed losses on a task shape flip
+  that row to main until re-benched. The a-priori 29/4800 floors are
+  replaced where the 2026-09-28 post-hotfix run measured (subagent
+  decode 44.7-61.9 t/s single-task, 3.7-19.3 per-task under 16-wide
+  contention; tool-loop wall dominated by tool execution — the --tools
+  on dispatch-cost term is steps_est x tool duration + prefill of tool
+  results; main idle 8.52 t/s; main-under-load planning number =
+  halved). The win/lose call uses the contention-adjusted t/s.
+- Failure doctrine (S4.5): one paragraph per S3.2 exit code.
+- Prompt templates: one proven template per S4.2 tool-loop row
+  (T1 spec-chunk [M9], T2 test batch + report [M10], T3
+  browser-via-python — provisional, no S5.2 row yet), each with the
+  workdir contract, the definition of done (test command + expected
+  exit code), and the final-answer contract.
+- Recipes (S4.1 delta 2026-09-28): R1-R7 — worked examples for
+  different coding-work shapes (single-file code-gen, test batch +
+  report, diff review, spec-chunk implementation, fan-out analysis,
+  long-context QA, saturation fan-out), each = task shape + bench
+  citation + filled prompt template + main's verification protocol
+  + observed failure modes (from the 2026-09-27/28 live runs) +
+  workflow branch. A recipe without a bench citation is a review
+  defect.
+- A doctrine-audit script (S4.6, MAP 5.6) keeps skill claims <-> bench
+  rows consistent; a failing audit blocks the skill PR.
 
 ## Bench framework
 
-<!-- PENDING (MAP P4 / SPEC S5): runner + scorers + goldens land in Phase 4.
-     Settled scope (S5):
+Landed in Phase 4 (MAP P4 / SPEC S5): `bench/run.py` + scorers +
+goldens, driven by `bin/bonsai2-bench`. As built:
 
-     - Measures BOTH axes, t/s-primary: raw throughput (decode/prefill
-       t/s, wall time) and task success with a named rubric per task
-       type. No LLM-judge in v1.
-     - Scenario matrix M1–M8 (S5.2): M1 single-file code-gen · M2 test
-       execution batch · M3 fan-out doc analysis · M4 diff review
-       (seeded 10-bug fixture) · M5 long-context doc read (60K tokens)
-       · M6 main-only control of M1–M5 · M7 all-instances saturation ·
-       M8 contention (main at working load + subagents at working load;
-       main-t/s guardrail ≤ main_guardrail_pct regression).
-     - Runner: bench/run.py (Python, stdlib + requests only), box-state
-       snapshot per run, JSON rows + committed markdown summary in
-       bench-results/, 7-day rotation + 1 GB cap, a flock so two benches
-       never overlap. Exit 0 even on scenario-level failure (the
-       verdict is data); exit 2 on bad config.
-     - Re-bench policy (S5.5): quick bench (M1+M2+M7) gates every
-       engine-pin bump and model re-download (> 10 % t/s or auto-rubric
-       regression blocks the PR); full M1–M8 on quant/revision changes
-       and when a doctrine row flips.
--->
+- Measures BOTH axes, t/s-primary: raw throughput (decode/prefill
+  t/s, wall time) and task success with a named rubric per task
+  type. No LLM-judge in v1.
+- Scenario matrix M1–M10 (S5.2): M1 single-file code-gen · M2 test
+  execution batch · M3 fan-out doc analysis · M4 diff review
+  (seeded 10-bug fixture) · M5 long-context doc read (60K tokens)
+  · M6 main-only control of M1–M5 · M7 all-instances saturation ·
+  M8 contention (main at working load + subagents at working load;
+  main-t/s guardrail ≤ main_guardrail_pct regression) · M9 spec-chunk
+  implementation with the S3.4 tool loop · M10 test batch + report
+  with the S3.4 tool loop — both run in host AND engine tool-execution
+  modes, in one row each.
+- Runner: bench/run.py (Python, stdlib + requests only), box-state
+  snapshot per run, JSON rows + committed markdown summary in
+  bench-results/, 7-day rotation + 1 GB cap, a flock so two benches
+  never overlap. Exit 0 even on scenario-level failure (the
+  verdict is data); exit 2 on bad config.
+- Re-bench policy (S5.5): quick bench (M1+M2+M7) gates every
+  engine-pin bump and model re-download (> 10 % t/s or auto-rubric
+  regression blocks the PR); full M1–M10 on quant/revision changes
+  and when a doctrine row flips. `bench/rebench.py` owns the baseline
+  comparison.
+- Live runs on this box: 2026-09-27 pre-prod + 2026-09-28 post-hotfix
+  full M1–M10 (bench-results/, runbook in bench/BENCH.md). The
+  2026-09-28 rows are the calibration data behind the skill's
+  cost doctrine.
 
 ## Lifecycle & operations
 
-<!-- In progress (MAP P2 + P6 / SPEC S2, S6): manager + units landed in
-     Phase 2 (MAP 2.1-2.11 merged, incl. the S2.8 acceptance @gpu run and
-     the 2026-09-24 15 s -> 30 s reload-budget spec amendment); one-command
-     ops land in Phase 6. The design below is as built:
+Manager + units landed in Phase 2 (MAP 2.1–2.11 merged, incl. the
+S2.8 acceptance @gpu run and the 2026-09-24 15 s → 30 s reload-budget
+spec amendment); one-command ops landed in Phase 6 (install.sh,
+state files, --rollback, --refresh-main). As built:
 
-     - units: bonsai2-sglang.service (the instance manager, Type=notify,
-       sd_notify) + bonsai2-server@i.service template — one container
-       per instance, verbatim the main stack's configuration shape
-       (docker run under systemd, host networking, --memory = per-
-       instance budget, CPUQuota=64%, Restart=on-failure ×3 → bfailed,
-       ExecStartPre= docker rm -f). Wants= (not Requires=) on the main
-       stack.
-     - boot order: main stack first (pre-existing units), then the
-       manager starts the granted instances in order, each healthy
-       before the next. Target: all healthy ≤ 180 s after multi-user.
-     - two-tier VRAM gate at boot: the planning tier (S2.3) decides N'
-       from the live main-container cgroup; the allocation tier (S1.4)
-       is a stricter per-instance pre-spawn gate (free ≥ footprint +
-       1.0 GB). i > 0 shortfall → partial load, exit 0; i = 0 shortfall
-       after a granted N' ≥ 1 → exit 4 ERR_VRAM_OOM.
-     - N=0 / main-only mode (S2.4): PTQ1_0 quant retry, then ctx-halve
-       retry, then main-only — health.json reports
-       {"instances": 0, "mode": "main-only",
-        "reason": "budget_zero" | "user_unloaded"}; install still exits 0.
-     - health probe: every 10 s, /v1/models (200 + alias) AND a
-       16-token completion < 10 s; two consecutive fails → degraded,
-       five → restart attempt.
-     - VRAM drift watch (S2.5): 5-min recheck; an instance's cgroup
-       sustained > 30 s over its cap → that instance's ctx halves
-       (multiple of 8192, floor 8192), container restarted in place,
-       ctx_reduced: true in health.json. No context-grow, no instance
-       retirement in v1; explicitly unloaded (bunloaded) instances are
-       never re-spawned by the drift watch.
-     - state files /opt/bonsai2/etc/state-<ts>.yaml (last 5 kept) for
-       --rollback; upgrade procedure in S6.5.
--->
+- units: bonsai2-sglang.service (the instance manager, Type=notify,
+  sd_notify) + bonsai2-server@i.service template — one container
+  per instance, verbatim the main stack's configuration shape
+  (docker run under systemd, host networking, --memory = per-
+  instance budget, CPUQuota=64%, Restart=on-failure ×3 → bfailed,
+  ExecStartPre= docker rm -f). Wants= (not Requires=) on the main
+  stack.
+- boot order: main stack first (pre-existing units), then the
+  manager starts the granted instances in order, each healthy
+  before the next. Target: all healthy ≤ 180 s after multi-user.
+- two-tier VRAM gate at boot: the planning tier (S2.3) decides N'
+  from the live main-container cgroup; the allocation tier (S1.4)
+  is a stricter per-instance pre-spawn gate (free ≥ footprint +
+  1.0 GB). i > 0 shortfall → partial load, exit 0; i = 0 shortfall
+  after a granted N' ≥ 1 → exit 4 ERR_VRAM_OOM.
+- N=0 / main-only mode (S2.4): PTQ1_0 quant retry, then ctx-halve
+  retry, then main-only — health.json reports
+  {"instances": 0, "mode": "main-only",
+   "reason": "budget_zero" | "user_unloaded"}; install still exits 0.
+- health probe: every 10 s, /v1/models (200 + alias) AND a
+  16-token completion < 10 s; two consecutive fails → degraded,
+  five → restart attempt.
+- VRAM drift watch (S2.5): 5-min recheck; an instance's cgroup
+  sustained > 30 s over its cap → that instance's ctx halves
+  (multiple of 8192, floor 8192), container restarted in place,
+  ctx_reduced: true in health.json. No context-grow, no instance
+  retirement in v1; explicitly unloaded (bunloaded) instances are
+  never re-spawned by the drift watch.
+- state files /opt/bonsai2/etc/state-<ts>.yaml (last 5 kept) for
+  --rollback; upgrade procedure in S6.5.
 
 ### VRAM audit rule (before ANY agent/model loads)
 
@@ -454,8 +481,16 @@ stash first, so a crash never eats work.
 
 ### Testing
 
-- Hermetic default: `python3 -m unittest discover -s tests -t .` (no GPU, no
-  network, stdlib only).
+Suite state (2026-09-30): **730 hermetic cases, green** under
+`/usr/bin/python3.12 -m unittest discover -s tests -t .` (no GPU, no
+network, stdlib-only — the S6.6 aarch64-safe convention); **21 @gpu
+methods** in `tests/gpu/`. The layer budgets + commands are locked in
+`docs/test-spec.md` (T1–T10).
+
+- Hermetic default: `python3 -m unittest discover -s tests -t .` (no
+  GPU, no network, stdlib only). A fast L1 subset (closed-set + manager
+  + core + tools-module + tools-loop) runs at pre-commit; the full
+  hermetic run is the G2/G4 gate.
 - `@gpu` tests live only in `tests/gpu/`, run via `tests/run_gpu.sh`
   (which snapshots nvidia-smi into `test-logs/gpu-<ts>.log` first).
   Never run in parallel with a live review/subagent session (one-box

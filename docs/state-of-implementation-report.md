@@ -1,5 +1,12 @@
 # qwen-tory38 — State of Implementation Report
 
+> **Dated snapshot (2026-09-25) — context, not a living doc.** As of this
+> write the suite was 341 hermetic tests and the frontier was MAP P4.
+> Current state: Phases 0–6 merged on main (730 hermetic cases green,
+> 21 @gpu methods; one-command installer landed, PR #36). Read `MAP.md`
+> for the live ledger; this file is kept for the component-by-component
+> build narrative.
+
 Date: 2026-09-25. Author: senior architect (Hermes session).
 Scope: all code merged to main through PR #15 (MAP 0.1–3.8), plus the
 parallel session's in-progress 3.9–3.12 treated as "as depicted in spec."

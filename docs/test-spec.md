@@ -10,6 +10,11 @@
 > (v0.1 draft, 2026-09-25) and updated against the 2026-09-26 reality
 > (PR #18 merged as `e44762a`; suite state verified: 427 hermetic cases
 > green in ~130 s under `/usr/bin/python3.12`, 21 @gpu methods).
+> NOTE 2026-09-30: the hermetic suite has since grown to 730 cases
+> (Phases 4–6: bench runner + install E2E + S4.7/S5.6 acceptance tests)
+> — still green under the same `/usr/bin/python3.12 discover` command.
+> The layer structure, budgets, and commands below are unchanged; the
+> "427" figures are the v1.0 baseline, not a live count.
 > The report remains the design record (measured root causes, strategy
 > trade, Appendix A quiet-box eradication); this document is the policy.
 > Where the two disagree, this document wins (it was written later,

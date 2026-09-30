@@ -58,13 +58,16 @@ Landed so far:
   failures (a failure is data); 2 = bad config / bench already running
   (the S3.5 flock, MAP 4.3) (S5.4, S3.5).
 
-Lands here (later MAP items on this phase / later phases):
+Also landed (not in the list above):
 
-- `bonsai2-steer`, `bonsai2-cancel` (MAP 3.7), `bonsai2-collect`
-  (MAP 3.6) — S3.2 commands; the slot model + deadline enforcement
-  (MAP 3.4) and spawn dedup (MAP 3.5) land in the core library, not as
-  new commands.
-- `bonsai2-unload`, `bonsai2-reload` — S3.2 commands (MAP 3.8).
+- `bonsai2_tools.py` (MAP 3.13) — the S3.4 host-side 4-tool module
+  (bash / read_file / write_file / python, workdir-contained); landed
+  with the S3.4 tool loop. The slot model + deadline enforcement
+  (MAP 3.4) and spawn dedup (MAP 3.5) live in the core library
+  (`bonsai2_harness.py`), not as new commands.
+- `bonsai2_install.py` (MAP 6.1–6.6) — the S6.3 one-command installer
+  core, behind `install.sh`; also the S6.5 state-file writer and the
+  `--rollback` / `--refresh-main` owner. Landed in Phase 6.
 - `llama-server` — NOT in the repo: it is baked into the
   `bonsai2-server:<tag>` image (S1.4/S6.1); a host copy lives at
   /opt/bonsai2/bin/llama-server for ops (S1.2, MAP 1.2).
