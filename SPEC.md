@@ -578,6 +578,13 @@ that a main-stack fix might need.
   S2.5 drift detector watches sustained over-`--memory` pressure on
   the instance's cgroup as a budget guard (an "over its share"
   signal), not as an exact VRAM meter.
+  The `bonsai2-sglang.service` manager unit additionally carries
+  `TimeoutStartSec=300` (delta 2026-10-03, first-practical-run
+  remediation F9): its start-job stays open until READY=1, which the
+  manager sends only after the spawn sequence + per-instance health
+  poll (model load ~90 s per instance); systemd's default
+  TimeoutStartSec=90 was SIGTERMing the boot mid-spawn, observed
+  NRestarts=5. 300 s = the S2.8 #1 cold-boot budget + margin.
 - **Manager ↔ units:** the manager spawns instance i by `systemctl
   start bonsai2-server@i` (the units are installed by `install.sh`,
   not transient — one unit file per instance, same paradigm as the
@@ -587,6 +594,19 @@ that a main-stack fix might need.
   restarted unit after a ctx reduction (S2.5) keeps the same unit
   name/port/model, and `systemctl restart` resets the unit's
   start-limit counter so drift handling itself cannot trip `bfailed`.
+  > Delta (2026-10-03, first-practical-run remediation F9 — the boot
+  > self-deadlock from the evidence ledger): the manager is Type=notify
+  > and sends READY=1 only AFTER the spawn sequence returns, so a
+  > blocking `systemctl start bonsai2-server@i` deadlocked against the
+  > instance units' After=bonsai2-sglang.service (the manager's
+  > start-job sits "running" pre-READY while the instance start-job sits
+  > "waiting" on that ordering). The manager now spawns with
+  > `systemctl start --no-block` — the start JOB is enqueued and the
+  > call returns immediately; the After= ordering is kept (more correct
+  > than removing it), and the real gate is the existing
+  > wait_instance_healthy port-poll every caller already runs. A
+  > non-zero rc still means the start JOB could not be enqueued (same
+  > semantics as before).
 - Health probe (per instance, every 10 s, from the manager):
   `GET /v1/models` with Bearer → healthy iff 200 + alias in body
   AND a 16-token completion round-trip < 10 s (catches alive-but-stuck).
@@ -704,6 +724,18 @@ exit 4 — zero instances but not main-only mode.
   (`bunloaded`, S3.2) — an explicit `bonsai2-unload` beats the drift
   watch; reload is only a command (`bonsai2-reload`), a manager restart,
   or a re-run of install.
+  > Install hygiene (delta 2026-10-03, first-practical-run remediation
+  > F10): the rendered per-instance units carry `CPUQuota=64%` — the
+  > installer's template previously rendered `64%%` (the template
+  > reaches systemd as a plain string with only the %EXECSTART% token
+  > substituted, so the doubled %% survived) and systemd logged "Invalid
+  > CPU quota '64%%', ignoring". Separately, install now lands the
+  > command wrappers +x and rewrites their shebang to the box python
+  > (/usr/bin/python3) at deploy time — some clones lost the exec bit
+  > and `#!/usr/bin/env python3` resolved to a bundled python without
+  > PyYAML — and chowns `/run/bonsai2/results` to the invoking uid
+  > (SUDO_UID; best-effort, non-sudo installs are a no-op) so user-scope
+  > S3.2 commands don't hit EACCES creating task dirs.
 
 ### 2.6 Configuration — `serving.yaml` (written by install.sh)
 
@@ -809,13 +841,20 @@ All under `/opt/bonsai2/bin/`, config from
 
 ```
 bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
-               [--ctx N] [--deadline SECS] [--max-steps N] [--workdir DIR]
-               [--out FILE] [--priority low|normal|high]
+               [--ctx N] [--deadline SECS] [--max-steps N] [--max-tokens N]
+               [--workdir DIR] [--out FILE] [--priority low|normal|high]
                -> JSON (3.1). Submits to the least-loaded healthy
                instance. --tools defaults ON (the agentic loop, S3.4);
                --tools off = single completion, byte-identical to the
                pre-loop behavior. --max-steps bounds the tool loop
-               (default task_max_steps, range 1-128); --workdir DIR
+               (default task_max_steps, range 1-128); --max-tokens N
+               caps ONE completion's output tokens (reasoning + content
+               + tool call) — default task_default_max_tokens, range
+               1-32768 (delta 2026-10-03, first-practical-run
+               remediation F1: at this pin a big code-gen task emitted
+               9-21K reasoning tokens in its first completion, before a
+               single tool call, and lost the deadline race with an
+               unbounded completion); --workdir DIR
                confines the toolset to that directory (must exist,
                writable; when omitted the harness creates
                <workspace_dir>/<task_id> — the directory is S3.6's
@@ -937,6 +976,15 @@ state" locked).
   lifetime. Steering does not move slots. Cancel frees the slot.
 - Deadline (per task, `--deadline`): manager enforces; on expiry the
   instance gets an abort, task → `timeout` (exit 22), slot freed.
+  > Delta (2026-10-03, first-practical-run remediation F3a): the
+  > DEFAULT deadline is now loop-aware — a `--tools on` task makes up to
+  > max_steps completions, so a default sized for ONE completion
+  > (task_default_deadline_s) lost the whole-loop race on big code-gen.
+  > When no explicit `--deadline` is given, `--tools on` tasks default to
+  > `task_default_deadline_s_tools_on` (1800 s, S3.6); `--tools off`
+  > keeps `task_default_deadline_s`. An explicit `--deadline` always
+  > wins. (F3b — a max_tokens/t-s-floor estimate — remains the documented
+  > next step if F1+F3a still miss the biggest tasks.)
 - Idempotency: `spawn` whose **dedup key** matches a live task within 24 h
   is a no-op returning the existing task_id. The dedup key is the prompt
   hash (of the `-p` file content or the `-i` inline text) plus the
@@ -975,6 +1023,56 @@ step's subprocess (SIGTERM the tool execution's process group), then
 the worker, same 5 s SIGKILL backstop. The reaper (deadline backstop,
 S3.4) is unchanged: it reaps the WORKER pid; a mid-step tool
 subprocess is a child of the worker and dies with it.
+
+> Delta (2026-10-03, first-practical-run remediation F1/F2/F4/F11 —
+> source: evidence-ledger-for-first-practical-run.md +
+> remediation-report-first-practical-run.md, both in-repo; the pin's
+> shape: 9-21K reasoning tokens inside the FIRST completion of a big
+> code-gen task, before any tool call):
+> - **F1 — per-completion cap:** every completion payload (the
+>   `--tools off` pre-loop completion and each tool-loop step) now
+>   carries the record's `max_tokens` (the `--max-tokens` flag else
+>   `task_default_max_tokens`, S3.6), so the engine stops at a finite
+>   point instead of decoding unbounded. A record without the key keeps
+>   the legacy byte-identical payload.
+> - **F2 — truncation guard:** a completion cut at the cap carries
+>   `finish_reason="length"`; at this pin a cut inside the reasoning
+>   bloat accumulates NO answer content (reasoning arrives as one
+>   terminal chunk, so a mid-stream cut leaves nothing accumulated).
+>   Pre-F2 that empty completion marked the task `done` with an empty
+>   answer — a silent false success. Now: `finish_reason="length"` AND
+>   no answer content AND no tool call → the taskworker feeds a nudge
+>   back and the loop continues (still bounded by `--max-steps`).
+>   Conservative by design: a cut that DID emit answer content is
+>   trusted as a final answer, which bounds the nudge loop.
+>   `finish_reason` absent (mock/legacy engine) → pre-F2 behavior.
+> - **F4 — partial-artifact salvage on timeout:** on a deadline /
+>   late-result timeout the taskworker persists the in-flight
+>   completion's accumulated answer+reasoning to the result file tagged
+>   `partial: true` (plus tool_log/steps/workdir, the S3.1 shape); the
+>   reaper's deadline path reads it back onto the record
+>   (`partial_answer` / `partial_reasoning`) and collect surfaces both —
+>   a reaped timeout returns the salvageable partial instead of nulls.
+>   Best-effort: a write/read failure never changes the task state.
+> - **F11 — orphan-completion cancel (UNRESOLVED: engine-slot-cancel,
+>   @gpu round pending):** observed evidence — an orphaned completion
+>   kept decoding 21.6K tokens on a REAPED task, stealing bandwidth.
+>   Pin reality (verified against the fork source): the slot endpoint
+>   (POST /slots/:id) is save/restore/erase and DEFERS while the slot
+>   is processing — it does not stop an in-flight completion; the real
+>   lever is `POST /v1/chat/completions/control`
+>   `{id: <cmpl_id>, action: "reasoning_end"}`, which acts on the live
+>   slot mid-generation, and only on a completion that ARMED
+>   `reasoning_control: true` in its original request. So: the
+>   tool-loop + pre-loop completions carry `reasoning_control: true`
+>   when `arm_reasoning_control` is on (S3.6, default on); the
+>   taskworker records each step's engine completion id in a sidecar
+>   (`<results>/tasks/<task_id>.cmpl.json`, rewritten at every step
+>   boundary with the LATEST id, removed on clean exit); on a deadline
+>   reaping, when `cancel_on_deadline` is on (S3.6, default on) and the
+>   sidecar carries a live id, the reaper issues a BEST-EFFORT control
+>   POST to the task's port — a failed/unknown-id/not-armed cancel never
+>   kills the reaper pass (the slot is freed either way).
 
 **Host-side execution (default):** tools run in the taskworker process
 on the host, same trust domain as the main agent's own bash. The
@@ -1039,6 +1137,11 @@ dedup_ttl_h: 24
 queue_wait_max_s: 60
 instance_healthy_timeout_s: 30
 task_default_deadline_s: 600
+# --- first-practical-run remediation (F1/F3a/F11, 2026-10-03; S3.2/S3.4 deltas) ---
+task_default_max_tokens: 16384        # F1: per-completion output cap (--max-tokens default; range 1-32768)
+task_default_deadline_s_tools_on: 1800  # F3a: default deadline for --tools on tasks (whole loop); explicit --deadline wins
+arm_reasoning_control: true           # F11: arm the engine's reasoning control on this task's completions (orphan-cancel arming)
+cancel_on_deadline: true              # F11: the reaper's best-effort engine control POST on a deadline reaping (failed cancel never blocks)
 main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
 # --- subagent capability layer (S3.4 tool loop) ---
 tool_execution: host           # host | engine (dual-mode, both tested; S3.4)

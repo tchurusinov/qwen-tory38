@@ -290,8 +290,14 @@ def _persist_rec_preserving(d: dict, rec: dict) -> None:
 
 def _stream_chat(port: int, ident: dict, body: dict) -> dict:
     """One streaming chat completion against the instance at `port`.
-    Returns {"ok": True, "answer", "reasoning", "tool_call", "usage"} or
-    {"ok": False, "kind": "ctx"|"parse"|"engine", "detail"}.
+    Returns {"ok": True, "answer", "reasoning", "tool_call", "usage",
+    "finish_reason", "cmpl_id"} or {"ok": False, "kind": "ctx"|"parse"|"engine",
+    "detail"}.
+
+    `finish_reason` is the stream's finish_reason (e.g. "stop" /
+    "length" / "tool_calls") — None when the engine omits it; `cmpl_id`
+    is the completion id (F11 cancel lever) — None when omitted.
+    (F1/F2 first-practical-run remediation, 2026-10-03.)
 
     `tool_call` is the parsed native `tool_calls` array entry when the
     stream carries one (the A2 native-array shape), else None — the
@@ -323,6 +329,14 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
     # design: the single-step contract executes the first call).
     tc_acc: dict[int, dict] = {}
     usage: dict | None = None
+    # F1/F2 (first-practical-run remediation): capture the SSE `id`
+    # (the engine's completion id — the F11 control-endpoint lever) and
+    # the stream's `finish_reason` (F2 truncation guard). Both are
+    # top-level / choice fields on the OpenAI-compat chunks; the pin
+    # emits them (the A2 probe saw finish_reason=tool_calls). Absent
+    # -> None (a mock engine that omits them keeps the pre-F2 behavior).
+    cmpl_id: str | None = None
+    finish_reason: str | None = None
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             status = resp.status
@@ -347,11 +361,16 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
                         "kind": "parse",
                         "detail": f"non-object SSE payload in stream (HTTP {status})",
                     }
+                if chunk.get("id"):
+                    cmpl_id = str(chunk["id"])
                 if chunk.get("usage"):
                     usage = chunk["usage"]
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
+                fr = choices[0].get("finish_reason")
+                if isinstance(fr, str) and fr:
+                    finish_reason = fr
                 delta = choices[0].get("delta") or {}
                 if delta.get("content"):
                     content_parts.append(str(delta["content"]))
@@ -494,6 +513,12 @@ def _stream_chat(port: int, ident: dict, body: dict) -> dict:
         "reasoning": reasoning,
         "tool_call": tool_calls,
         "usage": usage,
+        # F1/F2 (first-practical-run remediation): the stream's
+        # finish_reason (the F2 truncation guard's signal) and the
+        # completion id (F11 — the engine control endpoint addresses a
+        # completion by it). Both None when the engine omits them.
+        "finish_reason": finish_reason,
+        "cmpl_id": cmpl_id,
     }
 
 
@@ -503,16 +528,25 @@ def _run_attempt(rec: dict, port: int, ident: dict) -> dict:
     wire behavior to the pre-capability-layer worker — the amendment's
     hard constraint for `--tools off` tasks (the Phases 0-3 hermetic
     suite asserts the exact canned mock responses against this shape).
-    Returns {"ok": True, ...} or {"ok": False, "kind": ...}."""
-    res = _stream_chat(
-        port,
-        ident,
-        {
-            "model": ident["alias"],
-            "messages": [{"role": "user", "content": rec.get("prompt", "")}],
-            "stream": True,
-        },
-    )
+    F1 (first-practical-run remediation, 2026-10-03): the per-completion
+    `max_tokens` cap is added ONLY when the record carries it (every
+    post-remediation record does); a record without the key keeps the
+    legacy byte-identical payload. Returns {"ok": True, ...} or
+    {"ok": False, "kind": ...}."""
+    body = {
+        "model": ident["alias"],
+        "messages": [{"role": "user", "content": rec.get("prompt", "")}],
+        "stream": True,
+    }
+    if isinstance(rec.get("max_tokens"), int):
+        # F1: cap the pre-loop completion too — a --tools off task that
+        # bloats its reasoning still races the task deadline.
+        body["max_tokens"] = rec["max_tokens"]
+    if rec.get("arm_reasoning_control"):
+        # F11: arm the engine's real-time reasoning control on the
+        # pre-loop completion too.
+        body["reasoning_control"] = True
+    res = _stream_chat(port, ident, body)
     if res.get("ok"):
         res.pop("tool_call", None)  # the pre-loop path ignores it (never sent)
     return res
@@ -836,6 +870,112 @@ def _append_result_file(
         _log(f"ledger persist to {rf} failed: {exc}")
 
 
+def _write_cmpl_sidecar(d: dict, rec: dict, port: int, cmpl_id: str | None) -> None:
+    """F11 (first-practical-run remediation, 2026-10-03): record the
+    in-flight completion's id so the harness's reaper can target it with
+    the engine's control POST after a deadline reaping.
+
+    The sidecar is `<tasks>/<task_id>.cmpl.json` (a sibling of the task
+    record, in `d["tasks"]`). The reaper's F11 cancel reads it via
+    `_read_cmpl_sidecar` and POSTs
+    `/v1/chat/completions/control {id: <cmpl_id>, action: reasoning_end}`
+    to the task's port. The worker rewrites it at each step boundary with
+    the LATEST completion's id (the most recently in-flight one is the
+    one that would keep decoding after a reaping). A None/empty cmpl_id
+    (a mock/legacy engine that omits the SSE id) leaves the previous
+    sidecar in place; the reaper treats a missing/unknown id as a no-op.
+    Best-effort: a write failure only logs (the sidecar is a cancel hint,
+    never a verdict).
+    """
+    if not isinstance(cmpl_id, str) or not cmpl_id:
+        return
+    task_id = rec.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return
+    tasks_dir = d.get("tasks")
+    if not isinstance(tasks_dir, (str, Path)):
+        return
+    sidecar = Path(tasks_dir) / f"{task_id}.cmpl.json"
+    try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(
+            json.dumps({"cmpl_id": cmpl_id, "port": port, "ts": time.time()}) + "\n"
+        )
+    except OSError as exc:
+        _log(f"{task_id}: F11 cmpl sidecar write failed: {exc}")
+
+
+def _salvage_partial_result(
+    rec: dict,
+    tool_log: list,
+    steps: int,
+    workdir: str | None,
+    answer: str,
+    reasoning: str,
+    usage: dict | None,
+) -> None:
+    """F4 (first-practical-run remediation, 2026-10-03): partial-artifact
+    salvage on a deadline / late-result timeout.
+
+    The evidence (2026-10-03 ledger, F4): at this pin a big code-gen
+    task's first completion emitted 9-21K reasoning tokens before the
+    deadline fired, so the record ended `timeout` with `answer: null` —
+    the reasoning (which often CONTAINS the planned/started work) and
+    any partial answer text died in the record's `detail` string and
+    never reached the result file the main agent reads via collect.
+
+    This writes the in-flight completion's accumulated answer/reasoning
+    to the result file tagged `partial: true` (plus the tool_log / steps
+    / workdir capability fields, the S3.1 ledger shape). The harness's
+    `reap_stale` deadline path reads these fields back onto the record
+    (`partial_answer` / `partial_reasoning`) so collect on a reaped
+    timeout returns the salvageable partial instead of nulls.
+
+    Best-effort: a write failure only logs (the timeout state is already
+    set; the salvage is a bonus, never a new failure mode).
+
+    No-op when BOTH answer and reasoning are empty (nothing to salvage).
+    """
+    if not answer and not reasoning:
+        return
+    rf = rec.get("result_file")
+    if not isinstance(rf, str) or not rf:
+        return
+    try:
+        data: dict = {}
+        p = Path(rf)
+        if p.is_file():
+            try:
+                loaded = json.loads(p.read_text())
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        # partial: true is the salvage marker; the answer/reasoning keys
+        # carry the accumulated text (may be one or the other).
+        data["partial"] = True
+        if answer:
+            data["answer"] = answer
+        if reasoning:
+            data["reasoning"] = reasoning
+        if usage is not None:
+            data["usage"] = usage
+        data["tool_log"] = tool_log
+        data["steps"] = steps
+        if workdir is not None:
+            data["workdir"] = workdir
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        tmp.replace(p)
+        _log(
+            f"{rec.get('task_id', '?')}: F4 partial salvage written "
+            f"(answer {len(answer)} chars, reasoning {len(reasoning)} chars)"
+        )
+    except OSError as exc:
+        _log(f"{rec.get('task_id', '?')}: F4 partial salvage write failed: {exc}")
+
+
 def _run_tool_loop(
     rec: dict,
     port: int,
@@ -1006,12 +1146,59 @@ def _run_tool_loop(
                     "messages": messages,
                     "tools": T.TOOLS_JSON,
                     "stream": True,
+                    # F1 (first-practical-run remediation, 2026-10-03):
+                    # the per-completion output cap. Without this the
+                    # engine runs unbounded; at this pin (Ternary-Bonsai-2,
+                    # deepseek reasoning) a big code-gen task emits 9–21K
+                    # reasoning tokens before the first tool call and
+                    # loses the deadline race. The cap is the harness
+                    # record's max_tokens (spawn flag else S3.6 default).
+                    # Gated on an int exactly like the pre-loop path
+                    # (S3.4 F1 delta: "a record without the key keeps the
+                    # legacy byte-identical payload" — an unconditional
+                    # `rec.get(...)` would emit "max_tokens": null for a
+                    # pre-remediation record and change the wire shape).
+                    **(
+                        {"max_tokens": rec["max_tokens"]}
+                        if isinstance(rec.get("max_tokens"), int)
+                        else {}
+                    ),
+                    # F11 (first-practical-run remediation): arm the
+                    # engine's real-time reasoning control on this
+                    # completion so a deadline reaping can end an
+                    # orphaned in-flight one via
+                    # /v1/chat/completions/control {id, reasoning_end}.
+                    # Only when the record arms it (arm_reasoning_control,
+                    # default on); the engine defaults the field to false
+                    # when absent, so omitting it on a disarmed record
+                    # keeps the pre-F11 wire shape.
+                    **(
+                        {"reasoning_control": True}
+                        if rec.get("arm_reasoning_control")
+                        else {}
+                    ),
                 },
             )
             if time.monotonic() >= deadline_at:
                 # a result landing after the deadline is a late result —
                 # S3.4 deadline-expiry-mid-run -> timeout even if the
                 # step technically returned.
+                # F4 (first-practical-run remediation, 2026-10-03): a late
+                # result is EXACTLY the evidence case — the completion's
+                # accumulated reasoning/answer (9-21K reasoning at this
+                # pin) landed after the deadline and would otherwise die
+                # in `detail`. Salvage it to the result file tagged
+                # partial:true before the reaper marks the record.
+                if res is not None and res.get("ok"):
+                    _salvage_partial_result(
+                        rec,
+                        tool_log,
+                        steps,
+                        workdir,
+                        res.get("answer") or "",
+                        res.get("reasoning") or "",
+                        res.get("usage"),
+                    )
                 _set_state(
                     rec,
                     "timeout",
@@ -1062,6 +1249,15 @@ def _run_tool_loop(
         rec["steps"] = steps
         rec["updated_ts"] = time.time()
         _persist_rec_preserving(d, rec)
+        # F11 (first-practical-run remediation, 2026-10-03): record this
+        # step's completion id (the one the engine may still be decoding
+        # when the reaper's deadline backstop fires) so the reaper can
+        # target it with the control POST. The sidecar is rewritten each
+        # step — the latest in-flight id is the cancel target. A mock /
+        # legacy engine that omits the SSE id returns None -> the sidecar
+        # is left as-is (the reaper treats a missing id as a no-op).
+        if res is not None and res.get("ok"):
+            _write_cmpl_sidecar(d, rec, port, res.get("cmpl_id"))
 
         if res is None:
             # the deadline expired before the first attempt of this step
@@ -1105,6 +1301,41 @@ def _run_tool_loop(
         # ---- parse the tool call: native array FIRST, then text-JSON ----
         tc = res.get("tool_call") or _parse_text_tool_call(answer)
         if tc is None:
+            # F2 (first-practical-run remediation, 2026-10-03): a
+            # truncation guard against the exact evidence failure. With
+            # F1's max_tokens cap the engine stops mid-completion at
+            # finish_reason="length" — and at this pin a completion cut
+            # inside its reasoning bloat carries EMPTY answer + reasoning
+            # deltas (reasoning arrives as one terminal chunk on the pin,
+            # so a cut leaves nothing accumulated). Pre-F2 that empty
+            # completion marked the task `done` with an empty answer —
+            # a silent false success (worse than the timeout it replaced).
+            # Guard: finish_reason=="length" AND no answer content AND no
+            # tool call => NOT a final answer; feed a nudge back so the
+            # next step resumes. Conservative by design (the round data:
+            # content stayed empty through the bloat) — a completion that
+            # DID emit answer content is trusted as a final answer, which
+            # bounds the nudge loop (max_steps still caps it).
+            # finish_reason absent (a mock/legacy engine) -> pre-F2 path.
+            finish_reason = res.get("finish_reason")
+            if finish_reason == "length" and not answer.strip():
+                _log(
+                    f"{rec['task_id']}: step {steps} hit finish_reason=length "
+                    f"with no answer content (F2 truncation) — nudging, not done"
+                )
+                messages.append({"role": "assistant", "content": answer})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your last reply was cut off mid-reasoning by the "
+                            "output cap and carried no visible answer. Resume "
+                            "directly: skip any preamble and continue with the "
+                            "next tool call or your final answer."
+                        ),
+                    }
+                )
+                continue
             # final answer -> done
             try:
                 Path(rec["result_file"]).parent.mkdir(parents=True, exist_ok=True)

@@ -64,17 +64,26 @@ The only box-specific section. A different box updates this section only.
 
 The pool exposes this closed surface. `stdout` = one JSON object
 (machine), `stderr` = human text (diagnostic only, never parsed).
-Config from the harness config file; env overrides
+**Machine consumers read stdout only — do not merge stderr** (`2>&1`
+breaks `json.loads`: a second line lands on stdout when captured
+that way; the ledger's "Extra data: line 2" was exactly this). Config
+from the harness config file; env overrides
 `BONSAI2_CONFIG`, `BONSAI2_RESULTS_DIR` (hermetic testing hook).
 
 ```
 bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
-               [--ctx N] [--deadline SECS] [--max-steps N] [--workdir DIR]
+               [--ctx N] [--deadline SECS] [--max-steps N]
+               [--max-tokens N] [--workdir DIR]
                [--out FILE] [--priority low|normal|high]
                -> JSON. Submits to the least-loaded healthy instance.
                --tools defaults ON (the agentic tool loop); --tools off =
                single completion, byte-identical to pre-loop behavior.
                --max-steps bounds the tool loop (range 1-128).
+               --max-tokens caps ONE completion's output (reasoning +
+               content + tool call; range 1-32768; default 16384,
+               S3.6 task_default_max_tokens) — big single-file writes
+               that would otherwise reason 9-21K tokens before the
+               first tool call.
                --workdir DIR confines the toolset to that directory (must
                exist, writable); when omitted the harness creates
                <workspace_dir>/<task_id>.
@@ -228,6 +237,17 @@ pool is loaded and how context is retained:
 
 Branch choice is per-task; the recipes each name their branch.
 
+**Hard rule (stateless batch):** the pool is loaded ONLY for the span
+`reload → batch-spawn → collect-all`. The moment `collect` returns a
+terminal state (20/21/22) for **every** task in the batch, main MUST
+`bonsai2-unload --all` BEFORE any token-heavy main-side work (writing
+files, generating, driving the browser, long-context reads). Reload
+only at the top of the *next* batch. Never hold the pool loaded while
+main is generating — that is the halved-t/s tax, and it is the single
+most expensive mistake on this box. The 2026-10-03 first practical run
+deviated here: the pool stayed loaded through main's browser
+verification + 3 page writes, paying the tax for nothing.
+
 ### Slot economy (one engine is shared — the economy is about slots, not tokens)
 
 - Keep ≤ 6 of 8 slots busy per instance (2 free for deadline-sensitive
@@ -248,6 +268,15 @@ Branch choice is per-task; the recipes each name their branch.
   (a retry), not the in-flight single completion; for a single-attempt
   task mid-stream, `cancel` + `spawn` with the corrected prompt is the
   effective path. Cancel is for wrong-shape tasks, not impatience.
+- **Spawn gate (well-defined/bounded):** spawn a subagent task ONLY when
+  each task fits ONE bounded completion — the files are named, the spec
+  is compact, and a single `write_file` (+ one check) fits the deadline
+  + `--max-tokens`. If a task would need >3 completions or
+  >`--max-tokens` of reasoning to finish its first write, split it into
+  per-file tasks or keep it on main. A task main cannot bound to a
+  deadline is not delegable yet. The 2026-10-03 run lost 3 big
+  code-gen tasks to unbounded pre-tool reasoning because they were
+  spawned as one task each without this bound.
 
 ### Main t/s halving under a loaded pool (live-run doctrine, 2026-09-28)
 
@@ -260,6 +289,22 @@ next **intelligence-critical** task — planning, architecture,
 verification of subagent output — that does not suffer from the reduced
 t/s. Never do main-side token-heavy generation while the pool is loaded;
 let the grunts do the grunt work.
+
+**Idle-while-loaded check (F7, 2026-10-03 remediation):** after
+`collect`-all, run `bonsai2-status`. If `slots_in_use == 0` on every
+instance but the stack is not `main-only`, the pool is loaded-and-idle —
+`bonsai2-unload --all` NOW (you are paying the t/s tax for nothing).
+This is the meter-based backstop to the hard rule above: the state is
+visible from the same `status` JSON main already reads for routing.
+
+**Verify-while-unloaded ordering (F8, 2026-10-03 remediation):** the
+ordering is **collect → unload → verify**, never verify-while-loaded.
+After every `collect`-all, main's next turn is verification-only (short,
+ledger-first) at halved t/s, and the *unload* is what restores full t/s
+— so do the token-heavy verification (re-running checks, re-reading
+files, driving the browser) AFTER `bonsai2-unload --all`. The 2026-10-03
+run did the browser verification + 3 page writes while the pool was
+still loaded: full tax, no work left for the pool.
 
 ### VRAM climb + release (live-run doctrine, 2026-09-28)
 
@@ -440,6 +485,10 @@ Spec: {spec_json}
   (functions: {function_list}; module: {module_name}; suite: {suite_name};
    run command: {run_command})
 
+Files to write (named up front — do not plan beyond this list):
+- {module_path}
+- {suite_path}
+
 Task:
 1. Implement the module at {module_path} with the spec's functions.
 2. Write the test suite at {suite_path} with {n} test cases (one per function).
@@ -455,6 +504,16 @@ Final answer contract (your last message, no tool calls after this):
 One paragraph: what you implemented, what you verified (the exact
 commands you ran and their exit codes), what failed (if anything).
 ```
+
+Prompt discipline for this pin (2026-10-03 first-practical-run
+finding): at this pin the model emits long pre-tool reasoning — the
+first reply IS a tool call, no planning paragraph before it. The files
+are named in the prompt (above) so the loop has no room to "decide"
+what to write. Pair the spawn with `--max-tokens` sized to the files
+(the default 16384 covers a single-file write; raise to 32768 for a
+big one) and the default tool-loop deadline (1800 s) covers the whole
+loop. If a task still loses two consecutive rounds at the right cap +
+deadline, it is a main task (the S4.2 self-correcting rule).
 
 ### T2 — test batch with structured report (S4.2 tool-loop row, [M10])
 
@@ -556,6 +615,17 @@ Do NOT use reasoning. Write your answer directly.
   reasoning" preamble is the mitigation. Compile-pass-but-
   suite-fail artifacts: the rubric gates on BOTH compile and suite,
   so a passing compile claim is not a done claim.
+- **Prompt discipline for this pin (2026-10-03 first-practical-run):**
+  when running this shape `--tools on` (the common case — you need
+  `write_file`), name the file(s) up front in the prompt and instruct
+  "your FIRST reply must be the `write_file` tool call — do not plan or
+  reason first". At this pin the model emits 9-21K reasoning tokens
+  before the first tool call otherwise; the named files + first-reply
+  directive cut that to ~4K. Pair with `--max-tokens` (default 16384)
+  so the per-completion cap is finite, and the tool-loop default
+  deadline (1800 s) covers the whole loop. Big single file: raise
+  `--max-tokens` to 32768 + `--deadline` ~2400 s. Two consecutive
+  losses at the right cap + deadline → main task (S4.2).
 - **Workflow:** stateless (single task, no context retention needed).
 
 ### R2 — test batch with report ([M10], uses template T2)
@@ -639,6 +709,13 @@ If no bugs: "No bugs found. I reviewed N files, M hunks."
   ordering defect, do not re-run the task for it.
 - **Failure modes:** the workdir-ordering artifact (above). Tool-loop
   overruns: `--max-steps` exhaustion (exit 22) → smaller spec chunk.
+  First-practical-run (2026-10-03): unbounded pre-tool reasoning blew
+  the deadline with zero tool calls — the structural fixes are F1
+  (finite `--max-tokens`, default 16384), F2 (a completion cut at the
+  cap with no answer is a nudge, not a false-success), and F3a (the
+  tool-loop default deadline is 1800 s, sized for the whole loop, not
+  one completion). A task cut at the cap still lands: the worker
+  resumes and the reaper salvages any partial artifact (F4).
 - **Workflow:** stateless (single spec chunk; no context retention
   needed). For a multi-chunk spec where chunk 2 depends on chunk 1's
   module: stateful (keep the instance loaded, steer between chunks).

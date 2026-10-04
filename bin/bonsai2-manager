@@ -939,12 +939,29 @@ def systemctl_base() -> list[str]:
 
 
 def systemctl_start_instance(i: int, base: list[str] | None = None) -> int:
-    """`systemctl start bonsai2-server@i` (S2.5). Returns the exit code."""
-    cmd = (base or systemctl_base()) + ["start", f"bonsai2-server@{i}"]
+    """`systemctl start --no-block bonsai2-server@i` (S2.5). Returns the
+    exit code.
+
+    F9 (first-practical-run remediation, 2026-10-03 — the boot
+    self-deadlock from the evidence ledger section 1b): the manager is
+    Type=notify and sends READY=1 only AFTER spawn_sequence returns, so
+    a BLOCKING `start` deadlocks against the instance units'
+    After=bonsai2-sglang.service — the manager's start-job sits
+    "running" (pre-READY) while the instance start-job sits "waiting"
+    on that ordering, forever. `--no-block` returns immediately after
+    the start JOB is enqueued (it does NOT start the unit itself), so
+    the ordering is satisfied as soon as the instance's own start-job
+    begins — no cycle, and the After= ordering is kept (more correct
+    than removing it). The real gate is the existing
+    wait_instance_healthy port-poll that every caller runs after each
+    start; a non-zero rc still means the start JOB could not be
+    enqueued (unit unknown, systemd down) — same semantics as before."""
+    cmd = (base or systemctl_base()) + ["start", "--no-block", f"bonsai2-server@{i}"]
     r = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         _log(
-            f"systemctl start bonsai2-server@{i} rc={r.returncode}: {r.stderr.strip()[-300:]}"
+            f"systemctl start --no-block bonsai2-server@{i} rc={r.returncode}: "
+            f"{r.stderr.strip()[-300:]}"
         )
     return r.returncode
 
