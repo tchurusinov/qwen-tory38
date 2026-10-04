@@ -20,6 +20,25 @@ dedup_ttl_h: 24
 queue_wait_max_s: 60
 instance_healthy_timeout_s: 30
 task_default_deadline_s: 600
+# --- first-practical-run remediation (F1/F3a, 2026-10-03) ---
+# F1: per-completion output cap (reasoning + content + tool call) threaded
+# into every completion payload. Finite so the deadline math is sound;
+# generous enough to reach the first tool call on a big single-file write.
+# Overridable per task with `bonsai2-spawn --max-tokens N` (range 1-32768).
+task_default_max_tokens: 16384
+# F3a: tool-loop-aware default deadline — the --tools on loop makes up to
+# max_steps completions, so a bare task_default_deadline_s (sized for ONE
+# completion) loses the whole-loop race on big code-gen. ~3 completions x
+# ~600 s at contention t/s. Applies ONLY when --tools on and no explicit
+# --deadline was given; --tools off keeps task_default_deadline_s.
+task_default_deadline_s_tools_on: 1800
+# F11: arm the engine's real-time reasoning control on tool-loop completions
+# (the pin's /v1/chat/completions/control endpoint) so a deadline reaping can
+# end an orphaned in-flight completion. false = pre-remediation wire shape.
+arm_reasoning_control: true
+# F11: the reaper's best-effort engine cancel on a deadline reaping (a failed
+# cancel never blocks the pass). false = reaping stays bookkeeping-only.
+cancel_on_deadline: true
 main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
 # --- subagent capability layer (S3.4 tool loop, the 2026-09-25 amendment) ---
 tool_execution: host           # host | engine (dual-mode, both tested; S3.4)

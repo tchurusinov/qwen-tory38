@@ -211,12 +211,20 @@ CONFIG_DEFAULTS: dict = {
     "task_max_steps": 32,  # default --max-steps (range 1-128)
     "tool_invalid_max": 3,  # consecutive bad calls -> ERR_TOOL_INVALID_CALL
     "workspace_dir": "/run/bonsai2/workspaces",  # per-task scratch workdirs
+    # --- first-practical-run remediation (F1/F3a/F11, 2026-10-03) ---
+    "task_default_max_tokens": 16384,  # F1: per-completion output cap
+    # F3a: tool-loop-aware default deadline (--tools on, no explicit --deadline)
+    "task_default_deadline_s_tools_on": 1800,
+    "arm_reasoning_control": True,  # F11: arm the engine's reasoning control
+    "cancel_on_deadline": True,  # F11: reaper best-effort engine cancel
 }
 _INT_KEYS = (
     "dedup_ttl_h",
     "queue_wait_max_s",
     "instance_healthy_timeout_s",
     "task_default_deadline_s",
+    "task_default_max_tokens",  # F1
+    "task_default_deadline_s_tools_on",  # F3a
     "main_tps_guardrail_pct",
     "tool_timeout_s",
     "tool_output_max_kb",
@@ -383,6 +391,14 @@ def load_config(env: dict | None = None) -> dict:
                 raise ConfigError(
                     f"ERR_CONFIG: harness.yaml: {key} must be a positive number"
                 )
+            cfg[key] = val
+    # F11 bool flags: only valid as real booleans (a non-bool value is a
+    # ConfigError -> exit 2, same discipline as tool_execution's locked set).
+    for key in ("arm_reasoning_control", "cancel_on_deadline"):
+        if key in data:
+            val = data[key]
+            if not isinstance(val, bool):
+                raise ConfigError(f"ERR_CONFIG: harness.yaml: {key} must be a boolean")
             cfg[key] = val
     results_env = env.get("BONSAI2_RESULTS_DIR")
     if results_env:
@@ -1002,8 +1018,91 @@ def _pid_alive(pid) -> bool:
     return True
 
 
+def _cancel_completion_on_instance(
+    port: int, cmpl_id: str, api_key: str, timeout_s: float = 5.0
+) -> bool:
+    """F11 (first-practical-run remediation, 2026-10-03): the engine's
+    real-time completion-control POST.
+
+    At this pin (Ternary-Bonsai-2 / llama.cpp fork 9a9394a89) the engine
+    exposes `POST /v1/chat/completions/control` with body
+    `{id: <cmpl_id>, action: "reasoning_end"}` — it forces the budget
+    sampler to end the in-flight reasoning block so the model moves on to
+    the final answer (verified in `tools/server/server-context.cpp`
+    `SERVER_TASK_TYPE_CONTROL`: it `act on the live slot mid generation,
+    never defer`). It only works on a completion that ARMed
+    `reasoning_control: true` in its original request (the worker does so
+    when `arm_reasoning_control` is on). A completion already finished,
+    or one that never armed, returns `success: false` ("no active
+    completion for this id" / "reasoning control not enabled") — both are
+    harmless (nothing to cancel); only a network-level failure is logged.
+
+    This is BEST-EFFORT: any exception/HTTPError/timeout is swallowed
+    (the reaper's pass must never be killed by a cancel, F11's
+    fault-tolerance requirement). Returns True when the engine reported
+    the cancel succeeded, False otherwise (including unknown-id /
+    not-armed / network errors).
+    """
+    url = f"http://127.0.0.1:{int(port)}/v1/chat/completions/control"
+    body = json.dumps({"id": cmpl_id, "action": "reasoning_end"}).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read()
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return False
+        return bool(data.get("success"))
+    except urllib.error.HTTPError as e:
+        # 200/4xx with a JSON body may still carry success; 404/410 =
+        # route moved (engine rebuilt), 5xx = engine hiccup — all
+        # swallow, log at the call site.
+        try:
+            data = json.loads(e.read())
+        except (json.JSONDecodeError, ValueError, OSError):
+            data = {}
+        return bool(data.get("success")) if isinstance(data, dict) else False
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+
+
+def _read_cmpl_sidecar(task_dir: Path, task_id: str) -> dict | None:
+    """F11: read the in-flight completion's id from the worker's sidecar
+    file (`<task_dir>/<task_id>.cmpl.json`, written by the taskworker at
+    each step boundary and removed on a clean exit). A missing/invalid
+    sidecar returns None (nothing to cancel). The sidecar is the
+    task-id -> engine-completion-id mapping the remediation report's
+    F11 flags as the non-trivial part: rather than guessing the engine
+    slot from GET /slots, the worker records the exact completion id the
+    engine gave it, so the reaper addresses it directly."""
+    sidecar = task_dir / f"{task_id}.cmpl.json"
+    try:
+        data = json.loads(sidecar.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    cmpl_id = data.get("cmpl_id")
+    if not isinstance(cmpl_id, str) or not cmpl_id:
+        return None
+    return data
+
+
 def reap_stale(
-    d: dict, *, grace_s: float = REAP_DEADLINE_GRACE_S, log=print
+    d: dict,
+    *,
+    grace_s: float = REAP_DEADLINE_GRACE_S,
+    log=print,
+    cfg: dict | None = None,
 ) -> list[str]:
     """S3.4 reaper: one pass over the task records that the WORKER owns.
 
@@ -1057,6 +1156,65 @@ def reap_stale(
             if pid_gone and not deadline_gone
             else f"reaper: deadline {deadline_s} s exceeded by more than the {grace_s:.0f} s grace — hung attempt; slot freed (S3.4)"
         )
+        # F4 (first-practical-run remediation, 2026-10-03): on a deadline
+        # reaping, salvage the partial artifact the worker persisted to
+        # the result file (`partial: true`, the in-flight completion's
+        # accumulated answer/reasoning) and carry it onto the record so
+        # collect on a reaped timeout returns the salvageable partial
+        # instead of nulls. The worker's own late-result path already
+        # wrote this file; this reaper path is the backstop when the
+        # worker itself was killed mid-completion (pid-gone or a SIGKILL
+        # that never reached its salvage site). Best-effort: a read
+        # failure leaves the record un-salvaged (the state is the
+        # verdict), never a reaper failure.
+        if deadline_gone:
+            rf = rec.get("result_file")
+            if isinstance(rf, str) and rf:
+                try:
+                    rdata = json.loads(Path(rf).read_text())
+                    if isinstance(rdata, dict) and rdata.get("partial"):
+                        if isinstance(rdata.get("answer"), str):
+                            rec["partial_answer"] = rdata["answer"]
+                        if isinstance(rdata.get("reasoning"), str):
+                            rec["partial_reasoning"] = rdata["reasoning"]
+                        log(
+                            f"reaper: {rec['task_id']} F4 partial salvage "
+                            f"carried onto record "
+                            f"(answer {len(rec.get('partial_answer') or '')} chars, "
+                            f"reasoning {len(rec.get('partial_reasoning') or '')} chars)"
+                        )
+                except (OSError, json.JSONDecodeError):
+                    pass
+        # F11 (first-practical-run remediation, 2026-10-03): on a deadline
+        # reaping, the engine's in-flight completion on this task's slot
+        # keeps decoding (observed 21.6K tokens on a dead task in the
+        # 2026-10-03 ledger — it steals decode bandwidth under load).
+        # Issue the engine's real-time control POST (reasoning_end) using
+        # the completion id the worker recorded in its sidecar. Best-
+        # effort + fault-tolerant: a failed cancel NEVER kills the reaper
+        # pass (the slot is freed either way; under light load the orphan
+        # finishes on its own). Gated on cancel_on_deadline (default on)
+        # + the sidecar carrying a live cmpl_id + the record's port.
+        # UNRESOLVED: engine-slot-cancel — verified against the pin's
+        # /v1/chat/completions/control endpoint, @gpu round pending.
+        if deadline_gone and (cfg or {}).get("cancel_on_deadline", True):
+            # the worker writes the sidecar to d["tasks"] (a sibling of the
+            # task record, <results>/tasks/<task_id>.cmpl.json) — read it
+            # back from the SAME dir (a base-dir read here would miss it,
+            # making the cancel a silent no-op).
+            sidecar = _read_cmpl_sidecar(Path(d["tasks"]), rec["task_id"])
+            port = rec.get("port")
+            cmpl_id = sidecar.get("cmpl_id") if isinstance(sidecar, dict) else None
+            if cmpl_id and isinstance(port, int):
+                try:
+                    api_key = load_engine_identity().get("api_key", "")
+                except ConfigError:
+                    api_key = ""
+                cancelled = _cancel_completion_on_instance(port, cmpl_id, api_key)
+                log(
+                    f"reaper: {rec['task_id']} F11 orphan cancel "
+                    f"({'cancelled' if cancelled else 'no-op/failed'}: cmpl {cmpl_id[:24]!r} on port {port})"
+                )
         rec["updated_ts"] = now
         write_task(d, rec)
         reaped.append(rec["task_id"])
@@ -1176,6 +1334,13 @@ def read_result(rec: dict) -> dict:
         "tool_log": [],
         "steps": None,
         "workdir": rec.get("workdir"),
+        # F4 (first-practical-run remediation): the partial-salvage marker.
+        # True when the result file was written by the worker's
+        # deadline-timeout salvage path (the in-flight completion's
+        # accumulated answer/reasoning, `partial: true`). A reaped
+        # timeout that salvaged a partial shows this so the main agent
+        # knows the answer/reasoning are salvageable, not a final answer.
+        "partial": False,
     }
     rf = rec.get("result_file")
     if not isinstance(rf, str) or not rf:
@@ -1188,6 +1353,8 @@ def read_result(rec: dict) -> dict:
         for k in ("answer", "reasoning", "usage", "tool_log", "steps", "workdir"):
             if k in data:
                 out[k] = data[k]
+        if data.get("partial"):
+            out["partial"] = True
     return out
 
 
@@ -1346,7 +1513,7 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
     emit it). Returns the parsed dict, or the detail string on failure.
 
     [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off] [--ctx N]
-    [--deadline SECS] [--max-steps N] [--workdir DIR]
+    [--deadline SECS] [--max-steps N] [--max-tokens N] [--workdir DIR]
     [--out FILE] [--priority low|normal|high]
 
     G3 PR#18 r12 P1 (verification): the `--tools` default ON means every
@@ -1371,6 +1538,7 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
         "ctx": None,
         "deadline": None,
         "max_steps": None,
+        "max_tokens": None,
         "workdir": None,
         "out": None,
         "priority": "normal",
@@ -1447,6 +1615,20 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
             if not (1 <= v <= 128):
                 return "ERR_ARGS: --max-steps must be in 1-128 (S3.4)"
             args["max_steps"] = v
+            i += 2
+            continue
+        if a == "--max-tokens":
+            # F1 (first-practical-run remediation, 2026-10-03): the
+            # per-completion output cap. Strict positive-integer gate,
+            # range 1-32768 (a slot's ctx headroom = ctx_size/parallel
+            # on this box; the spec names 32768 as the per-slot cap).
+            tok = argv[i + 1] if i + 1 < len(argv) else ""
+            if not re.fullmatch(r"[1-9][0-9]*", tok):
+                return "ERR_ARGS: --max-tokens must be a positive integer"
+            v = int(tok)
+            if not (1 <= v <= 32768):
+                return "ERR_ARGS: --max-tokens must be in 1-32768"
+            args["max_tokens"] = v
             i += 2
             continue
         if a == "--workdir":
@@ -1726,11 +1908,18 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 result_file = str(d["base"] / f"{task_id}.json")
             else:
                 result_file = str(out_path)
-            deadline_s = (
-                parsed["deadline"]
-                if parsed["deadline"] is not None
-                else float(cfg["task_default_deadline_s"])
-            )
+            # F3a (first-practical-run remediation, 2026-10-03): a --tools on
+            # task makes up to max_steps completions, so its DEFAULT deadline
+            # must cover the whole loop, not one completion. The tools-on
+            # default applies only when no explicit --deadline was given;
+            # --tools off keeps the bare task_default_deadline_s. An explicit
+            # --deadline always wins (the caller sized it).
+            if parsed["deadline"] is not None:
+                deadline_s = parsed["deadline"]
+            elif parsed["tools"] == "on":
+                deadline_s = float(cfg["task_default_deadline_s_tools_on"])
+            else:
+                deadline_s = float(cfg["task_default_deadline_s"])
             # S3.2/S3.6 (the 2026-09-25 spec amendment): the task's
             # workdir. Explicit --workdir is validated above; when
             # omitted the harness creates <workspace_dir>/<task_id>
@@ -1821,6 +2010,22 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 "deadline_s": deadline_s,
                 "workdir": workdir,
                 "max_steps": max_steps,
+                # F1 (first-practical-run remediation): the per-completion
+                # output cap threaded into every completion payload by the
+                # worker. Flag value else the S3.6 task_default_max_tokens
+                # default (range 1-32768, enforced at parse).
+                "max_tokens": (
+                    parsed["max_tokens"]
+                    if parsed["max_tokens"] is not None
+                    else int(cfg["task_default_max_tokens"])
+                ),
+                # F11 (first-practical-run remediation): arm the engine's
+                # real-time reasoning control on this task's completions so
+                # a deadline reaping can end an orphaned in-flight
+                # completion. Carried on the record (the worker's contract
+                # is the record, not a config re-read) so the worker knows
+                # whether to add reasoning_control:true to the body.
+                "arm_reasoning_control": bool(cfg.get("arm_reasoning_control", True)),
                 "created_ts": now,
                 "worker_pid": None,
                 "instances_tried": [],
@@ -1932,7 +2137,7 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
             doc = load_health_doc(env=env)
         except HealthMissing:
             pass  # the manager dropped the document mid-wait — keep the last good one
-        reap_stale(d, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr))
+        reap_stale(d, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr), cfg=cfg)
         claimed = claim_slot(d, doc)
         if claimed is not None:
             start_worker(
@@ -1963,9 +2168,19 @@ def _collect_json(rec: dict) -> dict:
     result file; task JSON + answer/reasoning/usage'). A terminal task
     with a result file carries the worker's written values; a missing
     result file (failed/timeout before the write, or the write target
-    was moved) carries nulls — the state + error are the verdict."""
+    was moved) carries nulls — the state + error are the verdict.
+
+    F4 (first-practical-run remediation, 2026-10-03): when the reaper
+    salvaged a partial artifact onto the record (`partial_answer` /
+    `partial_reasoning`, from the result file's `partial: true` write),
+    those fields are surfaced here too — so a reaped timeout whose
+    worker died before it could write its own partial still returns the
+    salvageable text on collect, not just nulls."""
     out = spawn_json(rec)
     out.update(read_result(rec))
+    for k in ("partial_answer", "partial_reasoning"):
+        if isinstance(rec.get(k), str) and rec[k]:
+            out[k] = rec[k]
     return out
 
 
@@ -1998,8 +2213,9 @@ def cmd_collect(argv: list[str], env: dict | None = None) -> int:
     # MAP 3.4 (the PLAN's collect half of the reaper wiring): reap BEFORE
     # the read — a stale `running` record (dead worker pid) is turned
     # terminal here, so collect maps it to 21/22 instead of polling 0
-    # forever. Idempotent; terminal records are skipped.
-    reap_stale(d, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr))
+    # forever. Idempotent; terminal records are skipped. cfg is passed
+    # so F11's cancel_on_deadline gate + F4's salvage-read apply.
+    reap_stale(d, log=lambda m: print(f"bonsai2: {m}", file=sys.stderr), cfg=cfg)
     try:
         rec = read_task(d, task_id)
     except TaskNotFound as exc:

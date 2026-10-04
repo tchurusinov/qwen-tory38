@@ -83,6 +83,13 @@ class ToolEngine:
         self.tools_response = tools_response or {"success": True, "output": "ok"}
         self.request_log: list[dict] = []
         self.tools_log: list[dict] = []
+        # F11 (2026-10-03 first-practical-run remediation): the engine's
+        # real-time completion-control endpoint. `control_response` is the
+        # canned answer (default {"success": True}); `control_log` records
+        # every POST body the reaper's cancel sent (tests assert the
+        # {id, action} shape + that the reaper addressed the RIGHT port).
+        self.control_response: dict = {"success": True}
+        self.control_log: list[dict] = []
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.port: int = port
@@ -125,6 +132,29 @@ class ToolEngine:
 
     @staticmethod
     def _chunks(spec: dict) -> list[dict]:
+        # F11/F2 (2026-10-03 first-practical-run remediation): the spec
+        # may carry `id` (the engine's completion id — the SSE `id`
+        # field the worker captures for the F11 control-endpoint
+        # cancel) and `finish_reason` (the SSE `choices[0].finish_reason`
+        # the worker's F2 truncation guard reads). Absent -> the chunks
+        # carry neither (the pre-remediation wire shape; legacy specs
+        # keep their byte-identical behavior).
+        emit_id = isinstance(spec.get("id"), str) and bool(spec.get("id"))
+        fr = spec.get("finish_reason")
+        chunks = []
+        for c in ToolEngine._base_chunks(spec):
+            c = dict(c)
+            if emit_id:
+                c["id"] = spec["id"]
+            if isinstance(fr, str) and fr:
+                choices = c.get("choices")
+                if isinstance(choices, list) and choices:
+                    c["choices"] = [dict(choices[0], finish_reason=fr)]
+            chunks.append(c)
+        return chunks
+
+    @staticmethod
+    def _base_chunks(spec: dict) -> list[dict]:
         if spec.get("kind") == "tool":
             if spec.get("fragmented", False):
                 # G3 PR#18 r9: emulate the OpenAI/llama.cpp streaming
@@ -199,9 +229,24 @@ class ToolEngine:
                 block = "```json\n" + json.dumps(inner) + "\n```"
                 chunks = [{"choices": [{"delta": {"content": block}}]}]
         else:  # kind == "final"
-            chunks = [
+            # F2 (first-practical-run remediation): the pin's
+            # deepseek-format completion can carry reasoning_content
+            # deltas (the 9-21K pre-tool reasoning bloat). A spec's
+            # `reasoning` key emits a reasoning_content chunk BEFORE the
+            # content chunk — a length-cut completion (finish_reason=
+            # "length", empty content) that still carries reasoning is
+            # what reaches the worker's F2 truncation guard; a fully
+            # empty stream never does (it fails the pre-existing
+            # parse guard first, ERR_PARSE). Absent key -> legacy
+            # byte-identical shape.
+            chunks = []
+            if spec.get("reasoning"):
+                chunks.append(
+                    {"choices": [{"delta": {"reasoning_content": spec["reasoning"]}}]}
+                )
+            chunks.append(
                 {"choices": [{"delta": {"content": spec.get("content", "done")}}]}
-            ]
+            )
         chunks.append(
             {
                 "choices": [{"delta": {}}],
@@ -240,6 +285,17 @@ class ToolEngine:
                     self._completions(body)
                 elif self.path.rstrip("/") == "/tools":
                     self._tools(body)
+                elif self.path.rstrip("/") == "/v1/chat/completions/control":
+                    # F11: the engine's real-time completion-control
+                    # endpoint (the reaper's orphan-cancel lever). Record
+                    # the body the reaper sent; answer with the canned
+                    # control_response (default success).
+                    try:
+                        parsed = json.loads(body)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    outer.control_log.append(parsed)
+                    self._send(200, json.dumps(outer.control_response).encode())
                 else:
                     self._send(404, b"{}")
 

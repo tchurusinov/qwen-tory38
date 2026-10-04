@@ -881,7 +881,48 @@ SPEC.md `status` → `active`.
 - blockers/intricacies: (what bit, spec refs, what the next agent should
   know to avoid re-learning it; "none" if clean)
 - spec deltas: (SPEC.md changes made this session + why; "none")
--->
+--->
+
+### 2026-10-04 — First-practical-run remediation (F1–F12) implemented + hermetic suite green (branch `remediation-first-practical-run`, G3 pending)
+- agent/model: Hermes qwen3.8-27b (sessions: remediation implementation,
+  two consecutive agents; this entry consolidated by the finishing
+  session)
+- phase(s): post-live-run remediation (feeds Phase 7 / MAP 7.2
+  re-validation; no phase checkbox claimed yet)
+- items checked: none (all acceptance is the PR DOD + the post-merge
+  @gpu re-bench of the four failed tasks, MAP 7.x)
+- machine state: unchanged from 2026-09-30 entry (no /opt/bonsai2
+  install yet; images bonsai2-server-build:121a + bonsai2-server:1.0
+  present; main stack live at :30001 untouched). Branch
+  `remediation-first-practical-run` off origin/main @ 93d34b2:
+  remediation-report + evidence ledger in-repo; F1/F2/F3a caps +
+  truncation guard + tools-on default deadline; F4 partial salvage +
+  reaper backstop + collect surface; F5–F8/F12 SKILL.md doctrine; F9
+  --no-block + TimeoutStartSec=300; F10 CPUQuota 64% + exec-bit/shebang
+  deploy fix + results chown; F11 cmpl sidecar + control-POST reaper
+  cancel (UNRESOLVED: engine-slot-cancel, @gpu round pending).
+- next: G3 — PR + isolated review (round 1). Then G4 (human merge).
+  After merge: @gpu re-bench of the four failed tasks (MAP 7.2 leg),
+  then dispose the UNRESOLVED: engine-slot-cancel marker from the live
+  run.
+- blockers/intricacies: (1) the F2 guard is reachable ONLY for a
+  length-cut completion that still carried reasoning (the pin's actual
+  shape — reasoning bloat cut mid-stream); a fully-empty stream fails
+  the pre-existing parse guard (ERR_PARSE) first — the hermetic test
+  mirrors the pin shape and the fixture gained a reasoning key. (2)
+  this box runs real systemd 255: the F9 test must mock
+  subprocess.run around EVERY systemctl call or it hits the real
+  systemctl. (3) F11 bug found + fixed in this branch: the reaper read
+  the cmpl sidecar from the results BASE dir while the worker writes
+  it to the tasks dir — the orphan cancel would have been a silent
+  no-op. Now reads d["tasks"].
+- spec deltas: SPEC.md amended S3.2 (--max-tokens flag), S3.4 (F3a
+  loop-aware default deadline; F1/F2/F4/F11 tool-loop delta), S3.6
+  (task_default_max_tokens, task_default_deadline_s_tools_on,
+  arm_reasoning_control, cancel_on_deadline), S2.2 (--no-block +
+  TimeoutStartSec=300), S2.5 (F10 install hygiene). No LOCKED value
+  changed — all deltas are additive (new flags/keys/behaviors with
+  named defaults).
 
 ### 2026-09-30 — Docs audit + refresh (Phases 5–6 reality backported to README/bin/AGENTS/docs); MAP 6.7/6.8 checked on the hermetic proof
 - agent/model: Hermes qwen3.8-27b (session: docs audit + refresh,

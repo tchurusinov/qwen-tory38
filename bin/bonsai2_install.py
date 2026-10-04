@@ -690,7 +690,13 @@ _UNIT_SERVICE_TMPL = (
     "%EXECSTART%\n"
     "Restart=on-failure\n"
     "RestartSec=5\n"
-    "CPUQuota=64%%\n"
+    # F10 (first-practical-run remediation, 2026-10-03): the render bug —
+    # systemd logged "Invalid CPU quota '64%%', ignoring" because this
+    # template reaches systemd as a PLAIN string (only the %EXECSTART%
+    # token is substituted via .replace, no % / .format pass), so the
+    # doubled %% survived to the unit. A single % is the valid systemd
+    # form (units/bonsai2-server@.service carries 64% too).
+    "CPUQuota=64%\n"
     "\n"
     "[Install]\n"
     "WantedBy=multi-user.target\n"
@@ -1345,10 +1351,16 @@ def _read_templates(seams: Seams) -> dict[str, str]:
     }
 
 
-def _deploy_bin_tree(seams: Seams, opt_root: Path) -> None:
+def _deploy_bin_tree(
+    seams: Seams, opt_root: Path, python: str = DEFAULT_PYTHON
+) -> None:
     """Deploy the bin/ + bench/ runtime tree to the opt root (the repo
     mirrors the host layout 1:1; S6.1: the four runtime YAMLs + the bin
-    tree + the bench package are the install surface). Idempotent."""
+    tree + the bench package are the install surface). Idempotent.
+
+    `python` is the box-python shebang the F10 deploy-time fix rewrites
+    the command wrappers to (the installer's resolved interpreter;
+    DEFAULT_PYTHON = /usr/bin/python3)."""
     bin_dst = opt_root / "bin"
     bin_dst.mkdir(parents=True, exist_ok=True)
     for name in BIN_DEPLOY:
@@ -1357,6 +1369,48 @@ def _deploy_bin_tree(seams: Seams, opt_root: Path) -> None:
             _log(f"deploy: WARN {name} missing from the repo bin/ - skipping")
             continue
         shutil.copy2(src, bin_dst / name)
+    # F10 (first-practical-run remediation, 2026-10-03 — ledger section
+    # 1c): the S3.2 command wrappers land NOT +x on some clones (the
+    # repo copies lost their exec bit; copy2 preserves it) and carry a
+    # `#!/usr/bin/env python3` shebang that resolves to the Hermes
+    # bundled python (no PyYAML) when its bin dir is ahead of /usr/bin
+    # on the PATH -> raw traceback, no closed-set exit code. Both fixed
+    # AT DEPLOY, so every install lands a clean command surface:
+    #  * chmod 0o755 the executable set (the manager + all commands; the
+    #    _harness/_tools/_vram/_fetch/_image/_render/_taskworker modules
+    #    stay 0644 — they are imported, not executed),
+    #  * rewrite the first line of each executable to the box python
+    #    (the installer's `python` argument, /usr/bin/python3 on this
+    #    box — the interpreter that HAS PyYAML). The repo source files
+    #    are NOT rewritten (deploy-time only; a re-install is
+    #    idempotent because the rewrite is a no-op on an already
+    #    pinned shebang).
+    exec_set = {
+        "bonsai2-manager",
+        "bonsai2-status",
+        "bonsai2-list-instances",
+        "bonsai2-health",
+        "bonsai2-spawn",
+        "bonsai2-collect",
+        "bonsai2-steer",
+        "bonsai2-cancel",
+        "bonsai2-unload",
+        "bonsai2-reload",
+        "bonsai2-bench",
+    }
+    for name in exec_set:
+        p = bin_dst / name
+        if not p.is_file():
+            continue
+        try:
+            txt = p.read_text()
+            if txt.startswith("#!"):
+                first_nl = txt.index("\n", 2)
+                txt = f"#!{python}\n" + txt[first_nl + 1 :]
+            p.write_text(txt)
+            p.chmod(0o755)
+        except (OSError, ValueError) as exc:
+            _log(f"deploy: WARN {name} exec-bit/shebang fix failed: {exc}")
     # the bench package (run.py resolves $BONSAI2_HOME/share/bench at
     # install time; repo-relative in the tree):
     share = opt_root / "share"
@@ -1373,9 +1427,46 @@ def _deploy_bin_tree(seams: Seams, opt_root: Path) -> None:
     _log("deploy: bin/ + bench/ tree in place")
 
 
-def _make_dirs(health_dir: Path) -> None:
+def _invoke_uid() -> int | None:
+    """F10 (first-practical-run remediation, 2026-10-03 — ledger section
+    1c): the uid of the USER who invoked the installer. The installer
+    normally runs as root (sudo ./install.sh) and creates the
+    /run/bonsai2 subtrees root-owned; the user-scope S3.2 commands
+    (spawn/collect/...) then `mkdir` task dirs under results/ as that
+    user -> EACCES. SUDO_UID (set by sudo for the invoking user) is the
+    source of truth; None when not running under sudo (a non-root
+    install: the dirs are already owned by the caller — no chown
+    needed)."""
+    v = os.environ.get("SUDO_UID")
+    if v is not None and v.isdigit() and int(v) != 0:
+        return int(v)
+    return None
+
+
+def _make_dirs(health_dir: Path, invoke_uid: int | None = None) -> None:
     for sub in ("results", "dedup", "bench", "workspaces", "control"):
         (health_dir / sub).mkdir(parents=True, exist_ok=True)
+    # F10: chown the results subtree to the invoking user so user-scope
+    # commands can create task dirs under results/ without EACCES. Only
+    # `results/` (its immediate subdirs are created at runtime, and they
+    # inherit the parent's owner): dedup/bench/workspaces/control are
+    # manager- (root-) scope and stay root-owned. Best-effort: a chown
+    # failure (not running as root, an immutable subtree) logs, never
+    # fails the install (a user-scope install already has the caller's
+    # uid on the dirs).
+    if invoke_uid is not None:
+        results = health_dir / "results"
+        try:
+            for p in [results, *results.iterdir()]:
+                try:
+                    os.chown(p, invoke_uid, -1)
+                except OSError:
+                    pass  # root-only op; keep going (best-effort)
+            _log(f"run: {results} chowned to uid={invoke_uid} (user-scope commands)")
+        except OSError as exc:
+            _log(
+                f"run: WARN results chown failed ({exc}) — user-scope commands may hit EACCES"
+            )
     _log(f"run: {health_dir} dirs in place (results/dedup/bench/workspaces/control)")
 
 
@@ -1722,8 +1813,8 @@ def install(
     if drift:
         warnings.append(f"config rewrite: {'; '.join(drift)} (S6.4 drift detection)")
     # deploy the runtime tree (bin + bench) - cheap, idempotent copies
-    _deploy_bin_tree(seams, opt_root)
-    _make_dirs(health_dir)
+    _deploy_bin_tree(seams, opt_root, python=python)
+    _make_dirs(health_dir, invoke_uid=_invoke_uid())
 
     # ---- (7) units + manager (S6.3 step 7) --------------------------------
     unit_dir = seams.unit_dir(plan.scope)
