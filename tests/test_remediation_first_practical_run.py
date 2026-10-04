@@ -57,6 +57,7 @@ import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "bin"
@@ -467,6 +468,89 @@ class TestToolLoopWireBody(_Base):
             len(eng.request_log),
             1,
             "F2: no nudge for a content-carrying truncation — exactly one completion",
+        )
+
+    def test_f1_legacy_record_without_max_tokens_keeps_legacy_wire_shape(self) -> None:
+        # G3 PR#37 round-1 P2: the S3.4 F1 delta promises "a record
+        # WITHOUT the key keeps the legacy byte-identical payload" for
+        # BOTH the pre-loop completion and each tool-loop step. The
+        # pre-loop path gates on isinstance(rec.get("max_tokens"), int);
+        # the tool-loop path must not emit `"max_tokens": null` for a
+        # pre-remediation record. Unit-level: a record with the key
+        # stripped (as a pre-F1 record on disk) must produce a tool-loop
+        # body WITHOUT the max_tokens key at all.
+        self._write_cfg()
+        d = self._results()
+        H.ensure_results_dirs(d)
+        rec = {
+            "task_id": "t-legacy-wire",
+            "prompt": "legacy prompt",
+            "result_file": str(self.results / "t-legacy-wire.json"),
+            "state": "running",
+            "tools": "on",
+        }
+        H.write_task(d, rec)
+        with mock.patch.object(
+            W,
+            "_stream_chat",
+            return_value={
+                "ok": True,
+                "answer": "legacy done",
+                "reasoning": "",
+                "tool_call": None,
+                "usage": None,
+                "finish_reason": "stop",
+                "cmpl_id": None,
+            },
+        ) as mchat:
+            W._run_tool_loop(rec, 30101, {"alias": "a", "api_key": "k"}, d, {})
+        bodies = [c.args[2] for c in mchat.call_args_list]
+        self.assertEqual(len(bodies), 1)
+        self.assertNotIn(
+            "max_tokens",
+            bodies[0],
+            "F1 legacy: a record without the key must OMIT max_tokens from "
+            "the tool-loop body (no null, no default) — the legacy "
+            "byte-identical payload",
+        )
+        self.assertEqual(rec["state"], "done")
+
+    def test_f1_record_with_max_tokens_carries_it_in_tool_loop_body(self) -> None:
+        # the symmetric half: a record that DOES carry max_tokens (every
+        # post-remediation record does) must still put it on the wire —
+        # the gate must not silently swallow the cap.
+        self._write_cfg()
+        d = self._results()
+        H.ensure_results_dirs(d)
+        rec = {
+            "task_id": "t-capped-wire",
+            "prompt": "capped prompt",
+            "result_file": str(self.results / "t-capped-wire.json"),
+            "state": "running",
+            "tools": "on",
+            "max_tokens": 4096,
+        }
+        H.write_task(d, rec)
+        with mock.patch.object(
+            W,
+            "_stream_chat",
+            return_value={
+                "ok": True,
+                "answer": "done",
+                "reasoning": "",
+                "tool_call": None,
+                "usage": None,
+                "finish_reason": "stop",
+                "cmpl_id": None,
+            },
+        ) as mchat:
+            W._run_tool_loop(rec, 30101, {"alias": "a", "api_key": "k"}, d, {})
+        bodies = [c.args[2] for c in mchat.call_args_list]
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(
+            bodies[0].get("max_tokens"),
+            4096,
+            "F1: a record that carries max_tokens must put it on the wire",
         )
 
 

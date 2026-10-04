@@ -1153,7 +1153,16 @@ def _run_tool_loop(
                     # reasoning tokens before the first tool call and
                     # loses the deadline race. The cap is the harness
                     # record's max_tokens (spawn flag else S3.6 default).
-                    "max_tokens": rec.get("max_tokens"),
+                    # Gated on an int exactly like the pre-loop path
+                    # (S3.4 F1 delta: "a record without the key keeps the
+                    # legacy byte-identical payload" — an unconditional
+                    # `rec.get(...)` would emit "max_tokens": null for a
+                    # pre-remediation record and change the wire shape).
+                    **(
+                        {"max_tokens": rec["max_tokens"]}
+                        if isinstance(rec.get("max_tokens"), int)
+                        else {}
+                    ),
                     # F11 (first-practical-run remediation): arm the
                     # engine's real-time reasoning control on this
                     # completion so a deadline reaping can end an
