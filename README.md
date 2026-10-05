@@ -5,6 +5,7 @@ A two-model agent stack for a single GB10-class box (Blackwell, aarch64,
 
 - **main agent** — qwen3.8-27b NVFP4, served by the pre-existing SGLang
   stack at `:30001`. External infrastructure: consumed, never modified.
+  [main agent repo](https://github.com/hasso5703/dgx-spark-qwen38)
 - **subagents** — Ternary-Bonsai-2-27B (ternary weights, GGUF), served as
   N instances of the prism-ml llama.cpp fork (`bonsai2-server:<tag>`
   image, one container per instance under systemd) in the VRAM the main
