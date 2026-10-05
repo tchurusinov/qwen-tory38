@@ -517,3 +517,102 @@ code). Acceptance for the whole list = the next practical run's acceptance bar:
 a subagent delivers a >4 KB generation window inside its deadline with tool_log > 0,
 reasoning field empty/short, no worker-self-reaped orphan running 5+ min past its
 reap, and the run verdict judged on the subagent-delivered artifacts.
+
+===========================================================================
+OBSERVED BEHAVIOUR (live, post-implementation, 2026-10-05)
+===========================================================================
+
+Live smoke against the pinned engine (image bonsai2-server:1.0 @
+6b4cd79f, PQ2_0, engine pin 9a9394a8 — the S1.2 pin the PR is tested
+against), same 9-12 KB full-file single-file HTML game prompt as the
+second run's lost windows, VRAM-audited before each launch. Four arms,
+recorded here as the current observed behaviour, in PR #38 comments
+1273 + 1275. This section supersedes "deferred to your live retest" in
+the PR body's Checks section.
+
+ARM A — tools off, reasoning ON (pre-remediation wire, no
+reasoning_effort in the body):
+  907.4 s wall, finish_reason "length" (hit the 16384 cap),
+  16384 completion tokens, answer_chars 0, reasoning_chars 47058.
+  = the second run's lost-task shape reproduced live: a cap-sized
+    pure-reasoning first completion, zero visible answer, still no
+    write had happened when the cap cut it.
+
+ARM B — tools off, reasoning OFF (reasoning_effort "none", the new
+default wire post-FIX 1):
+  248.1 s wall, finish_reason "stop", 6580 completion tokens,
+  answer_chars 16949, reasoning_chars 0.
+  = the whole game in ONE completion: complete, well-formed file
+    (starts <!DOCTYPE html>, ends </html>), 3.7x faster wall, ~2.5x
+    fewer completion tokens, ZERO reasoning bloat.
+
+ARM C — tools ON + reasoning OFF (the normal work payload: the
+agentic tool loop, driven exactly as bin/bonsai2-taskworker.py
+_run_tool_loop drives it — the 4-tool schema executed host-side via
+the repo's own bin/bonsai2_tools.py, stream:true, max_tokens 16384,
+reasoning_control: true armed, reasoning_effort: "none"):
+  SUCCESS — the full loop, 3 steps, state "done", ~317 s total wall:
+    step 0: 312.5 s, finish_reason "tool_calls", 0 reasoning chars —
+      the FIRST completion was the write_file tool call itself
+      (engine telemetry: n_gen 6161 for the step, ~25-28 t/s, idle
+      pool). No pre-tool reasoning block: it is gone.
+    step 1: 3.7 s, finish "tool_calls" — the bash DoD command
+      (extract the inline <script> + node --check).
+    step 2: 0.6 s, finish "stop" — final answer
+      "Exit code 0 — DOD check passed."
+  Artifact: game.html, 13450 bytes; main-side re-verification
+  (ledger-first): node --check on the extracted script -> exit 0;
+  present: complete file structure, inline <style> (neon vaporwave),
+  inline <script> with a requestAnimationFrame game loop, the
+  5-wave mechanic, restart/game-over.
+  = the acceptance bar the run list names ("a subagent delivers a
+    >4 KB generation window inside its deadline with tool_log > 0,
+    reasoning field empty/short") MET at the default caps + the new
+    default wire, on the exact shape that lost 3 of 4 windows in
+    the second run — with an idle pool and the default 1800 s
+    F3a deadline (~317 s total vs 1800 s = 17% of budget).
+
+CONCLUSION (live): FIX 1 works end-to-end at this pin — no engine-
+side (fork) change was needed; the client-side reasoning_effort
+field is sufficient. The first completion on the lost shape drops
+from a cap-sized 15-17K reasoning block to ~6-7K content/tool-call
+tokens, and the tools-on loop reaches its first tool call on step 0
+and the DoD on step 1.
+
+NEW LIVE OBSERVATION (surfaced by ARM C, 2026-10-05) — pin rejects
+NULL reasoning_content in tool-loop history messages:
+  The pin's chat-template message parser returns HTTP 500
+  ("Failed to parse messages: [json.exception.type_error.302] type
+   must be string, but is null") when a tool-loop ASSISTANT message
+  carries reasoning_content: null. Reproduced in isolation on this
+  exact engine:
+    assistant {content: null, reasoning_content: null, tool_calls} -> 500
+    assistant {content: "",  reasoning_content: "",    tool_calls} -> 200
+    (content: null alone is TOLERATED; the null reasoning_content
+     is the trigger.)
+  Why it matters: with reasoning OFF the default, the tool loop's
+  accumulated reasoning is EMPTY, and the taskworker's tool-result
+  feedback appends `reasoning_content: reasoning or None`
+  (bin/bonsai2-taskworker.py ~1646) — i.e. null — from step 1
+  onward. A real tools-on + reasoning-off task (the new DEFAULT)
+  will 500 at step 2 on this pin unless the worker sends "" (or
+  omits the key) instead of None. ARM C's run used "" as the
+  feedback shape (byte-equivalent for the model) and completed;
+  the worker itself still sends None.
+  Candidate follow-up (NOT in this PR's DOD): a one-line worker fix
+  (send reasoning or "" — or omit the key when empty — in the
+  tool-loop assistant feedback message) + a hermetic case asserting
+  the tool-loop assistant message never carries a null
+  reasoning_content. The pre-loop (tools off) path is unaffected —
+  it never puts reasoning_content into the history.
+  NOTE the first-run's R1 prompt discipline already nudged the
+  shape toward "no planning preamble", but the null-feedback path
+  is orthogonal: it fires on ANY tool-call step of a reasoning-off
+  task, prompt aside.
+
+SCOPE of this observation: single instance, idle pool (no
+contention), no manager (the loop was driven host-side, not via
+bonsai2-spawn). The post-merge full acceptance (the four lost
+windows through the real spawn/collect pipeline, loaded pool, N
+instances) remains the MAP 7.2 leg — this section proves the wire
++ the pin's behaviour at the first-completion and tool-loop level.
