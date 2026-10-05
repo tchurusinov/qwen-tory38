@@ -20,6 +20,16 @@ Exit codes (S3.2 closed set, per-command mapping):
        main_endpoint_healthy_probe) — the document is still emitted
   84 = health.json absent/invalid (the manager is down; S3.2 "a dead
        manager -> exit 84")
+
+Progress probe (second-run remediation, 2026-10-04):
+  bonsai2-status --tasks [TASK_ID ...]
+    prints the per-task progress probe (progress_report) instead of the
+    pool status — the cheap mid-run "is it making progress?" signal.
+    For each LIVE task: state, steps, tool_calls, deadline_s,
+    deadline_remaining_s (negative = past deadline, about to be reaped),
+    and cmpl_id (from the worker's F11 sidecar). No flag = the pool
+    status above, byte-identical. The probe is read-only and needs no
+    health.json (works while the manager is down).
 """
 
 import os

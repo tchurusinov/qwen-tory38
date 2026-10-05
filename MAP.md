@@ -883,6 +883,53 @@ SPEC.md `status` → `active`.
 - spec deltas: (SPEC.md changes made this session + why; "none")
 --->
 
+### 2026-10-05 — Second-practical-run remediation (FIX 1–9) finished: tests green, gate PASS, PR opened + review round 1 posted (branch `remediation-second-practical-run`)
+- agent/model: Hermes qwen3.8-27b (sessions: two consecutive agents —
+  the implementing session + this finishing session)
+- phase(s): post-live-run remediation (feeds Phase 7 / MAP 7.2
+  re-validation; no phase checkbox claimed yet)
+- items checked: none (all acceptance is the PR DOD + the post-merge
+  live re-run, MAP 7.x)
+- machine state: unchanged from the 2026-10-04 live run's end state
+  (system-scope /opt/bonsai2 deploy from the SECOND run, STALE relative
+  to this branch — re-run ./install.sh to deploy these fixes; main
+  stack live at :30001 untouched). Branch
+  `remediation-second-practical-run` off origin/main @ 915485b:
+  evidence-ledger-second-practical-run.md +
+  fix-proposals-second-practical-run.md in-repo; FIX 1 reasoning off by
+  default (record key + --reasoning on|off + S3.6 default + wire
+  splice, F1 byte-identical-wire discipline for legacy records); FIX 2
+  bounded nudge (2 consecutive cap-cut empty completions ->
+  ERR_TRUNCATED_NO_PROGRESS + F4 salvage; nudge names the verify
+  step); FIX 3 worker self-cancel (_cancel_inflight_completion best-
+  effort control POST at the 3 tool-loop + 2 pre-loop deadline exits);
+  FIX 4/6/9 SKILL.md main-loop guardrails + executable-DoD contract +
+  deadline formula; FIX 5 progress probe (progress_report + bonsai2-
+  status --tasks, no health.json needed); FIX 7 install chowns
+  workspaces/ like results/; FIX 8 manager reaper loads cfg (cancel_
+  on_deadline:false honored).
+- next: G3 — PR open, review round-1 raw output posted (STOP per user
+  instruction: no disposition yet). The live tmp-location large code-
+  gen smoke run (user-requested, post-review) lands as a follow-up PR
+  comment. Then G4 (human merge). After merge: re-deploy
+  (./install.sh) + the post-merge live re-run of the four lost windows
+  (MAP 7.2 leg) at the default caps + reasoning off.
+- blockers/intricacies: (1) cmd_status --tasks: the first implementation
+  had a bare `--tasks` (no IDs) fall through to the pool-status path —
+  `task_ids == []` was normalized to None, which the probe-vs-pool
+  branch keyed on. Fix: a separate `tasks_flag` tracks flag presence;
+  bare --tasks = ALL live tasks (None filter), pool status needs no
+  flag. (2) the non-bool-config gate test: PyYAML is YAML 1.1 — an
+  unquoted `yes` parses as a real True, so the test value must be
+  `2` (an int stays an int). (3) ruff RUF059 on two unpacked vars in
+  the new test module (prefix _doc/_out).
+- spec deltas: SPEC.md amended S2.5 (chown BOTH results/ + workspaces/),
+  S3.2 (bonsai2-status --tasks probe; no-flag surface byte-identical),
+  S3.4 (spawn --reasoning on|off + the full second-run delta block:
+  reasoning-off wire shape, bounded nudge, worker self-cancel, manager
+  reaper cfg), S3.6 (task_reasoning_off: true default). No LOCKED
+  value changed — all deltas additive.
+
 ### 2026-10-04 — First-practical-run remediation (F1–F12) implemented + hermetic suite green (branch `remediation-first-practical-run`, G3 pending)
 - agent/model: Hermes qwen3.8-27b (sessions: remediation implementation,
   two consecutive agents; this entry consolidated by the finishing

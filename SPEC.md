@@ -733,9 +733,14 @@ exit 4 — zero instances but not main-only mode.
   > command wrappers +x and rewrites their shebang to the box python
   > (/usr/bin/python3) at deploy time — some clones lost the exec bit
   > and `#!/usr/bin/env python3` resolved to a bundled python without
-  > PyYAML — and chowns `/run/bonsai2/results` to the invoking uid
+  > PyYAML — and chowns `/run/bonsai2/results` AND
+  > `/run/bonsai2/workspaces` to the invoking uid
   > (SUDO_UID; best-effort, non-sudo installs are a no-op) so user-scope
-  > S3.2 commands don't hit EACCES creating task dirs.
+  > S3.2 commands don't hit EACCES creating task dirs / per-task
+  > workdirs. (Second-practical-run delta 2026-10-04: the workspaces
+  > chown was added — the first-run chown covered results/ only, and a
+  > user-scope spawn without `--workdir` EACCES'd on the auto-created
+  > `<workspace_dir>/<task_id>` workdir.)
 
 ### 2.6 Configuration — `serving.yaml` (written by install.sh)
 
@@ -841,7 +846,8 @@ All under `/opt/bonsai2/bin/`, config from
 
 ```
 bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
-               [--ctx N] [--deadline SECS] [--max-steps N] [--max-tokens N]
+               [--reasoning on|off] [--ctx N] [--deadline SECS]
+               [--max-steps N] [--max-tokens N]
                [--workdir DIR] [--out FILE] [--priority low|normal|high]
                -> JSON (3.1). Submits to the least-loaded healthy
                instance. --tools defaults ON (the agentic loop, S3.4);
@@ -854,7 +860,16 @@ bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
                remediation F1: at this pin a big code-gen task emitted
                9-21K reasoning tokens in its first completion, before a
                single tool call, and lost the deadline race with an
-               unbounded completion); --workdir DIR
+               unbounded completion); --reasoning on|off (delta
+               2026-10-04, second-practical-run remediation: the pin's
+               first completion on a full-file write was a 15-17K+
+               token REASONING block with no tool call — bigger than
+               the cap, past every deadline; the pinned fork parses
+               `reasoning_effort: "none"` client-side, so completions
+               carry it when the record's `reasoning_off` is set;
+               default OFF via `task_reasoning_off` (S3.6) — ON is the
+               explicit, logged exception; the resolved value is part
+               of the dedup key, as `--tools` is); --workdir DIR
                confines the toolset to that directory (must exist,
                writable; when omitted the harness creates
                <workspace_dir>/<task_id> — the directory is S3.6's
@@ -863,6 +878,12 @@ bonsai2-spawn  [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off]
 bonsai2-steer  <TASK_ID> -m MESSAGE [--wait SECS]  # steer-and-wait: block up to SECS for state change
 bonsai2-cancel <TASK_ID> [--graceful]              # SIGTERM then SIGKILL after 5 s
 bonsai2-status                                   # JSON (3.1)
+                                                  # [--tasks [TASK_ID ...]] (delta 2026-10-04, second-practical-run
+                                                  # remediation): the progress probe — per LIVE task: state, steps,
+                                                  # tool_calls, deadline_s, deadline_remaining_s (negative = past
+                                                  # deadline), cmpl_id (from the worker's F11 sidecar). Read-only,
+                                                  # needs no health.json (works while the manager is down),
+                                                  # exit 0/2 only; no flag = the pool status above, byte-identical.
 bonsai2-list-instances                           # human table; exit 0
 bonsai2-collect  <TASK_ID>                       # -> JSON; reads result file,
                                                   # returns task JSON + {"answer": ..., "reasoning": ...,
@@ -1074,6 +1095,61 @@ subprocess is a child of the worker and dies with it.
 >   POST to the task's port — a failed/unknown-id/not-armed cancel never
 >   kills the reaper pass (the slot is freed either way).
 
+> Delta (2026-10-04, second-practical-run remediation — source:
+> evidence-ledger-second-practical-run.md +
+> fix-proposals-second-practical-run.md, both in-repo; the pin's shape
+> proven at this run: the first completion for a full-file write is a
+> 15-17K+ token REASONING block with no tool call, past every cap +
+> deadline pairing — six lost attempts, zero tool calls):
+> - **reasoning off by default:** the pinned fork parses
+>   `reasoning_effort: "none"` client-side (`enable_thinking = false`,
+>   the kwarg erased from the chat template — verified in the fork's
+>   `tools/server/server-common.cpp`). The spawn gains
+>   `--reasoning on|off` (default OFF via S3.6
+>   `task_reasoning_off: true`; ON is the explicit, logged exception);
+>   the record carries `reasoning_off` and every completion payload —
+>   tool-loop steps AND the `--tools off` pre-loop completion — carries
+>   `reasoning_effort: "none"` when the record has it. A record without
+>   the key (pre-remediation, on disk) keeps the legacy byte-identical
+>   payload, the F1 discipline.
+> - **the F2 nudge is BOUNDED:** the pre-remediation nudge loop was
+>   unbounded in the "cap-cut empty completion" case — a model that
+>   keeps emitting pure reasoning re-spent up to max_steps (32)
+>   cap-sized completions before failing. Now: TWO consecutive
+>   cap-cut empty completions → the task fails
+>   `ERR_TRUNCATED_NO_PROGRESS` (task-level error, collect exit 21,
+>   same class as the other tool-loop error names) with the F4
+>   salvage of the accumulated text; the streak resets on any
+>   completion carrying answer content, a tool call, or a
+>   non-"length" finish_reason. The nudge message now also names the
+>   verify step explicitly ("run your DoD's test command, report the
+>   exit code, fix and re-run at most 2 times").
+> - **the worker cancels its own orphan (the F11 gap):** F11's cancel
+>   was issued ONLY by the manager reaper; when the worker's own
+>   deadline fired first (the common case — this run's three
+>   round-2 timeouts were worker-self-reaped), the in-flight
+>   completion kept decoding on the engine for up to ~20-25 min,
+>   stealing bandwidth. Now: on every in-loop deadline exit AND the
+>   pre-loop path's deadline exits, the worker issues the SAME
+>   best-effort control POST (`reasoning_end`) for the LATEST in-
+>   flight completion id (tracked loop-locally, mirroring the cmpl
+>   sidecar the reaper reads). The manager's reaper pass now ALSO
+>   loads the harness config (a config that set
+>   `cancel_on_deadline: false` was silently ignored before — the
+>   default-True gate won over the missing cfg).
+> - **the progress probe (S3.2):** `bonsai2-status --tasks
+>   [TASK_ID ...]` reports per live task state/steps/tool_calls/
+>   deadline_s/deadline_remaining_s/cmpl_id — the mid-run "is it
+>   making progress?" signal fire-and-collect lacked. Read-only; no
+>   health.json requirement; exit 0/2 only. The pool-status surface
+>   (no flag) is byte-identical.
+> - **the install chowns workspaces/ (S2.5):** the first-run F10
+>   chown covered results/ only; a user-scope spawn without --workdir
+>   creates its task workdir under /run/bonsai2/workspaces/ as the
+>   invoking user → EACCES (this run's PONG probe). The install now
+>   chowns BOTH user-scope subtrees (results/ + workspaces/);
+>   dedup/bench/control stay manager-scope.
+
 **Host-side execution (default):** tools run in the taskworker process
 on the host, same trust domain as the main agent's own bash. The
 toolset is the `bin/bonsai2_tools.py` module — the ONLY toolset a
@@ -1142,6 +1218,8 @@ task_default_max_tokens: 16384        # F1: per-completion output cap (--max-tok
 task_default_deadline_s_tools_on: 1800  # F3a: default deadline for --tools on tasks (whole loop); explicit --deadline wins
 arm_reasoning_control: true           # F11: arm the engine's reasoning control on this task's completions (orphan-cancel arming)
 cancel_on_deadline: true              # F11: the reaper's best-effort engine control POST on a deadline reaping (failed cancel never blocks)
+# --- second-practical-run remediation (2026-10-04; S3.2/S3.4 deltas) ---
+task_reasoning_off: true              # second-run: reasoning OFF by default — completions carry reasoning_effort "none" (the pinned fork's client-side enable_thinking=false); --reasoning on is the explicit, logged exception
 main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
 # --- subagent capability layer (S3.4 tool loop) ---
 tool_execution: host           # host | engine (dual-mode, both tested; S3.4)

@@ -39,6 +39,15 @@ arm_reasoning_control: true
 # F11: the reaper's best-effort engine cancel on a deadline reaping (a failed
 # cancel never blocks the pass). false = reaping stays bookkeeping-only.
 cancel_on_deadline: true
+# Second-run remediation (2026-10-04): default reasoning off — the pinned
+# fork parses `reasoning_effort: "none"` client-side into
+# enable_thinking=false, so every completion carries it by default. At this
+# pin the deepseek reasoning template otherwise emits a 15-17K+ token
+# pre-tool reasoning block on a full-file write (the second practical run,
+# 2026-10-04: six lost tasks, zero tool calls, all reasoning-only first
+# completions). ON is the explicit, logged exception (--reasoning on /
+# task_reasoning_off: false).
+task_reasoning_off: true
 main_tps_guardrail_pct: 5      # S1.8 #5 / S0 guardrail
 # --- subagent capability layer (S3.4 tool loop, the 2026-09-25 amendment) ---
 tool_execution: host           # host | engine (dual-mode, both tested; S3.4)

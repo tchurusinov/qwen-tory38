@@ -97,6 +97,12 @@ POLL_S = 0.1
 # exit codes — collect maps failed->21 / timeout->22 as before).
 ERR_TOOL_INVALID_CALL = "ERR_TOOL_INVALID_CALL"
 ERR_TOOL_TIMEOUT = "ERR_TOOL_TIMEOUT"
+# Second-run remediation (2026-10-04): two consecutive cap-cut EMPTY
+# completions — the model kept reasoning without acting, so the F2 nudge
+# loop is bounded at 2 (fail fast + salvage, don't burn 30 more
+# cap-sized completions). Collect maps failed -> 21 as for every other
+# task-level error name.
+ERR_TRUNCATED_NO_PROGRESS = "ERR_TRUNCATED_NO_PROGRESS"
 
 # Engine-side tool name mapping (S1.3 note, A8 pin-reality): the fork's
 # built-in 7-tool set at pin 9a9394a8 — the 4 host-side names mapped onto
@@ -546,6 +552,15 @@ def _run_attempt(rec: dict, port: int, ident: dict) -> dict:
         # F11: arm the engine's real-time reasoning control on the
         # pre-loop completion too.
         body["reasoning_control"] = True
+    if rec.get("reasoning_off"):
+        # Second-run remediation: the pin's deepseek reasoning template
+        # emits a 15-17K+ token pre-tool reasoning block on a full-file
+        # write; `reasoning_effort: "none"` is parsed client-side by the
+        # pinned prism fork (tools/server/server-common.cpp — it sets
+        # enable_thinking=false and erases the kwarg so the template
+        # cannot re-arm thinking). Gated exactly like F1/F11: a legacy
+        # record WITHOUT the key keeps the byte-identical payload.
+        body["reasoning_effort"] = "none"
     res = _stream_chat(port, ident, body)
     if res.get("ok"):
         res.pop("tool_call", None)  # the pre-loop path ignores it (never sent)
@@ -905,6 +920,56 @@ def _write_cmpl_sidecar(d: dict, rec: dict, port: int, cmpl_id: str | None) -> N
         _log(f"{task_id}: F11 cmpl sidecar write failed: {exc}")
 
 
+def _cancel_inflight_completion(rec: dict, port: int, cmpl_id: str | None) -> None:
+    """Second-run remediation (2026-10-04): the worker's OWN F11 cancel.
+
+    On every deadline exit the in-flight completion keeps decoding on the
+    engine (the ledger's "orphans steal bandwidth for ~20-25 min"). The
+    manager reaper only cancels when IT is the one reaping — when the
+    worker's own deadline fires first (the common case: the worker
+    outlives its deadline by the socket cap), no cancel was ever issued.
+    POST /v1/chat/completions/control {id, action: reasoning_end}
+    best-effort: any failure logs, never changes the verdict.
+
+    Gated on the record arming reasoning control (same gate as the body
+    splice that armed it — an un-armed completion returns success:false,
+    a harmless no-op) + a live cmpl_id (a mock/legacy engine that omits
+    the SSE id -> None -> no-op). The 8-line POST is duplicated from the
+    harness's _cancel_completion_on_instance rather than imported so the
+    worker keeps its single-module deploy shape; both call sites stay in
+    sync because the wire contract is one JSON object — the engine's
+    endpoint is the source of truth.
+    """
+    if not cmpl_id or not rec.get("arm_reasoning_control"):
+        return
+    try:
+        ident = H.load_engine_identity()
+        api_key = ident.get("api_key", "")
+    except H.ConfigError:
+        api_key = ""
+    url = f"http://127.0.0.1:{int(port)}/v1/chat/completions/control"
+    body = json.dumps({"id": cmpl_id, "action": "reasoning_end"}).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read())
+        ok = bool(data.get("success"))
+    except Exception:  # noqa: BLE001 — best-effort cancel, never a verdict
+        ok = False
+    _log(
+        f"{rec.get('task_id', '?')}: worker self-cancel "
+        f"({'ok' if ok else 'no-op/failed'}: cmpl {cmpl_id[:24]!r})"
+    )
+
+
 def _salvage_partial_result(
     rec: dict,
     tool_log: list,
@@ -1033,6 +1098,18 @@ def _run_tool_loop(
     tool_log: list[dict] = []
     steps = 0
     consecutive_bad = 0
+    # Second-run remediation (2026-10-04): the F2 nudge loop is BOUNDED at
+    # 2 consecutive cap-cut empty completions — the model kept reasoning
+    # without acting (the second-run's lost tasks: 15-17K+ token reasoning
+    # blocks, no tool call). One nudge is the F2 contract (resumable
+    # truncation); two empty cap-cuts fail fast + salvage instead of
+    # re-spending up to max_steps cap-sized completions.
+    empty_length_streak = 0
+    # Second-run remediation (2026-10-04): the worker's own F11 cancel
+    # target — the LATEST in-flight completion's id (mirrors the cmpl
+    # sidecar the reaper reads; tracked loop-locally so a deadline exit
+    # can address it directly without a sidecar round-trip).
+    last_cmpl_id: str | None = None
     rec.setdefault("instances_tried", [])
     deadline_s = rec.get("deadline_s")
     deadline_at = time.monotonic() + (
@@ -1043,6 +1120,11 @@ def _run_tool_loop(
     while True:
         # ---- step boundary: deadline + steer drain (S4.3) + persist ----
         if time.monotonic() >= deadline_at:
+            # Second-run remediation: the worker's own F11 cancel — the
+            # previous step's completion may still be decoding on the
+            # engine; the manager reaper never gets the chance when the
+            # worker's own deadline fires first.
+            _cancel_inflight_completion(rec, port, last_cmpl_id)
             _set_state(
                 rec,
                 "timeout",
@@ -1177,6 +1259,18 @@ def _run_tool_loop(
                         if rec.get("arm_reasoning_control")
                         else {}
                     ),
+                    # Second-run remediation (2026-10-04): reasoning OFF
+                    # by default — the pinned fork parses
+                    # `reasoning_effort: "none"` into
+                    # enable_thinking=false client-side, so the first
+                    # completion stops being a 15-17K+ token reasoning
+                    # block on a full-file write. Gated exactly like F1
+                    # (a record WITHOUT the key keeps the legacy
+                    # byte-identical payload — the line-473 test's
+                    # discipline).
+                    **(
+                        {"reasoning_effort": "none"} if rec.get("reasoning_off") else {}
+                    ),
                 },
             )
             if time.monotonic() >= deadline_at:
@@ -1207,6 +1301,11 @@ def _run_tool_loop(
                     d,
                 )
                 _append_result_file(rec, tool_log, steps, workdir)
+                # Second-run remediation: cancel AFTER the salvage wrote
+                # (the salvage's log lands first), targeting THIS step's
+                # late completion — it is still decoding on the engine.
+                if res is not None and res.get("ok"):
+                    _cancel_inflight_completion(rec, port, res.get("cmpl_id"))
                 _log(f"{rec['task_id']}: deadline expired after step -> timeout")
                 return 0
             if res.get("ok"):
@@ -1258,11 +1357,19 @@ def _run_tool_loop(
         # is left as-is (the reaper treats a missing id as a no-op).
         if res is not None and res.get("ok"):
             _write_cmpl_sidecar(d, rec, port, res.get("cmpl_id"))
+            # Second-run remediation: the loop-local cancel target tracks
+            # the sidecar (the LATEST in-flight completion's id).
+            if isinstance(res.get("cmpl_id"), str) and res["cmpl_id"]:
+                last_cmpl_id = res["cmpl_id"]
 
         if res is None:
             # the deadline expired before the first attempt of this step
             # ran (the retry loop broke at its own deadline check) -> the
             # task's --deadline bounds the whole loop (S3.4).
+            # Second-run remediation: the previous step's completion may
+            # still be decoding on the engine — cancel it before the
+            # record goes terminal.
+            _cancel_inflight_completion(rec, port, last_cmpl_id)
             _set_state(
                 rec,
                 "timeout",
@@ -1319,6 +1426,31 @@ def _run_tool_loop(
             # finish_reason absent (a mock/legacy engine) -> pre-F2 path.
             finish_reason = res.get("finish_reason")
             if finish_reason == "length" and not answer.strip():
+                # Second-run remediation: this is ANOTHER consecutive
+                # cap-cut empty completion — count it.
+                empty_length_streak += 1
+                if empty_length_streak >= 2:
+                    # Two consecutive cap-cuts with no answer content is
+                    # "the model is reasoning its way to death" — fail
+                    # fast + salvage, don't burn up to max_steps more
+                    # cap-sized completions (the unbounded nudge loop the
+                    # second run hit: a pure-reasoning model re-spent
+                    # 30+ cap-sized completions before failing).
+                    _set_state(
+                        rec,
+                        "failed",
+                        ERR_TRUNCATED_NO_PROGRESS,
+                        "2 consecutive cap-cut empty completions — the model "
+                        "kept reasoning without acting (second-run "
+                        "remediation)",
+                        d,
+                    )
+                    _append_result_file(rec, tool_log, steps, workdir)
+                    _salvage_partial_result(
+                        rec, tool_log, steps, workdir, answer, reasoning, usage
+                    )
+                    _log(f"{rec['task_id']}: -> failed ERR_TRUNCATED_NO_PROGRESS")
+                    return 0
                 _log(
                     f"{rec['task_id']}: step {steps} hit finish_reason=length "
                     f"with no answer content (F2 truncation) — nudging, not done"
@@ -1331,11 +1463,21 @@ def _run_tool_loop(
                             "Your last reply was cut off mid-reasoning by the "
                             "output cap and carried no visible answer. Resume "
                             "directly: skip any preamble and continue with the "
-                            "next tool call or your final answer."
+                            "next tool call or your final answer. "
+                            "If your task's definition of done includes a test "
+                            "command, run it with a bash tool call now and "
+                            "report its exit code; if it fails, fix the output "
+                            "and re-run (at most 2 more times) before giving a "
+                            "final answer."
                         ),
                     }
                 )
                 continue
+            # Second-run remediation: a completion that carried answer
+            # content, a tool call, or a non-"length" finish_reason breaks
+            # the empty-cap-cut streak (the counter only tracks CONSECUTIVE
+            # empties).
+            empty_length_streak = 0
             # final answer -> done
             try:
                 Path(rec["result_file"]).parent.mkdir(parents=True, exist_ok=True)
@@ -1652,8 +1794,15 @@ def _main() -> int:
     # to the pre-capability-layer worker, the amendment's hard
     # constraint) ----
     attempt_detail: list[str] = []
+    # Second-run remediation: the worker's own F11 cancel target for the
+    # pre-loop completions (the PONG class of task is exactly this
+    # path — a --tools off task whose reasoning bloats still races the
+    # task deadline).
+    preloop_cmpl_id: str | None = None
     for _ in range(2):  # one run + the S1.5 single retry
         if time.monotonic() >= deadline_at:
+            if isinstance(port, int):
+                _cancel_inflight_completion(rec, port, preloop_cmpl_id)
             _set_state(
                 rec,
                 "timeout",
@@ -1664,11 +1813,17 @@ def _main() -> int:
             _log(f"{rec['task_id']}: deadline expired -> timeout")
             return 0
         res = _run_attempt(rec, port, ident)
+        if res.get("ok") and isinstance(res.get("cmpl_id"), str) and res["cmpl_id"]:
+            preloop_cmpl_id = res["cmpl_id"]
         if time.monotonic() >= deadline_at:
             # S3.4: the deadline expiring MID-RUN -> timeout even if the
             # attempt technically returned (the manager-side abort is the
             # enforcement half, MAP 3.4; this is the worker's own check —
             # a result that lands after the deadline is a late result).
+            # Second-run remediation: the late completion is still
+            # decoding on the engine — cancel it.
+            if isinstance(port, int):
+                _cancel_inflight_completion(rec, port, preloop_cmpl_id)
             _set_state(
                 rec,
                 "timeout",

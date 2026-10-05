@@ -1446,27 +1446,36 @@ def _invoke_uid() -> int | None:
 def _make_dirs(health_dir: Path, invoke_uid: int | None = None) -> None:
     for sub in ("results", "dedup", "bench", "workspaces", "control"):
         (health_dir / sub).mkdir(parents=True, exist_ok=True)
-    # F10: chown the results subtree to the invoking user so user-scope
-    # commands can create task dirs under results/ without EACCES. Only
-    # `results/` (its immediate subdirs are created at runtime, and they
-    # inherit the parent's owner): dedup/bench/workspaces/control are
-    # manager- (root-) scope and stay root-owned. Best-effort: a chown
-    # failure (not running as root, an immutable subtree) logs, never
-    # fails the install (a user-scope install already has the caller's
-    # uid on the dirs).
+    # F10 + second-run remediation (2026-10-04): chown the user-scope
+    # subtrees (results/ + workspaces/, see the loop below) to the
+    # invoking user so user-scope commands can create task dirs under
+    # results/ and per-task workdirs under workspaces/ without EACCES
+    # (their immediate subdirs are created at runtime and inherit the
+    # parent's owner). dedup/bench/control are manager- (root-) scope
+    # and stay root-owned. Best-effort: a chown failure (not running as
+    # root, an immutable subtree) logs, never fails the install (a
+    # user-scope install already has the caller's uid on the dirs).
     if invoke_uid is not None:
-        results = health_dir / "results"
-        try:
-            for p in [results, *results.iterdir()]:
-                try:
-                    os.chown(p, invoke_uid, -1)
-                except OSError:
-                    pass  # root-only op; keep going (best-effort)
-            _log(f"run: {results} chowned to uid={invoke_uid} (user-scope commands)")
-        except OSError as exc:
-            _log(
-                f"run: WARN results chown failed ({exc}) — user-scope commands may hit EACCES"
-            )
+        # F10 + second-run remediation (2026-10-04): chown BOTH
+        # user-scope subtrees — results/ (task result files) AND
+        # workspaces/ (the auto-created per-task workdirs: spawn without
+        # --workdir creates <workspace_dir>/<task_id> here as the
+        # invoking user). The 2026-10-04 run's PONG probe hit EACCES on
+        # workspaces/ with the results-only chown (INFRA DEFECT #2 in
+        # evidence-ledger-second-practical-run.md §2).
+        for sub in ("results", "workspaces"):
+            tree = health_dir / sub
+            try:
+                for p in [tree, *tree.iterdir()]:
+                    try:
+                        os.chown(p, invoke_uid, -1)
+                    except OSError:
+                        pass  # root-only op; keep going (best-effort)
+                _log(f"run: {tree} chowned to uid={invoke_uid} (user-scope commands)")
+            except OSError as exc:
+                _log(
+                    f"run: WARN {sub} chown failed ({exc}) — user-scope commands may hit EACCES"
+                )
     _log(f"run: {health_dir} dirs in place (results/dedup/bench/workspaces/control)")
 
 
