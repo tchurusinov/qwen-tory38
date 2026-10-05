@@ -610,8 +610,8 @@ NULL reasoning_content in tool-loop history messages:
   is orthogonal: it fires on ANY tool-call step of a reasoning-off
   task, prompt aside.
 
-EXACT FIX (for the round-2 commit — write only, NOT applied in
-this PR's head; verified against the live 500 above):
+EXACT FIX (round-2 commit 2026-10-05 — APPLIED in this PR; the
+write-only draft below is now the landed code):
 
   Both tool-loop assistant feedback messages in
   bin/bonsai2-taskworker.py carry `content: answer or None` and

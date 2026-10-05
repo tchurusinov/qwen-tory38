@@ -461,6 +461,96 @@ class TestReasoningOffWire(_Base):
             "a record that carries reasoning_off must put it on the wire",
         )
 
+    def test_tool_loop_feedback_never_sends_null_when_reasoning_off(self) -> None:
+        # Second-run round-2 (the live 500, 2026-10-05, ARM C step 2):
+        # a tool-call step with EMPTY answer + EMPTY reasoning — the
+        # reasoning-off default; the write_file step in ARM C had 0
+        # content chars — must NEVER feed a null reasoning_content back
+        # into the history. The pin's message parser rejects a null
+        # reasoning_content in a tool-loop assistant message (HTTP 500,
+        # "type must be string, but is null"); content: null alone was
+        # tolerated in the isolated probes, so BOTH fields are pinned to
+        # "" — the exact shape ARM C's run used successfully.
+        seq = []
+
+        def _stream_chat_seq(port: int, ident: dict, body: dict) -> dict:
+            seq.append(1)
+            if len(seq) == 1:
+                return {
+                    "ok": True,
+                    "answer": "",
+                    "reasoning": "",
+                    "tool_call": {
+                        "id": "call-nullfix-1",
+                        "name": "bash",
+                        "arguments_raw": json.dumps({"cmd": "echo hi"}),
+                    },
+                    "usage": None,
+                    "finish_reason": "tool_calls",
+                    "cmpl_id": None,
+                }
+            return {
+                "ok": True,
+                "answer": "done",
+                "reasoning": "",
+                "tool_call": None,
+                "usage": None,
+                "finish_reason": "stop",
+                "cmpl_id": None,
+            }
+
+        self._write_cfg()
+        d = self._results()
+        H.ensure_results_dirs(d)
+        wd = self.tmp / "wd-nullfeedback"
+        wd.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "task_id": "t-nullfeedback-1",
+            "prompt": "null-feedback prompt",
+            "result_file": str(self.results / "t-nullfeedback-1.json"),
+            "state": "running",
+            "tools": "on",
+            "reasoning_off": True,
+            "workdir": str(wd),
+            "max_steps": 8,
+            "deadline_s": 30.0,
+            "port": 30101,
+            "instances_tried": [0],
+        }
+        H.write_task(d, rec)
+        with mock.patch.object(
+            W, "_stream_chat", side_effect=_stream_chat_seq
+        ) as mchat:
+            W._run_tool_loop(rec, 30101, {"alias": "a", "api_key": "k"}, d, {})
+        self.assertEqual(
+            H.read_task(d, "t-nullfeedback-1")["state"],
+            "done",
+            "the loop must complete: tool step + final answer",
+        )
+        bodies = [c.args[2] for c in mchat.call_args_list]
+        self.assertEqual(len(bodies), 2, "exactly two completions")
+        # the step-2 request's history carries the step-1 tool-call
+        # assistant message (the tool-result feedback path, SITE 2 in
+        # the fixes doc) — its empty fields must be "", never None.
+        fb = [
+            m
+            for m in bodies[1].get("messages", [])
+            if m.get("role") == "assistant" and m.get("tool_calls")
+        ]
+        self.assertEqual(len(fb), 1, "the tool-call feedback message is in history")
+        self.assertEqual(
+            fb[0].get("content"),
+            "",
+            'empty answer must serialize as "" not null (the pin tolerates '
+            'null here, but the successful ARM C wire sent "")',
+        )
+        self.assertEqual(
+            fb[0].get("reasoning_content"),
+            "",
+            "second-run round-2: a null reasoning_content in a tool-loop "
+            'assistant message makes the pin 500 — "" is the wire shape',
+        )
+
     def test_preloop_body_carries_reasoning_effort_when_record_arms_it(self) -> None:
         # the --tools off path (the PONG class) gets reasoning-off too.
         self._write_cfg()

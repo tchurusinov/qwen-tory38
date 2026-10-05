@@ -1555,11 +1555,17 @@ def _run_tool_loop(
                 _log(f"{rec['task_id']}: -> failed ERR_TOOL_INVALID_CALL")
                 return 0
             # feed the error back to the model (the loop continues)
+            # Second-run round-2 (null-feedback 500, observed live 2026-10-05):
+            # the pin's message parser rejects a NULL reasoning_content in a
+            # tool-loop assistant message (HTTP 500 "type must be string,
+            # but is null"); with reasoning off the default, empty
+            # reasoning -> None -> null. Send "" (byte-equivalent for the
+            # model; matches the ARM C successful run's wire).
             messages.append(
                 {
                     "role": "assistant",
-                    "content": answer or None,
-                    "reasoning_content": reasoning or None,
+                    "content": answer or "",
+                    "reasoning_content": reasoning or "",
                     "tool_calls": [
                         {
                             "id": tc.get("id"),
@@ -1635,6 +1641,10 @@ def _run_tool_loop(
         tool_log.append(_tool_log_entry(steps, tc, res_tool))
 
         # append the tool result to the history (the loop continues)
+        # Second-run round-2 (null-feedback 500, observed live 2026-10-05):
+        # "" instead of None for the empty answer/reasoning fields — the
+        # pin 500s on a null reasoning_content in this exact message (see
+        # the S3.4 tool_invalid_max path above for the full note).
         if isinstance(res_tool.get("output"), str):
             out_text = res_tool["output"]
         else:
@@ -1642,8 +1652,8 @@ def _run_tool_loop(
         messages.append(
             {
                 "role": "assistant",
-                "content": answer or None,
-                "reasoning_content": reasoning or None,
+                "content": answer or "",
+                "reasoning_content": reasoning or "",
                 "tool_calls": [
                     {
                         "id": tc.get("id"),
