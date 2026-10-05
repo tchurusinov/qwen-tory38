@@ -7,8 +7,22 @@ that promotes queued tasks.
 
 Usage (the S3.2 surface, every flag specced):
   bonsai2-spawn [-p PROMPT_FILE | -i INLINE_PROMPT]
-                [--tools on|off] [--ctx N] [--deadline SECS]
-                [--out FILE] [--priority low|normal|high]
+                [--tools on|off] [--reasoning on|off] [--ctx N]
+                [--deadline SECS] [--out FILE] [--priority low|normal|high]
+
+Second-run remediation (2026-10-04):
+  * --reasoning on|off — the first-practical-run finding: at this pin
+    the subagent's FIRST completion on a full-file write is a 15-17K+
+    token reasoning block with no tool call inside any sane
+    cap+deadline. Reasoning is OFF by default (the record carries
+    reasoning_off; the worker sends reasoning_effort "none", which the
+    pinned fork parses client-side into enable_thinking=false).
+    --reasoning on is the explicit, logged exception.
+  * Large single-file generation (>~4 KB expected output): pre-seed a
+    skeleton in --workdir and prompt for edits, not authorship
+    (second-run rule — the winning task modified ~1.2 KB of a
+    pre-seeded file; the losses generated 9-12 KB from an empty
+    workdir).
 
 Routing (S3.3, locked): the least-loaded healthy instance with a free
 slot (tie-break lowest i); `bunloaded` never appears in the health

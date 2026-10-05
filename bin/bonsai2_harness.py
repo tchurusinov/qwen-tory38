@@ -217,6 +217,16 @@ CONFIG_DEFAULTS: dict = {
     "task_default_deadline_s_tools_on": 1800,
     "arm_reasoning_control": True,  # F11: arm the engine's reasoning control
     "cancel_on_deadline": True,  # F11: reaper best-effort engine cancel
+    # --- second-practical-run remediation (2026-10-04) ---
+    # Second-run: reasoning OFF by default. At this pin the deepseek
+    # reasoning template emits a 15-17K+ token pre-tool reasoning block
+    # on a full-file write — the first completion outruns every sane
+    # cap+deadline pairing. The pinned fork parses
+    # `reasoning_effort: "none"` client-side (enable_thinking=false,
+    # kwarg erased), so the worker's completions carry it when the record
+    # says reasoning_off (spawn --reasoning off else this default).
+    # ON is the explicit, logged exception.
+    "task_reasoning_off": True,
 }
 _INT_KEYS = (
     "dedup_ttl_h",
@@ -394,7 +404,8 @@ def load_config(env: dict | None = None) -> dict:
             cfg[key] = val
     # F11 bool flags: only valid as real booleans (a non-bool value is a
     # ConfigError -> exit 2, same discipline as tool_execution's locked set).
-    for key in ("arm_reasoning_control", "cancel_on_deadline"):
+    # task_reasoning_off (second-run) joins the same gate.
+    for key in ("arm_reasoning_control", "cancel_on_deadline", "task_reasoning_off"):
         if key in data:
             val = data[key]
             if not isinstance(val, bool):
@@ -1361,6 +1372,62 @@ def read_result(rec: dict) -> dict:
 # --------------------------------------------------------------------------
 # commands (MAP 3.2 + 3.3)
 # --------------------------------------------------------------------------
+def progress_report(d: dict, task_ids: list[str] | None = None) -> list[dict]:
+    """Second-run remediation (2026-10-04): the progress probe.
+
+    Fire-and-collect gave main no mid-run visibility — a task is learned
+    to be stuck only when the deadline fires. For each LIVE task
+    (non-terminal state; `task_ids` filters when given) report:
+
+      state / steps / tool_calls (tool_log length) / deadline_s /
+      deadline_remaining_s (running_ts + deadline_s - now; negative =
+      past deadline, about to be reaped) / cmpl_id (from the worker's
+      F11 sidecar `<tasks>/<task_id>.cmpl.json` when present — the
+      caller can read the engine's own per-slot decode counters for that
+      completion without parsing engine logs).
+
+    Read-only: the probe never mutates records. A record without
+    running_ts (queued) reports deadline_remaining_s as None. A cmpl
+    sidecar that is missing/unreadable reports cmpl_id None (nothing in
+    flight recorded yet — the first completion may still be prefill).
+    """
+    now = time.time()
+    out: list[dict] = []
+    for rec in iter_tasks(d):
+        tid = rec.get("task_id")
+        if not isinstance(tid, str) or not tid:
+            continue
+        if task_ids is not None and tid not in task_ids:
+            continue
+        if rec.get("state") in TERMINAL_STATES:
+            continue
+        deadline_s = rec.get("deadline_s")
+        running_ts = rec.get("running_ts")
+        remaining = None
+        if (
+            running_ts is not None
+            and isinstance(deadline_s, (int, float))
+            and not isinstance(deadline_s, bool)
+        ):
+            remaining = float(running_ts) + float(deadline_s) - now
+        sidecar = _read_cmpl_sidecar(Path(d["tasks"]), tid)
+        out.append(
+            {
+                "task_id": tid,
+                "state": rec.get("state"),
+                "steps": rec.get("steps") or 0,
+                "tool_calls": len(rec.get("tool_log") or []),
+                "deadline_s": deadline_s,
+                "deadline_remaining_s": remaining,
+                "cmpl_id": sidecar.get("cmpl_id")
+                if isinstance(sidecar, dict)
+                else None,
+            }
+        )
+    out.sort(key=lambda r: str(r.get("task_id")))
+    return out
+
+
 def _recomputed_instances(doc: dict, d: dict) -> list[dict]:
     """The S3.1 status `instances` list with slots_in_use RECOMPUTED from
     the task records (the manager's own document carries the field for
@@ -1379,20 +1446,64 @@ def cmd_status(argv: list[str], env: dict | None = None) -> int:
     """bonsai2-status — the S3.1 status schema, exit 0/82/84 (+2 on a
     malformed harness.yaml). main_healthy is LIVE-probed (the document
     value may lag by up to a probe cycle); main_only_reason is present
-    ONLY when instances: 0 (the S2.4 contract, from the document)."""
-    if argv:
+    ONLY when instances: 0 (the S2.4 contract, from the document).
+
+    Second-run remediation (2026-10-04): `--tasks [TASK_ID ...]` prints
+    the progress probe (progress_report) instead of the pool status —
+    the cheap mid-run "is it making progress?" signal. No flag = the
+    current pool-status behavior, byte-identical."""
+    task_ids: list[str] | None = None
+    tasks_flag = False
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--tasks":
+            tasks_flag = True
+            task_ids = []
+            i += 1
+            while i < len(argv) and not argv[i].startswith("--"):
+                task_ids.append(argv[i])
+                i += 1
+            if i < len(argv):
+                # a second flag after the task-id list (--tasks twice, or
+                # --tasks ... --bogus) is malformed: the probe takes at
+                # most one --tasks.
+                return emit(
+                    {
+                        "error": "ERR_ARGS",
+                        "detail": f"status: unexpected argument {argv[i]!r} after --tasks",
+                    },
+                    EXIT_ARGS,
+                    "status: unexpected argument after --tasks",
+                )
+            break
+        # a first argument that is NOT --tasks (status takes no
+        # arguments other than the probe flag) — malformed.
         return emit(
             {
                 "error": "ERR_ARGS",
-                "detail": f"status takes no arguments (got: {argv!r})",
+                "detail": f"status takes no arguments (got: {argv[i]!r})",
             },
             EXIT_ARGS,
             "status takes no arguments",
         )
+    if tasks_flag and task_ids == []:
+        # the bare `--tasks` (no explicit IDs): the probe reports ALL
+        # live tasks — the bracketed `--tasks [TASK_ID ...]` form's
+        # primary use ("is it making progress?"). The filter is None;
+        # an explicit-but-empty list would filter everything out.
+        task_ids = None
     try:
         cfg = load_config(env)
     except ConfigError as exc:
         return emit({"error": "ERR_ARGS", "detail": str(exc)}, EXIT_ARGS, str(exc))
+    if tasks_flag:
+        # The progress probe: no main-endpoint probe (the task records are
+        # the data), no health.json requirement (a live probe still works
+        # while the manager is down — the probe is read-only).
+        d = results_dirs(cfg)
+        ensure_results_dirs(d)
+        rows = progress_report(d, task_ids)
+        return emit({"tasks": rows}, 0, None)
     try:
         doc = load_health_doc(env=env)
     except HealthMissing as exc:
@@ -1514,7 +1625,7 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
 
     [-p PROMPT_FILE | -i INLINE_PROMPT] [--tools on|off] [--ctx N]
     [--deadline SECS] [--max-steps N] [--max-tokens N] [--workdir DIR]
-    [--out FILE] [--priority low|normal|high]
+    [--out FILE] [--priority low|normal|high] [--reasoning on|off]
 
     G3 PR#18 r12 P1 (verification): the `--tools` default ON means every
     hermetic spawn test implicitly exercises the tool-loop path (auto
@@ -1542,6 +1653,7 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
         "workdir": None,
         "out": None,
         "priority": "normal",
+        "reasoning_off": None,  # second-run: None = use the cfg default
     }
     i = 0
     while i < len(argv):
@@ -1571,6 +1683,16 @@ def _parse_spawn_args(argv: list[str]) -> dict | str:
             if i + 1 >= len(argv) or argv[i + 1] not in ("on", "off"):
                 return "ERR_ARGS: --tools must be on|off"
             args["tools"] = argv[i + 1]
+            i += 2
+            continue
+        if a == "--reasoning":
+            # Second-run (2026-10-04): the reasoning ON/OFF lever. The
+            # default is OFF (task_reasoning_off) — ON is the explicit,
+            # logged exception. --reasoning off is the default; on is the
+            # exception. Maps to the record's reasoning_off.
+            if i + 1 >= len(argv) or argv[i + 1] not in ("on", "off"):
+                return "ERR_ARGS: --reasoning must be on|off"
+            args["reasoning_off"] = argv[i + 1] == "off"
             i += 2
             continue
         if a == "--ctx":
@@ -1745,15 +1867,26 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
     # MAP 3.5 / S3.4 spawn idempotency (dedup): the dedup key is the prompt
     # content hash + --tools/--ctx/--priority (NOT --out — it only selects
     # where the result file is written). The CLAIM + record happen under a
-    # per-key lock at record creation (below); after releasing it, the
-    # entry is RE-READ: if a concurrent same-key spawn's entry replaced it
+    # per-key lock at record creation (below); after releasing it,
+    # the entry is RE-READ: if a concurrent same-key spawn's entry replaced it
     # in the gap, this spawn no-ops to that task (no double slot).
+    # Second-run (2026-10-04): --reasoning is part of "everything that
+    # determines what the task will do" (same class as --tools) — the
+    # RESOLVED reasoning_off (flag else the S3.6 task_reasoning_off
+    # default) is keyed so a reasoning-on spawn of a prior reasoning-off
+    # prompt is a distinct task, not a dedup no-op.
+    reasoning_off_resolved = bool(
+        parsed["reasoning_off"]
+        if parsed["reasoning_off"] is not None
+        else cfg.get("task_reasoning_off", True)
+    )
     dedup_key = json.dumps(
         {
             "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "tools": parsed["tools"],
             "ctx": parsed["ctx"],
             "priority": parsed["priority"],
+            "reasoning_off": reasoning_off_resolved,
             # S3.4 (the 2026-09-25 spec amendment, A4): --workdir is part of
             # "everything that determines what the task will do" — same
             # prompt in two workdirs is two different tasks.
@@ -2026,6 +2159,13 @@ def cmd_spawn(argv: list[str], env: dict | None = None, poll_s: float = 0.25) ->
                 # is the record, not a config re-read) so the worker knows
                 # whether to add reasoning_control:true to the body.
                 "arm_reasoning_control": bool(cfg.get("arm_reasoning_control", True)),
+                # Second-run remediation (2026-10-04): reasoning off by
+                # default — threaded into every completion body as
+                # `reasoning_effort: "none"` (the pinned fork's
+                # client-side knob). Flag value else the S3.6
+                # task_reasoning_off default (resolved above for the
+                # dedup key; same resolution here).
+                "reasoning_off": reasoning_off_resolved,
                 "created_ts": now,
                 "worker_pid": None,
                 "instances_tried": [],

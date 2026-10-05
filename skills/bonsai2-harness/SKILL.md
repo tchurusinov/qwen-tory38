@@ -465,6 +465,84 @@ contention with the bench. No charge-backs in v1.
   manager-mediated — while the manager is down, every pool operation
   (spawn/collect/unload/reload) answers 84.
 
+## Main-loop guardrails (second-run adjudication, 2026-10-04)
+
+The second practical run (evidence-ledger-second-practical-run.md)
+violated the pipeline it should have codified: token-heavy main-side
+ledger generation while the pool was loaded, open-ended re-spawns of the
+same shape at changing caps, and "artifact done" conflated with "run
+successful." Each rule below is a hard rule with its evidence anchor.
+
+1. **PIPELINE (mandatory order):**
+   THINK (task + how to delegate + DoDs + workdir prep, pool UNLOADED)
+   → DELEGATE (spawn the round; while the pool is loaded main does ONLY:
+   short ledger entries, glue work — index/css/landing prebuild, wiring
+   — and next-round prompt prep) → subagents FINISH → UNLOAD the pool
+   → main TEST/RUN/VERIFY at full bandwidth (the F8 order, made
+   mandatory: collect → unload → verify; no verification pass while the
+   pool is loaded) → spawn the NEXT round. No token-heavy main-side
+   generation while the pool is loaded (violated in the second run at
+   18:16 — ledger generation on three loaded-pool turns halved main's
+   t/s exactly as the t/s-halving doctrine warns).
+2. **PRE-DELEGATION GATE:** the delegation plan (task, DoD, workdir
+   contents incl. any seeded skeleton) is written BEFORE the spawn.
+   While the pool is loaded, allowed main work is the set in rule 1 —
+   nothing else.
+3. **BOUNDED RETRY:** max 2 rounds per task shape. Two losses at the
+   SAME settings → re-shape (scaffold/split, below) or take it to main.
+   No round 3 on an unchanged shape. (The second run re-litigated the
+   cap+deadline every round, so "two losses at the right settings" was
+   never cleanly counted; with reasoning off as the new default, the
+   settings are pinned.)
+4. **RUN SUCCESS CRITERION:** a run is "successful" only when subagents
+   (not main) deliver the load-bearing artifacts. Every main-side
+   fallback is logged as an infra loss, not a run win. "Artifact done"
+   and "run successful" are two separate claims.
+5. **REASONING OFF BY DEFAULT (second-run):** `--reasoning off` is the
+   default (the record's `reasoning_off`, spawned with the
+   `task_reasoning_off` cfg default ON → completions carry
+   `reasoning_effort: "none"`). ON is the explicit, logged exception
+   (`--reasoning on` in the spawn + the ledger entry). At this pin the
+   model's pre-tool reasoning on a full-file write is 15-17K+ tokens —
+   bigger than even the 16384 cap, and it does not contain the tool
+   call.
+6. **DELEGATION-SIZE RULE (second-run, 2026-10-04):** the differentiator
+   is expected OUTPUT size, not prompt size (the second run's winner
+   and losers had nearly identical prompt sizes; the winner modified
+   ~1.2 KB of a pre-seeded file, the losers generated 9-12 KB from an
+   empty workdir). Expected output > ~4 KB: pre-seed a known-good
+   SKELETON in the task workdir BEFORE spawn (main writes it at THINK
+   time; it must already pass the DoD's executable test, e.g.
+   `node --check` of an empty-shell script), and the prompt says
+   "fill/edit this file," not "write this file." For large files, SPLIT
+   THE WRITE into several small tool calls in the prompt itself: "step
+   1 write <head>+CSS, step 2 the script skeleton, step 3 the game loop
+   / render code, step 4 run the DoD test and fix until exit 0" — many
+   small bounded completions instead of one 15-25K-token bet. Expected
+   output < ~2 KB, or a pure modification/verification: plain prompt,
+   no seed. This is prompt/workdir discipline, not new worker code —
+   the tool loop already executes exactly this shape (the run's W0
+   read → write → verify loop is the proof).
+7. **PROGRESS PROBE:** while the pool is loaded, main polls
+   `bonsai2-status --tasks` every ~2-3 min (second-run's new command:
+   per-task state/steps/tool_calls/deadline_remaining_s/cmpl_id,
+   read-only, no health.json needed). steps==0 && tool_calls==0 with
+   <50% of the deadline remaining = "stuck in reasoning" → steer a
+   nudge or cancel+re-shape, instead of waiting for the reaper.
+8. **DEADLINE DISCIPLINE:** deadlines are computed from measured t/s ×
+   expected token size + margin, never guessed. Formula:
+   deadline_s = (first_completion_budget_tokens / tps_min) +
+   steps_budget × per_step_budget_tokens / tps_min + 300 s margin,
+   where tps_min is the MINIMUM per-task t/s observed on this box at the
+   expected contention level (second run: 3.96-7.5 t/s; use 4.0 for a
+   loaded pool). The numbers that anchor it: a 15-17K-token first
+   completion @ ~4 t/s under contention ≈ 1800-2400 s for the FIRST
+   completion ALONE; with reasoning off the first completion should
+   drop to ~1-3K tokens, so the default 1800 s becomes adequate again —
+   re-bench after the second-run fixes land, don't pre-change the
+   constant. A spawn without an explicitly computed --deadline is a
+   guess and must say so in the ledger entry.
+
 ## Prompt templates (S4.1 — one proven template per S4.2 tool-loop row)
 
 The subagent is a text model with a toolset, not a second main agent:
@@ -514,6 +592,16 @@ what to write. Pair the spawn with `--max-tokens` sized to the files
 big one) and the default tool-loop deadline (1800 s) covers the whole
 loop. If a task still loses two consecutive rounds at the right cap +
 deadline, it is a main task (the S4.2 self-correcting rule).
+
+**EXECUTABLE DoD is part of the delegation (second-run, 2026-10-04):**
+every task prompt ships with an EXECUTABLE definition of done
+(`node --check` / a browser smoke / grep counts / a `python -c` assert).
+A prompt without an executable DoD is not delegated — the DoD is part
+of the delegation, not an annotation. The subagent must run the DoD
+itself and report the exit code; if it fails, fix and re-run (bounded,
+as the prompt names it). main re-runs the DoD itself on collect
+(ledger-first — the existing rule, now mandatory: a collect without a
+main-side re-run of the DoD is not a verified collect).
 
 ### T2 — test batch with structured report (S4.2 tool-loop row, [M10])
 

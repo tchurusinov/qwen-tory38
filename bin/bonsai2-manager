@@ -1329,7 +1329,21 @@ def reap_tasks_once(log=_log) -> list[str]:
         return []
     d = {"base": base, "tasks": base / "tasks", "locks": base / ".locks"}
     h = _load_harness_module()
-    return h.reap_stale(d, log=log)
+    # Second-run remediation (2026-10-04): the reaper pass used to run
+    # WITHOUT the harness config — a config that set cancel_on_deadline:
+    # false was silently IGNORED by the manager (reap_stale's
+    # default-True gate won over the missing cfg). The manager already
+    # reads harness.yaml in _results_dirs_from_harness_cfg; reusing
+    # load_config is one call per health cycle (negligible). A bad cfg
+    # must not kill the reaper pass (the pass's existing
+    # "fault-tolerant at the caller" contract) — swallow back to the
+    # pre-remediation cfg=None shape.
+    cfg = None
+    try:
+        cfg = h.load_config()
+    except Exception:  # noqa: BLE001 — a bad cfg must not kill the reaper pass
+        cfg = None
+    return h.reap_stale(d, log=log, cfg=cfg)
 
 
 # --------------------------------------------------------------------------
