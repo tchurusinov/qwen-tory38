@@ -610,6 +610,71 @@ NULL reasoning_content in tool-loop history messages:
   is orthogonal: it fires on ANY tool-call step of a reasoning-off
   task, prompt aside.
 
+EXACT FIX (for the round-2 commit — write only, NOT applied in
+this PR's head; verified against the live 500 above):
+
+  Both tool-loop assistant feedback messages in
+  bin/bonsai2-taskworker.py carry `content: answer or None` and
+  `reasoning_content: reasoning or None`. With reasoning OFF the
+  default, `reasoning` is "" -> None -> JSON null -> the pin's 500.
+  `content` can ALSO be None in exactly this shape (the write_file
+  step in ARM C had 0 content chars -> None), and the isolated
+  probes did not prove the pin tolerates content: null in the
+  same message that carries tool_calls — so fix BOTH fields to ""
+  (matches ARM C's successful shape exactly; byte-equivalent for
+  the model: an empty string and an absent/null text field render
+  the same in the chat template).
+
+  SITE 1 — the bad-tool-call error feedback (the S3.4
+  tool_invalid_max path, ~lines 1559-1562):
+    BEFORE:
+        {
+            "role": "assistant",
+            "content": answer or None,
+            "reasoning_content": reasoning or None,
+            "tool_calls": [...]
+        }
+    AFTER:
+        {
+            "role": "assistant",
+            "content": answer or "",
+            "reasoning_content": reasoning or "",
+            "tool_calls": [...]
+        }
+
+  SITE 2 — the tool-result feedback (the loop-continues path,
+  ~lines 1643-1646, the site ARM C proved 500s at step 2):
+    BEFORE:
+        {
+            "role": "assistant",
+            "content": answer or None,
+            "reasoning_content": reasoning or None,
+            "tool_calls": [...]
+        }
+    AFTER:
+        {
+            "role": "assistant",
+            "content": answer or "",
+            "reasoning_content": reasoning or "",
+            "tool_calls": [...]
+        }
+
+  Nothing else changes: the `out_text` tool message (the raw tool
+  output string) is already a str; the stream-side accumulation
+  (line 383-384) is read-only; the pre-loop path never emits these
+  messages.
+
+  Hermetic case (tests/test_remediation_second_practical_run.py,
+  next to the existing _stream_chat-mock tool-loop tests): a record
+  with reasoning_off: True whose step returns a tool call with an
+  EMPTY answer + EMPTY reasoning; assert the tool-result feedback
+  assistant message appended to the history carries
+  content == "" AND reasoning_content == "" (never None) — i.e.
+  the wire can never contain null in either field when the
+  reasoning-off default leaves them empty. The existing
+  TestReasoningOffWire / TestBoundedNudge cases stay untouched
+  (they assert the request body, not the feedback history).
+
 SCOPE of this observation: single instance, idle pool (no
 contention), no manager (the loop was driven host-side, not via
 bonsai2-spawn). The post-merge full acceptance (the four lost
