@@ -10,7 +10,7 @@ Source: two independent code-review reports on commit `b17eed0`
 
 Both reviewed the same commit; findings were de-duplicated and ranked.
 This file is the consolidated **fix list for the integration branch**
-`integration/consolidated-review-fixes` (branched from `main` @ b17eed0).
+`integration` (branched from `main` @ b17eed0).
 
 Selected for implementation (user decision 2026-10-06):
 
@@ -1732,9 +1732,9 @@ the 10; `claim_slot`'s iter_tasks pass sees 490.
 
 ## 7. Directives — how the project proceeds on this branch
 
-**Branch & merge model.** All work on `integration/consolidated-review-fixes`
+**Branch & merge model.** All work on `integration`
 (off `main` @ b17eed0). `main` stays untouched until you merge. Each
-item F01–F27 lands as its own PR (one reviewable unit, own DOD per the
+item F01–F30 lands as its own PR (one reviewable unit, own DOD per the
 AGENTS.md PR-body contract, own `./scripts/gate.sh` + `review.sh`
 round). Recommended landing order (each unblocks the next):
 
