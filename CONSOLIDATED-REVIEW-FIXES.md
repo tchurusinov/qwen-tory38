@@ -19,7 +19,7 @@ Selected for implementation (user decision 2026-10-06):
 - Tier 3 — security (F14–F17)
 - Tier 5 — gate & tests (F18–F19)
 - Tier 6 — skill (F20, F21)
-- Tier 7 — installer / ops robustness + smaller defects (F22–F26)
+- Tier 7 — installer / ops robustness + smaller defects (F22–F30)
 
 Excluded (bench tiers 4 and 8): bench timing/rubric/audit defects
 (Fable B1–B14, Sol F11) and docs (Fable D1). The bench stays as-is; its
@@ -1313,8 +1313,8 @@ passes with try/except: `record_bfailed_causes`, `process_control`,
 response body, a JSON list where a dict is expected, or a full `/run`
 raises out of the loop and the manager dies. No `subprocess.run` in the
 manager has a timeout, so a hung `docker inspect` or `systemctl` blocks
-the loop forever. With F19-era health.json (no timestamp) nothing
-notices.
+the loop forever. With health.json carrying no timestamp (the pre-F25
+state) nothing notices a dead manager.
 
 **CURRENT — `bin/bonsai2-manager:2563–2611` (unprotected region):**
 
@@ -1567,6 +1567,169 @@ the detail.
 
 ---
 
+### F28 — One down instance must not turn a queueable spawn into a hard failure
+
+**Problem (Fable C7).** When no healthy instance has a free slot,
+`route_target`'s fallback picks from ALL instances whose ctx fits —
+including `bfailed`/`bdown` ones. They carry no load, so the selection
+wins, and spawn returns exit 4 (`ERR_ENGINE_OOM` on a bfailed
+engine-cause) or exit 3 (bdown) instead of queueing the task on the
+busy-but-healthy instance.
+
+**CURRENT — `bin/bonsai2_harness.py:812–815, :831` (route_target):**
+
+```python
+    fit = [e for e in instances if ctx_need is None or (_inst_ctx(e) or 0) >= ctx_need]
+    pool = fit if fit else instances
+    routable = [e for e in pool if e.get("state") in ROUTABLE_STATES]
+    free = [e for e in routable if running[e.get("i")] < _inst_total(e)]
+...
+    cand = min(pool, key=lambda e: (charged.get(e.get("i"), 0), e.get("i", 0)))
+```
+
+`cand` is taken from `pool` (all ctx-fit instances), not from `routable`.
+
+**EXEMPLARY:**
+
+```python
+    # F28: the QUEUE fallback must land on a ROUTABLE instance (healthy /
+    # degraded / busy) — bfailed and bdown targets make a queueable spawn
+    # a hard failure (exit 4/3) even though a busy healthy instance would
+    # have simply queued the task. Only when NO routable instance exists
+    # does the bfailed-cause exit-4 path apply.
+    cand_pool = routable if routable else pool
+    cand = min(cand_pool, key=lambda e: (charged.get(e.get("i"), 0), e.get("i", 0)))
+```
+
+(the `ERR_CTX_TOO_LONG` and bfailed-engine-cause branches re-evaluate on
+`cand_pool` likewise).
+
+**Test.** Instance 0 healthy, 8/8 slots charged; instance 1 bdown.
+Spawn → exit 8 (queued on instance 0), NOT exit 3. With instance 0
+bfailed(engine OOM) and instance 1 bdown → exit 4 (the S1.5 cause
+survives). With instance 0 healthy+full and instance 1 degraded → exit 8
+(queues on the degraded one — routable).
+
+---
+
+### F29 — Tool output and files must be read bounded, not fully into memory
+
+**Problem (Sol F07 + Fable C9).** `_run_capped` collects ALL subprocess
+output via `communicate()` before truncating to `tool_output_max_kb`;
+`read_file` does `target.read_text()` with no size limit; `write_file`
+accepts unbounded `content`. A verbose command or a large file can
+consume far more host memory than the configured result limit — and
+these host-side workers sit OUTSIDE the container's memory cap, on the
+same unified pool the models need (the default workspace is on
+`/run`, RAM-backed).
+
+**CURRENT — `bin/bonsai2_tools.py:335` (`_run_capped`):**
+
+```python
+        out, _ = proc.communicate(input=input_bytes, timeout=timeout_s)
+```
+
+**CURRENT — `bin/bonsai2_tools.py:451` (`_tool_read_file`):**
+
+```python
+        content = target.read_text()
+```
+
+**FIX.**
+
+- `_run_capped`: the drain must be CONTINUOUS (that is the point), so
+  `communicate(timeout=...)` goes away — the timeout becomes a deadline
+  the drain loop checks itself. `Popen(stdout=PIPE)` as today, then:
+  loop `os.read` on the stdout fd into a bounded tail (keep the last
+  `tool_output_max_kb` bytes) while spooling each chunk to
+  `<workdir>/.tool-logs/step-<N>.log` (step number from ctx; the
+  spool path goes in the tool result's `detail`); on `deadline reached`
+  → `_kill_group(proc)` (existing SIGKILL-the-group path), then a final
+  short drain (2 s, as today) to collect post-kill bytes, and
+  `timed_out=True` + exit 124 convention. A non-timing-out run exits
+  the loop on EOF (`os.read` → b""), waits for exit status, returns the
+  tail.
+  `read_file`: cap at 256 KB — return the first 256 KB with
+  `detail: "truncated at 256 KB (N bytes total)"` and `ok: true`
+  (a model that gets a truncation note can re-read with a smaller scope
+  or use bash `sed -n`); add an optional `offset`/`limit` parameter to
+  the read_file schema (bytes) so the model can page. `write_file`:
+  reject `content` > 512 KB with
+  `ERR_TOOL_INVALID_CALL: content exceeds 512 KB — split the write`
+  (the model can chunk; a single 5 MB write is the bug, not the feature).
+
+**Test.** `bash` tool: `seq 1 2000000` (≈12 MB output) → returned
+output is exactly `tool_output_max_kb` (tail), the spool file exists
+under the workdir with the full 12 MB, tool_log entry names the spool.
+`read_file` on a 5 MB file → 256 KB + truncation detail. `write_file`
+with 600 KB content → ERR_TOOL_INVALID_CALL, file not created.
+
+---
+
+### F30 — The file lock's recovery code is dead or wrong (migrate to flock)
+
+**Problem (Fable C6).** `lock_wait` (O_EXCL + PID-in-file) has four
+defects:
+
+- `first_empty = None` is reset on EVERY pass of the retry loop, so the
+  0.5 s grace branch for an empty lock file can never fire — an empty
+  lock file (a PID write that failed on a full tmpfs) blocks that lock
+  forever, and every later spawn waits 2 s and exits 1 with a
+  traceback (no caller catches the `TimeoutError`).
+- `os.kill(pid, 0)` raising `PermissionError` is treated as "dead
+  holder" — a waiter can delete a LIVE lock that another user holds.
+- Two waiters can reclaim the same stale lock in the gap and both enter
+  the critical section.
+- Task records are never pruned, and `claim_slot` re-reads ALL of them
+  while holding the global `slot-claim` lock (`:939–955`) — lock hold
+  times grow with every task run since boot.
+
+**CURRENT — `bin/bonsai2_harness.py:689–709` (the retry loop + the
+dead grace branch):**
+
+```python
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            ...
+        except FileExistsError:
+            stale = False
+            first_empty = None
+            try:
+                content = path.read_text().strip()
+                ...
+```
+
+**FIX.**
+
+- Migrate `lock_wait` to `fcntl.flock`: `os.open(path, O_RDWR | O_CREAT)`
+  + `flock(fd, LOCK_EX | LOCK_NB)` in the retry loop with the same
+  deadline. The kernel releases the lock when the holder dies — the
+  empty-file wedge, the stale-PID heuristic, and the two-waiters race
+  all disappear (flock is per-open-file-description, not per-inode).
+  Keep the `{name}.lock` naming (it already serializes correctly);
+  delete the PID-write and the stale-reclaim branches.
+- Map the lock timeout to a closed-set exit: callers that can
+  legitimately wait (spawn's claim pass) surface it as exit 8 with
+  detail `slot-claim lock busy (manager mid-pass)` — reusing 8 keeps
+  the closed set unchanged (recorded as a spec amendment in the PR
+  body: "exit 8 now also means the claim lock was busy past the
+  budget"; the alternative is a new exit code 23, which is a bigger
+  amendment — take 8 unless the reviewer objects).
+- Prune: the reaper pass deletes TERMINAL task records older than 7
+  days (and their result files) — the rotation the workspaces already
+  have, applied to the task dir so `claim_slot`'s re-read stays bounded.
+
+**Test.** (a) Holder process takes the lock and is `kill -9`'d → the
+next `lock_wait` acquires within the deadline (no manual cleanup).
+(b) A live lock held by ANOTHER uid → the waiter waits, the file is
+NOT deleted. (c) Two concurrent waiters → exactly one enters the
+critical section (assert via a counter file with flock itself).
+(d) 500 terminal records, 10 older than 7 days → reaper prunes exactly
+the 10; `claim_slot`'s iter_tasks pass sees 490.
+
+---
+
 ## 7. Directives — how the project proceeds on this branch
 
 **Branch & merge model.** All work on `integration/consolidated-review-fixes`
@@ -1584,8 +1747,12 @@ round). Recommended landing order (each unblocks the next):
    they share the cold-start test).
 5. F12 + F14 + F15 + F16 + F17 (deadline/tool security bundle).
 6. F22 + F23 + F24 + F25 + F26 (manager robustness bundle).
-7. F21 + F27 (progress visibility + edges).
-8. F20 (the v2 skill) LAST — it documents the post-fix code.
+7. F27 + F28 + F29 + F30 (edges, routing fallback, bounded tool I/O,
+   flock migration — F30 last of the bundle: the lock migration touches
+   every state write site, so it should land after the CAS work in step
+   2 and re-run the whole suite on top).
+8. F21 + F20 (progress visibility; the v2 skill LAST — it documents the
+   post-fix code).
 
 **SPEC retirement (done on this branch).** `SPEC.md` moved to
 `archive/SPEC.md` (git-mv, history preserved). A pointer file at the
@@ -1608,7 +1775,7 @@ box.
 
 **Definition of done for the BRANCH (the merge gate).** All of:
 
-- [ ] F01–F27 merged on the branch, each with its PR-body DOD +
+- [ ] F01–F30 merged on the branch, each with its PR-body DOD +
       spec-delta notes.
 - [ ] The full hermetic suite (F18's step 7) passes, and every fix has
       at least one regression test that fails on b17eed0 (record the

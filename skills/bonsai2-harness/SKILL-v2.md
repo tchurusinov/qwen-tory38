@@ -31,9 +31,13 @@ final branch test, not an intermediate one.
   non-interactive `sh -c` / the Python interpreter, scrubbed env, cwd =
   workdir, process-group killed at timeout. Tool timeout is clamped to
   `min(requested, tool_timeout_s, remaining task deadline)` — a tool can
-  never outlive its task. `read_file`/`write_file` have path + symlink
-  checks; `bash`/`python` do NOT (a `cat ../x` in bash escapes the
-  workdir — isolation is a follow-up, not a guarantee).
+  never outlive its task. Tool output is bounded: the model sees the
+  last `tool_output_max_kb` of output (full log is spooled to the
+  workdir, path in the tool result's detail). `read_file` returns at
+  most 256 KB (use `offset`/`limit` to page); `write_file` rejects
+  content over 512 KB (split the write). `read_file`/`write_file` have
+  path + symlink checks; `bash`/`python` do NOT (a `cat ../x` in bash
+  escapes the workdir — isolation is a follow-up, not a guarantee).
 - A task whose answer hit the output cap is collected `done` WITH
   `partial: true` — treat it as a partial artifact, never a complete one.
 - Unload acks carry `state: "ok"` ONLY when the stopped instances' ports
@@ -112,7 +116,8 @@ across tasks — there is no "stateful" mode).
   the task's context, don't raise the flag.
 - **8** — queue wait expired. The task is still queued and charged; the
   manager will start it on a free slot. Poll; re-spawn is safe (dedup
-  returns the same task).
+  returns the same task). (Exit 8 can also mean the global slot-claim
+  lock was busy past the budget — same action: poll.)
 - **20 done** — read `partial`: true → artifact is truncated at the cap;
   rerun with more budget or a smaller slice. false → accept only after
   your own acceptance run.
